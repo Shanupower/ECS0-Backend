@@ -1,0 +1,88 @@
+name: Deploy ECS Application
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        
+    - name: Install dependencies
+      run: |
+        npm install
+        cd ECS0 && npm install
+        
+    - name: Build frontend
+      run: |
+        cd ECS0 && npm run build
+        
+    - name: Deploy to server
+      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      env:
+        HOST: ${{ secrets.HOST }}
+        USERNAME: ${{ secrets.USERNAME }}
+        KEY: ${{ secrets.PRIVATE_KEY }}
+      run: |
+        # Install SSH client
+        sudo apt-get update
+        sudo apt-get install -y openssh-client
+        
+        # Setup SSH key
+        mkdir -p ~/.ssh
+        echo "$KEY" | tr -d '\r' > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
+        
+        # Create deployment package
+        tar -czf deployment.tar.gz --exclude=node_modules --exclude=.git --exclude=*.zip .
+        
+        # Upload to server
+        scp -i ~/.ssh/deploy_key deployment.tar.gz $USERNAME@$HOST:/tmp/
+        
+        # Deploy on server
+        ssh -i ~/.ssh/deploy_key $USERNAME@$HOST << 'EOF'
+          sudo -i bash << 'INNER_EOF'
+            # Stop current services
+            pm2 stop all
+            
+            # Backup current deployment
+            if [ -d "/root/ECS0-Project" ]; then
+              mv /root/ECS0-Project /root/ECS0-Project-backup-$(date +%Y%m%d-%H%M%S)
+            fi
+            
+            # Extract new deployment
+            mkdir -p /root/ECS0-Project
+            tar -xzf /tmp/deployment.tar.gz -C /root/ECS0-Project
+            
+            # Install dependencies
+            cd /root/ECS0-Project
+            npm install
+            cd ECS0
+            npm install
+            npm run build
+            
+            # Start services
+            cd /root/ECS0-Project
+            PORT=8080 pm2 start server.js --name ECS-Backend
+            cd ECS0
+            pm2 start serve --name ECS-Frontend -- -s dist -l 3001
+            
+            # Save PM2 configuration
+            pm2 save
+            
+            # Clean up
+            rm -f /tmp/deployment.tar.gz
+        INNER_EOF
+        EOF
