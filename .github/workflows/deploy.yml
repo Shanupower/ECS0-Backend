@@ -5,6 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch: # Allow manual deployment
 
 jobs:
   deploy:
@@ -12,12 +13,13 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       
     - name: Setup Node.js
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
         node-version: '18'
+        cache: 'npm'
         
     - name: Install dependencies
       run: |
@@ -31,9 +33,9 @@ jobs:
     - name: Deploy to server
       if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
       env:
-        HOST: ${{ secrets.HOST }}
-        USERNAME: ${{ secrets.USERNAME }}
-        KEY: ${{ secrets.PRIVATE_KEY }}
+        HOST: ${{ secrets.H_host }}
+        USERNAME: ${{ secrets.H_username }}
+        KEY: ${{ secrets.H_ssh_key }}
       run: |
         # Install SSH client
         sudo apt-get update
@@ -45,44 +47,16 @@ jobs:
         chmod 600 ~/.ssh/deploy_key
         ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
         
-        # Create deployment package
-        tar -czf deployment.tar.gz --exclude=node_modules --exclude=.git --exclude=*.zip .
+        # Test SSH connection
+        echo "🔑 Testing SSH connection..."
+        ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USERNAME@$HOST "echo 'SSH connection successful'"
         
-        # Upload to server
-        scp -i ~/.ssh/deploy_key deployment.tar.gz $USERNAME@$HOST:/tmp/
+        # Deploy using the deployment script on server
+        echo "🚀 Starting deployment on server..."
+        ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USERNAME@$HOST "sudo -i /root/deploy-server.sh"
         
-        # Deploy on server
-        ssh -i ~/.ssh/deploy_key $USERNAME@$HOST << 'EOF'
-          sudo -i bash << 'INNER_EOF'
-            # Stop current services
-            pm2 stop all
-            
-            # Backup current deployment
-            if [ -d "/root/ECS0-Project" ]; then
-              mv /root/ECS0-Project /root/ECS0-Project-backup-$(date +%Y%m%d-%H%M%S)
-            fi
-            
-            # Extract new deployment
-            mkdir -p /root/ECS0-Project
-            tar -xzf /tmp/deployment.tar.gz -C /root/ECS0-Project
-            
-            # Install dependencies
-            cd /root/ECS0-Project
-            npm install
-            cd ECS0
-            npm install
-            npm run build
-            
-            # Start services
-            cd /root/ECS0-Project
-            PORT=8080 pm2 start server.js --name ECS-Backend
-            cd ECS0
-            pm2 start serve --name ECS-Frontend -- -s dist -l 3001
-            
-            # Save PM2 configuration
-            pm2 save
-            
-            # Clean up
-            rm -f /tmp/deployment.tar.gz
-        INNER_EOF
-        EOF
+        # Verify deployment
+        echo "✅ Verifying deployment..."
+        ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USERNAME@$HOST "sudo -i pm2 status"
+        
+        echo "🎉 Deployment completed successfully!"
