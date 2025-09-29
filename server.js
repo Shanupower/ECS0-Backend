@@ -1141,27 +1141,90 @@ app.get('/api/customers', requireAuth, async (req, res) => {
 app.get('/api/customers/:id', requireAuth, async (req, res) => {
   try {
     const id = req.params.id
+    console.log(`[Customer Get] Fetching customer ID: ${id}, User: ${req.user.sub}`)
+    
+    // Validate and convert ID to number
+    if (!id || isNaN(Number(id))) {
+      console.log(`[Customer Get] Invalid customer ID: ${id}`)
+      return res.status(400).json({ error: 'invalid_customer_id', detail: 'Customer ID must be a valid number' })
+    }
+    
+    const customerId = Number(id)
+    console.log(`[Customer Get] Converted ID to number: ${customerId}`)
+    
+    // Check if customer exists
+    console.log(`[Customer Get] Searching for customer...`)
     const customers = await q(`
       FOR customer IN customers 
       FILTER customer.investor_id == @id
       LIMIT 1
       RETURN customer
-    `, { id })
+    `, { id: customerId })
     
-    if (!customers.length) return res.status(404).json({ error: 'not_found' })
-    
-    const customer = customers[0]
-    
-    // Check if user can access this customer (branch-based filtering)
-    const canAccess = await canAccessCustomer(req.user.sub, customer.relationship_manager)
-    if (!canAccess) {
-      return res.status(403).json({ error: 'forbidden', detail: 'Access denied - customer belongs to different branch' })
+    if (!customers.length) {
+      console.log(`[Customer Get] Customer not found: ${customerId}`)
+      return res.status(404).json({ error: 'not_found', detail: `Customer with ID ${customerId} not found` })
     }
     
+    const customer = customers[0]
+    console.log(`[Customer Get] Found customer: ${customer.investor_id} - ${customer.name || customer.investor_name}`)
+    
+    // Check if user can access this customer (branch-based filtering)
+    console.log(`[Customer Get] Checking access permissions...`)
+    try {
+      const canAccess = await canAccessCustomer(req.user.sub, customer.relationship_manager)
+      console.log(`[Customer Get] Access check result: ${canAccess}`)
+      
+      if (!canAccess) {
+        console.log(`[Customer Get] Access denied for user ${req.user.sub} to customer ${customerId}`)
+        return res.status(403).json({ 
+          error: 'forbidden', 
+          detail: 'Access denied - customer belongs to different branch',
+          customer_branch: customer.relationship_manager,
+          user_id: req.user.sub
+        })
+      }
+    } catch (accessError) {
+      console.error(`[Customer Get] Access check failed:`, accessError)
+      return res.status(500).json({ 
+        error: 'access_check_failed', 
+        detail: 'Failed to verify access permissions',
+        error_message: accessError.message
+      })
+    }
+    
+    console.log(`[Customer Get] Successfully returning customer ${customerId}`)
     res.json(customer)
+    
   } catch (error) {
-    console.error('Error fetching customer:', error)
-    res.status(500).json({ error: 'server_error', detail: error.message })
+    console.error(`[Customer Get] Error fetching customer ${req.params.id}:`, {
+      message: error.message,
+      stack: error.stack,
+      code: error.code,
+      errorNum: error.errorNum
+    })
+    
+    // Provide more specific error messages
+    let errorMessage = error.message
+    let statusCode = 500
+    
+    if (error.code === 1203) {
+      errorMessage = 'Database connection failed'
+      statusCode = 503
+    } else if (error.code === 400) {
+      errorMessage = 'Invalid query syntax'
+      statusCode = 500
+    } else if (error.message && error.message.includes('not found')) {
+      statusCode = 404
+    }
+    
+    res.status(statusCode).json({ 
+      error: 'server_error', 
+      detail: errorMessage,
+      error_code: error.code,
+      error_num: error.errorNum,
+      customer_id: req.params.id
+    })
   }
 })
 
