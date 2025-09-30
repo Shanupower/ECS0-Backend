@@ -4,8 +4,18 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "dev": "node --watch server.js",
     "setup-db": "node setup-arangodb.js",
-    "migrate-data": "node migrate-data.js"
+    "dump-data": "node scripts/dump-data.js",
+    "import-data": "node scripts/import-data.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop ecs-backend",
+    "pm2:restart": "pm2 restart ecs-backend",
+    "pm2:delete": "pm2 delete ecs-backend",
+    "pm2:status": "pm2 status",
+    "pm2:logs": "pm2 logs ecs-backend",
+    "deploy": "npm run setup-db && npm run import-data && npm run pm2:start",
+    "test": "echo \"No tests specified\" && exit 0"
   },
   "dependencies": {
     "arangojs": "^10.1.2",

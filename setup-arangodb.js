@@ -8,10 +8,11 @@ const {
   ARANGO_DATABASE = 'ecs_backend'
 } = process.env
 
+// Connect to system database first to create our database
 const db = new Database({
   url: ARANGO_URL,
   auth: { username: ARANGO_USERNAME, password: ARANGO_PASSWORD },
-  databaseName: ARANGO_DATABASE
+  databaseName: '_system'  // Connect to system database first
 })
 
 async function setupDatabase() {
@@ -30,8 +31,12 @@ async function setupDatabase() {
       }
     }
     
-    // Switch to the database
-    db.useDatabase(ARANGO_DATABASE)
+    // Create a new connection to our database
+    const appDb = new Database({
+      url: ARANGO_URL,
+      auth: { username: ARANGO_USERNAME, password: ARANGO_PASSWORD },
+      databaseName: ARANGO_DATABASE
+    })
     
     // Create collections
     const collections = [
@@ -52,12 +57,18 @@ async function setupDatabase() {
         options: {
           keyOptions: { type: 'autoincrement' }
         }
+      },
+      {
+        name: 'branches',
+        options: {
+          keyOptions: { type: 'autoincrement' }
+        }
       }
     ]
     
     for (const collection of collections) {
       try {
-        await db.createCollection(collection.name, collection.options)
+        await appDb.createCollection(collection.name, collection.options)
         console.log(`Collection '${collection.name}' created successfully`)
       } catch (error) {
         if (error.errorNum === 1207) { // Collection already exists
@@ -123,12 +134,23 @@ async function setupDatabase() {
         collection: 'receipts',
         type: 'persistent',
         fields: ['product_category']
+      },
+      {
+        collection: 'branches',
+        type: 'persistent',
+        fields: ['branch_name'],
+        unique: true
+      },
+      {
+        collection: 'branches',
+        type: 'persistent',
+        fields: ['is_active']
       }
     ]
     
     for (const index of indexes) {
       try {
-        const collection = db.collection(index.collection)
+        const collection = appDb.collection(index.collection)
         await collection.ensureIndex({
           type: index.type,
           fields: index.fields,

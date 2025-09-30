@@ -12,27 +12,41 @@ yarn-error.log*
 .env.production.local
 
 # Logs
-logs
+logs/
 *.log
-arangodb.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
 
 # Runtime data
-pids
+pids/
 *.pid
 *.seed
 *.pid.lock
 
 # Coverage directory used by tools like istanbul
 coverage/
+*.lcov
 
 # nyc test coverage
 .nyc_output
 
 # Dependency directories
+node_modules/
 jspm_packages/
 
 # Optional npm cache directory
 .npm
+
+# Optional eslint cache
+.eslintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
 
 # Optional REPL history
 .node_repl_history
@@ -45,43 +59,32 @@ jspm_packages/
 
 # dotenv environment variables file
 .env
+.env.test
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
 
-# next.js build output
+# Next.js build output
 .next
 
-# nuxt.js build output
+# Nuxt.js build / generate output
 .nuxt
+dist
 
-# vuepress build output
-.vuepress/dist
+# Gatsby files
+.cache/
+public
 
-# Serverless directories
-.serverless
+# Storybook build outputs
+.out
+.storybook-out
 
-# FuseBox cache
-.fusebox/
+# Temporary folders
+tmp/
+temp/
 
-# DynamoDB Local files
-.dynamodb/
-
-# Database files
-single8529/
-*.db
-*.sqlite
-
-# Uploads
-uploads/
-!uploads/.gitkeep
-
-# Temporary files
-*.tmp
-*.temp
-
-# IDE files
+# Editor directories and files
 .vscode/
 .idea/
 *.swp
@@ -97,36 +100,15 @@ uploads/
 ehthumbs.db
 Thumbs.db
 
-# Data files
-*.xlsx
-*.csv
-*.json
-!package*.json
-!ECS_Backend_Postman_Collection.json
+# PM2 logs
+.pm2/
 
-# Export files
-local_*.json
-results-*.json
+# Data dumps (optional - remove if you want to include data in git)
+# data/
 
-# Test files
-test-*.js
-debug-*.js
-analyze-*.js
-check-*.js
-clear-*.js
-create-*.js
-delete-*.js
-export-*.js
-fix-*.js
-import-*.js
-quick-*.js
-reimport-*.js
-simple-*.js
-update-*.js
-verify-*.js
-final-*.js
+# Uploads directory
+uploads/*
 
-# Frontend build
-ECS0/node_modules/
-ECS0/dist/
-ECS0/build/
+# Backup files
+*.backup
+*.bak

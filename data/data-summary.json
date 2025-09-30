@@ -1,0 +1,9 @@
+{
+  "timestamp": "2025-09-30T12:27:10.651Z",
+  "collections": {
+    "users": 77,
+    "customers": 28203,
+    "branches": 22
+  },
+  "note": "Password hashes excluded from users dump for security. Set default password 'password123' for all users during import."
+}
