@@ -5,6 +5,7 @@ A production-ready Node.js backend API for ECS Financial Services, built with Ex
 ## 🚀 Quick Deployment
 
 **One-Click EC2 Deployment:**
+
 ```bash
 git clone <your-repo-url>
 cd ECS0-Backend
@@ -47,10 +48,12 @@ See [DEPLOYMENT.md](./DEPLOYMENT.md) for complete deployment guide.
 ### Local Development
 
 1. **Prerequisites:**
+
    - Node.js 18.11.0+
    - ArangoDB 3.8+ (or Docker)
 
 2. **Setup:**
+
    ```bash
    git clone <repository-url>
    cd ECS0-Backend
@@ -75,14 +78,14 @@ Complete API documentation with 45+ endpoints available in [API-DOCUMENTATION.md
 
 ### Key Endpoints
 
-| Category | Endpoint | Description |
-|----------|----------|-------------|
-| **Auth** | `POST /api/auth/login` | User authentication |
-| **Users** | `GET /api/users` | User management (Admin) |
-| **Customers** | `GET /api/customers` | Customer listing with pagination |
-| **Branches** | `GET /api/branches` | Branch information |
-| **Stats** | `GET /api/stats/summary` | System statistics |
-| **Export** | `GET /api/export/customers` | Data export |
+| Category      | Endpoint                    | Description                      |
+| ------------- | --------------------------- | -------------------------------- |
+| **Auth**      | `POST /api/auth/login`      | User authentication              |
+| **Users**     | `GET /api/users`            | User management (Admin)          |
+| **Customers** | `GET /api/customers`        | Customer listing with pagination |
+| **Branches**  | `GET /api/branches`         | Branch information               |
+| **Stats**     | `GET /api/stats/summary`    | System statistics                |
+| **Export**    | `GET /api/export/customers` | Data export                      |
 
 ## 🏗️ Project Structure
 
@@ -112,21 +115,25 @@ ECS0-Backend/
 ## 🔧 Available Scripts
 
 ### Development
+
 - `npm run dev` - Development server with auto-reload
 - `npm start` - Production server
 
 ### Database
+
 - `npm run setup-db` - Set up ArangoDB database and collections
 - `npm run dump-data` - Export data to JSON files
 - `npm run import-data` - Import data from JSON files
 
 ### PM2 Management
+
 - `npm run pm2:start` - Start with PM2
 - `npm run pm2:restart` - Restart application
 - `npm run pm2:stop` - Stop application
 - `npm run pm2:logs` - View logs
 
 ### Deployment
+
 - `npm run deploy` - Complete deployment (setup + import + start)
 
 ## 🔒 Security Features
@@ -143,18 +150,19 @@ ECS0-Backend/
 
 ### Collections & Indexes
 
-| Collection | Key Features | Indexes |
-|------------|--------------|---------|
-| **users** | Authentication, roles, branches | `emp_code` (unique), `is_active` |
-| **customers** | Investor data, relationships | `investor_id` (unique), `pan` (unique, sparse) |
-| **branches** | Location data, managers | `branch_name` (unique), `is_active` |
-| **receipts** | Transaction records | `user_id`, `emp_code`, `date`, `is_deleted` |
+| Collection    | Key Features                    | Indexes                                        |
+| ------------- | ------------------------------- | ---------------------------------------------- |
+| **users**     | Authentication, roles, branches | `emp_code` (unique), `is_active`               |
+| **customers** | Investor data, relationships    | `investor_id` (unique), `pan` (unique, sparse) |
+| **branches**  | Location data, managers         | `branch_name` (unique), `is_active`            |
+| **receipts**  | Transaction records             | `user_id`, `emp_code`, `date`, `is_deleted`    |
 
 ## 🌐 Production Deployment
 
 ### EC2 Ubuntu Deployment
 
 1. **Run deployment script:**
+
    ```bash
    ./deploy-ec2.sh
    ```
@@ -169,12 +177,12 @@ ECS0-Backend/
 
 ### Environment Configuration
 
-| Variable | Production Value | Description |
-|----------|------------------|-------------|
-| `PORT` | 8080 | Server port |
-| `NODE_ENV` | production | Environment |
-| `ARANGO_URL` | http://localhost:8529 | Database URL |
-| `JWT_SECRET` | [secure-key] | JWT signing secret |
+| Variable     | Production Value      | Description        |
+| ------------ | --------------------- | ------------------ |
+| `PORT`       | 8080                  | Server port        |
+| `NODE_ENV`   | production            | Environment        |
+| `ARANGO_URL` | http://localhost:8529 | Database URL       |
+| `JWT_SECRET` | [secure-key]          | JWT signing secret |
 
 ## 📈 Performance & Monitoring
 
@@ -189,12 +197,14 @@ ECS0-Backend/
 ### Common Issues
 
 1. **Application not starting:**
+
    ```bash
    npm run pm2:status
    npm run pm2:logs
    ```
 
 2. **Database connection issues:**
+
    ```bash
    curl http://localhost:8080/health
    ```
