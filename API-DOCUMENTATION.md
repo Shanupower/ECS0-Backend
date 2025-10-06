@@ -168,12 +168,61 @@ Authorization: Bearer <your-jwt-token>
 
 ### GET `/api/customers/search`
 
-**Description**: Search customers
+**Description**: Search customers with enhanced pagination and filtering
 **Auth Required**: Yes
 **Query Parameters**:
 
-- `q`: Search query
-- `limit`: Result limit (default: 10)
+- `q`: Search query (minimum 2 characters)
+- `limit`: Result limit (default: 20, max: 100)
+- `page`: Page number (default: 1)
+- `sort`: Sort field and direction (e.g., "name:asc", "investor_id:desc")
+
+**Response**:
+```json
+{
+  "customers": [...],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 1000,
+    "totalPages": 50,
+    "hasNext": true,
+    "hasPrev": false
+  },
+  "branch_filter": "HO",
+  "user_role": "branch_user"
+}
+```
+
+### GET `/api/customers/search/advanced`
+
+**Description**: Advanced customer search with fulltext search capabilities
+**Auth Required**: Yes
+**Query Parameters**:
+
+- `q`: Search query (minimum 2 characters)
+- `limit`: Result limit (default: 20, max: 100)
+- `page`: Page number (default: 1)
+- `sort`: Sort field and direction (default: "name:asc")
+- `useFulltext`: Use fulltext search (default: true)
+
+**Response**:
+```json
+{
+  "customers": [...],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 1000,
+    "totalPages": 50,
+    "hasNext": true,
+    "hasPrev": false
+  },
+  "branch_filter": "HO",
+  "user_role": "branch_user",
+  "search_method": "fulltext"
+}
+```
 
 ---
 

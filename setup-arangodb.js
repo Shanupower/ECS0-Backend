@@ -105,6 +105,58 @@ async function setupDatabase() {
         unique: true,
         sparse: true
       },
+      // Enhanced search indexes for customers
+      {
+        collection: 'customers',
+        type: 'persistent',
+        fields: ['name']
+      },
+      {
+        collection: 'customers',
+        type: 'persistent',
+        fields: ['email'],
+        sparse: true
+      },
+      {
+        collection: 'customers',
+        type: 'persistent',
+        fields: ['mobile'],
+        sparse: true
+      },
+      {
+        collection: 'customers',
+        type: 'persistent',
+        fields: ['relationship_manager']
+      },
+      {
+        collection: 'customers',
+        type: 'persistent',
+        fields: ['city'],
+        sparse: true
+      },
+      {
+        collection: 'customers',
+        type: 'persistent',
+        fields: ['state'],
+        sparse: true
+      },
+      {
+        collection: 'customers',
+        type: 'persistent',
+        fields: ['created_at']
+      },
+      {
+        collection: 'customers',
+        type: 'persistent',
+        fields: ['is_active']
+      },
+      // Text index for full-text search on customer fields
+      {
+        collection: 'customers',
+        type: 'fulltext',
+        fields: ['name'],
+        minLength: 2
+      },
       {
         collection: 'receipts',
         type: 'persistent',
@@ -151,13 +203,20 @@ async function setupDatabase() {
     for (const index of indexes) {
       try {
         const collection = appDb.collection(index.collection)
-        await collection.ensureIndex({
+        const indexOptions = {
           type: index.type,
           fields: index.fields,
           unique: index.unique,
           sparse: index.sparse
-        })
-        console.log(`Index created on ${index.collection}.${index.fields.join(', ')}`)
+        }
+        
+        // Add fulltext-specific options
+        if (index.type === 'fulltext') {
+          indexOptions.minLength = index.minLength || 2
+        }
+        
+        await collection.ensureIndex(indexOptions)
+        console.log(`${index.type} index created on ${index.collection}.${index.fields.join(', ')}`)
       } catch (error) {
         if (error.errorNum === 1207) { // Index already exists
           console.log(`Index on ${index.collection}.${index.fields.join(', ')} already exists`)

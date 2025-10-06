@@ -5,6 +5,358 @@ import { uploadMultiple } from '../middleware/upload.js'
 
 const router = express.Router()
 
+// Customer search endpoint for receipt creation (branch-filtered)
+router.get('/search', requireAuth, async (req, res) => {
+  try {
+    const { 
+      q: searchQuery, 
+      limit = '20', 
+      page = '1',
+      sort = 'name:asc'
+    } = req.query
+    
+    if (!searchQuery || searchQuery.trim().length < 2) {
+      return res.status(400).json({ error: 'invalid_query', detail: 'Search query must be at least 2 characters' })
+    }
+
+    // Get user's branch for filtering
+    const userBranch = await getUserBranch(req.user.sub)
+    const normalizedUserBranch = normalizeBranchName(userBranch)
+    const userRole = await q(`
+      FOR user IN users 
+      FILTER user._key == @id
+      LIMIT 1
+      RETURN user.role
+    `, { id: req.user.sub })
+
+    const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
+    
+    // Enhanced pagination with larger limits for search
+    const searchLimit = Math.min(100, Math.max(10, parseInt(limit, 10) || 20))
+    const searchPage = Math.max(1, parseInt(page, 10) || 1)
+    const searchOffset = (searchPage - 1) * searchLimit
+
+    // Enhanced sort options
+    const [sortCol, sortDirRaw] = String(sort).split(':')
+    const sortDir = String(sortDirRaw || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC'
+    const allowedSort = new Set(['name', 'investor_id', 'created_at'])
+    const orderBy = allowedSort.has(sortCol) ? sortCol : 'name'
+
+    let filterClause = ''
+    let bindVars = { 
+      searchQuery: `%${searchQuery}%`, 
+      limit: searchLimit, 
+      offset: searchOffset 
+    }
+
+    // Branch-based filtering (unless admin)
+    if (!isAdmin && normalizedUserBranch) {
+      filterClause = `FILTER customer.relationship_manager == @userBranch`
+      bindVars.userBranch = normalizedUserBranch
+    }
+
+    // Enhanced search filter with more fields and better performance
+    const searchFilter = `
+      FILTER (
+        LOWER(customer.name) LIKE LOWER(@searchQuery) 
+        OR customer.investor_id == @exactId
+        OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
+        OR LOWER(customer.email) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.city) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.state) LIKE LOWER(@searchQuery)
+      )
+    `
+    
+    // Add exact ID search for better performance when searching by ID
+    const exactId = parseInt(searchQuery.trim())
+    if (!isNaN(exactId)) {
+      bindVars.exactId = exactId
+    } else {
+      bindVars.exactId = -1 // Invalid ID to ensure no matches
+    }
+    
+    if (filterClause) {
+      filterClause += ` AND (
+        LOWER(customer.name) LIKE LOWER(@searchQuery) 
+        OR customer.investor_id == @exactId
+        OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
+        OR LOWER(customer.email) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.city) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.state) LIKE LOWER(@searchQuery)
+      )`
+    } else {
+      filterClause = searchFilter
+    }
+
+    const query = `
+      FOR customer IN customers
+      ${filterClause}
+      SORT customer.${orderBy} ${sortDir}
+      LIMIT @offset, @limit
+      RETURN {
+        investor_id: customer.investor_id,
+        name: customer.name,
+        pan: customer.pan,
+        mobile: customer.mobile,
+        email: customer.email,
+        address1: customer.address1,
+        city: customer.city,
+        state: customer.state,
+        relationship_manager: customer.relationship_manager,
+        created_at: customer.created_at
+      }
+    `
+
+    const countQuery = `
+      FOR customer IN customers
+      ${filterClause}
+      COLLECT WITH COUNT INTO total
+      RETURN total
+    `
+    
+    // Create separate bindVars for count query (without limit/offset)
+    const countBindVars = { ...bindVars }
+    delete countBindVars.limit
+    delete countBindVars.offset
+
+    const [customers, totalResult] = await Promise.all([
+      q(query, bindVars),
+      q(countQuery, countBindVars)
+    ])
+    
+    const total = totalResult[0] || 0
+    const totalPages = Math.ceil(total / searchLimit)
+    
+    res.json({
+      customers,
+      pagination: {
+        page: searchPage,
+        limit: searchLimit,
+        total,
+        totalPages,
+        hasNext: searchPage < totalPages,
+        hasPrev: searchPage > 1
+      },
+      branch_filter: !isAdmin ? normalizedUserBranch : 'all',
+      user_role: isAdmin ? 'admin' : 'branch_user'
+    })
+  } catch (error) {
+    console.error('Error searching customers:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// Advanced search endpoint with fulltext search capabilities
+router.get('/search/advanced', requireAuth, async (req, res) => {
+  try {
+    const { 
+      q: searchQuery, 
+      limit = '20', 
+      page = '1',
+      sort = 'name:asc',
+      useFulltext = 'true'
+    } = req.query
+    
+    if (!searchQuery || searchQuery.trim().length < 2) {
+      return res.status(400).json({ error: 'invalid_query', detail: 'Search query must be at least 2 characters' })
+    }
+
+    // Get user's branch for filtering
+    const userBranch = await getUserBranch(req.user.sub)
+    const normalizedUserBranch = normalizeBranchName(userBranch)
+    const userRole = await q(`
+      FOR user IN users 
+      FILTER user._key == @id
+      LIMIT 1
+      RETURN user.role
+    `, { id: req.user.sub })
+
+    const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
+    
+    // Enhanced pagination with larger limits for search
+    const searchLimit = Math.min(100, Math.max(10, parseInt(limit, 10) || 20))
+    const searchPage = Math.max(1, parseInt(page, 10) || 1)
+    const searchOffset = (searchPage - 1) * searchLimit
+
+    // Enhanced sort options
+    const [sortCol, sortDirRaw] = String(sort).split(':')
+    const sortDir = String(sortDirRaw || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC'
+    const allowedSort = new Set(['name', 'investor_id', 'created_at'])
+    const orderBy = allowedSort.has(sortCol) ? sortCol : 'name'
+
+    let query, bindVars
+
+    if (useFulltext === 'true') {
+      // Use fulltext search for better performance
+      query = `
+        FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
+        ${!isAdmin && normalizedUserBranch ? 'FILTER customer.relationship_manager == @userBranch' : ''}
+        SORT customer.${orderBy} ${sortDir}
+        LIMIT @offset, @limit
+        RETURN {
+          investor_id: customer.investor_id,
+          name: customer.name,
+          pan: customer.pan,
+          mobile: customer.mobile,
+          email: customer.email,
+          address1: customer.address1,
+          city: customer.city,
+          state: customer.state,
+          relationship_manager: customer.relationship_manager,
+          created_at: customer.created_at
+        }
+      `
+
+      bindVars = {
+        searchQuery: searchQuery.trim(),
+        limit: searchLimit,
+        offset: searchOffset
+      }
+
+      if (!isAdmin && normalizedUserBranch) {
+        bindVars.userBranch = normalizedUserBranch
+      }
+    } else {
+      // Fallback to regular search
+      let filterClause = ''
+      bindVars = { 
+        searchQuery: `%${searchQuery}%`, 
+        limit: searchLimit, 
+        offset: searchOffset 
+      }
+
+      // Branch-based filtering (unless admin)
+      if (!isAdmin && normalizedUserBranch) {
+        filterClause = `FILTER customer.relationship_manager == @userBranch`
+        bindVars.userBranch = normalizedUserBranch
+      }
+
+      // Enhanced search filter
+      const searchFilter = `
+        FILTER (
+          LOWER(customer.name) LIKE LOWER(@searchQuery) 
+          OR customer.investor_id == @exactId
+          OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
+          OR LOWER(customer.email) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.city) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.state) LIKE LOWER(@searchQuery)
+        )
+      `
+      
+      // Add exact ID search for better performance when searching by ID
+      const exactId = parseInt(searchQuery.trim())
+      if (!isNaN(exactId)) {
+        bindVars.exactId = exactId
+      } else {
+        bindVars.exactId = -1 // Invalid ID to ensure no matches
+      }
+      
+      if (filterClause) {
+        filterClause += ` AND (
+          LOWER(customer.name) LIKE LOWER(@searchQuery) 
+          OR customer.investor_id == @exactId
+          OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
+          OR LOWER(customer.email) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.city) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.state) LIKE LOWER(@searchQuery)
+        )`
+      } else {
+        filterClause = searchFilter
+      }
+
+      query = `
+        FOR customer IN customers
+        ${filterClause}
+        SORT customer.${orderBy} ${sortDir}
+        LIMIT @offset, @limit
+        RETURN {
+          investor_id: customer.investor_id,
+          name: customer.name,
+          pan: customer.pan,
+          mobile: customer.mobile,
+          email: customer.email,
+          address1: customer.address1,
+          city: customer.city,
+          state: customer.state,
+          relationship_manager: customer.relationship_manager,
+          created_at: customer.created_at
+        }
+      `
+    }
+
+    const countQuery = useFulltext === 'true' ? `
+      FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
+      ${!isAdmin && normalizedUserBranch ? 'FILTER customer.relationship_manager == @userBranch' : ''}
+      COLLECT WITH COUNT INTO total
+      RETURN total
+    ` : `
+      FOR customer IN customers
+      ${!isAdmin && normalizedUserBranch ? 'FILTER customer.relationship_manager == @userBranch' : ''}
+      FILTER (
+        LOWER(customer.name) LIKE LOWER(@searchQuery) 
+        OR customer.investor_id == @exactId
+        OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
+        OR LOWER(customer.email) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.city) LIKE LOWER(@searchQuery)
+        OR LOWER(customer.state) LIKE LOWER(@searchQuery)
+      )
+      COLLECT WITH COUNT INTO total
+      RETURN total
+    `
+    
+    // Create separate bindVars for count query (without limit/offset)
+    const countBindVars = { ...bindVars }
+    delete countBindVars.limit
+    delete countBindVars.offset
+
+    const [customers, totalResult] = await Promise.all([
+      q(query, bindVars),
+      q(countQuery, countBindVars)
+    ])
+    
+    const total = totalResult[0] || 0
+    const totalPages = Math.ceil(total / searchLimit)
+    
+    res.json({
+      customers,
+      pagination: {
+        page: searchPage,
+        limit: searchLimit,
+        total,
+        totalPages,
+        hasNext: searchPage < totalPages,
+        hasPrev: searchPage > 1
+      },
+      branch_filter: !isAdmin ? normalizedUserBranch : 'all',
+      user_role: isAdmin ? 'admin' : 'branch_user',
+      search_method: useFulltext === 'true' ? 'fulltext' : 'regular'
+    })
+  } catch (error) {
+    console.error('Error in advanced customer search:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
 // Get all customers with filtering
 router.get('/', requireAuth, async (req, res) => {
   try {
@@ -547,82 +899,6 @@ router.delete('/:id', requireAuth, async (req, res) => {
     res.status(204).end()
   } catch (error) {
     console.error('Error deleting customer:', error)
-    res.status(500).json({ error: 'server_error', detail: error.message })
-  }
-})
-
-// Customer search endpoint for receipt creation (branch-filtered)
-router.get('/search', requireAuth, async (req, res) => {
-  try {
-    const { q: searchQuery, limit = '10' } = req.query
-    
-    if (!searchQuery || searchQuery.trim().length < 2) {
-      return res.status(400).json({ error: 'invalid_query', detail: 'Search query must be at least 2 characters' })
-    }
-
-    // Get user's branch for filtering
-    const userBranch = await getUserBranch(req.user.sub)
-    const normalizedUserBranch = normalizeBranchName(userBranch)
-    const userRole = await q(`
-      FOR user IN users 
-      FILTER user._key == @id
-      LIMIT 1
-      RETURN user.role
-    `, { id: req.user.sub })
-
-    const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
-    const searchLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 10))
-
-    let filterClause = ''
-    let bindVars = { searchQuery: `%${searchQuery}%`, limit: searchLimit }
-
-    // Branch-based filtering (unless admin)
-    if (!isAdmin && normalizedUserBranch) {
-      filterClause = `FILTER customer.relationship_manager == @userBranch`
-      bindVars.userBranch = normalizedUserBranch
-    }
-
-    // Add search filter
-    const searchFilter = `
-      FILTER customer.name LIKE @searchQuery 
-         OR customer.investor_id LIKE @searchQuery 
-         OR customer.pan LIKE @searchQuery 
-         OR customer.mobile LIKE @searchQuery
-    `
-    
-    if (filterClause) {
-      filterClause += ` AND (customer.name LIKE @searchQuery 
-         OR customer.investor_id LIKE @searchQuery 
-         OR customer.pan LIKE @searchQuery 
-         OR customer.mobile LIKE @searchQuery)`
-    } else {
-      filterClause = searchFilter
-    }
-
-    const query = `
-      FOR customer IN customers
-      ${filterClause}
-      LIMIT @limit
-      RETURN {
-        investor_id: customer.investor_id,
-        name: customer.name,
-        pan: customer.pan,
-        mobile: customer.mobile,
-        email: customer.email,
-        relationship_manager: customer.relationship_manager
-      }
-    `
-
-    const customers = await q(query, bindVars)
-    
-    res.json({
-      customers,
-      total: customers.length,
-      branch_filter: !isAdmin ? normalizedUserBranch : 'all',
-      user_role: isAdmin ? 'admin' : 'branch_user'
-    })
-  } catch (error) {
-    console.error('Error searching customers:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })
