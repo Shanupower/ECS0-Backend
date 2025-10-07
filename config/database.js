@@ -51,20 +51,38 @@ export const normalizeBranchName = (userBranch) => {
   
   // Map user branch names to customer relationship_manager names
   const branchMapping = {
-    'H.O': 'HEADOFFICE',
-    'HO': 'HEADOFFICE',
-    'HEAD OFFICE': 'HEADOFFICE',
-    'HEADOFFICE': 'HEADOFFICE',
+    // Head Office mappings
+    'H.O': 'HO',
+    'HO': 'HO',
+    'HEAD OFFICE': 'HO',
+    'HEADOFFICE': 'HO',
+    
+    // Chennai branch mappings
     'CHENNAI RO': 'CHENNAI T NAGAR',
-    'JAYANAGAR': 'JAYA NAGAR',
+    'CHENNAI - MADIPAKKAM': 'MADIPAKKAM CHENNAI',
+    
+    // Mumbai branch mappings
     'CHEMBUR - MUMBAI': 'CHEMBUR',
-    'VIZAG': 'VISHAKAPATNAM',
-    'MALLESWARAM': 'MALLESWARAM-BENGALURU',
-    'BAGH AMBERPET': 'BAGHAMBERPET',
+    
+    // Other branch mappings
+    'JAYANAGAR': 'JAYANAGAR',
+    'VIZAG': 'VIZAG',
+    'MALLESWARAM': 'MALLESWARAM',
+    'BAGH AMBERPET': 'BAGH AMBERPET',
     'KUKAT PALLY': 'KUKATPALLY',
     'AMEER PET': 'AMEERPET',
-    'CHENNAI - MADIPAKKAM': 'MADIPAKKAM CHENNAI',
-    'RAJAHMUNDRY': 'RAJAMUNDRY'
+    'RAJAHMUNDRY': 'RAJAHMUNDRY',
+    'DILSUKHNAGAR': 'DILSUKHNAGAR',
+    'MADHAPUR': 'MADHAPUR',
+    'MALKAJGIRI': 'MALKAJGIRI',
+    'SUCHITRA': 'SUCHITRA',
+    'TRIMULGHERRY': 'TRIMULGHERRY',
+    'WARANGAL': 'WARANGAL',
+    'GAJUWAKA': 'GAJUWAKA',
+    'VIJAYAWADA': 'VIJAYAWADA',
+    'BASHEERBAGH': 'BASHEERBAGH',
+    'HABSIGUDA': 'HABSIGUDA',
+    'COIMBATORE': 'COIMBATORE'
   }
   
   return branchMapping[userBranch] || userBranch

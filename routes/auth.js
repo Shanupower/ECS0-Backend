@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken'
 import rateLimit from 'express-rate-limit'
 import { q, getCollection, getUserBranch } from '../config/database.js'
 import { JWT_SECRET } from '../config/environment.js'
+import { requireAuth } from '../middleware/auth.js'
 
 const router = express.Router()
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 })
@@ -146,6 +147,30 @@ router.post('/branch-login', authLimiter, async (req, res) => {
   } catch (error) {
     console.error('Branch login error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Internal server error' })
+  }
+})
+
+// Debug endpoint to test authentication
+router.get('/debug', requireAuth, async (req, res) => {
+  try {
+    res.json({
+      message: 'Authentication successful',
+      user: {
+        id: req.user.sub,
+        emp_code: req.user.emp_code,
+        role: req.user.role,
+        name: req.user.name,
+        branch_code: req.user.branch_code
+      },
+      token_info: {
+        issued_at: new Date(req.user.iat * 1000).toISOString(),
+        expires_at: new Date(req.user.exp * 1000).toISOString(),
+        is_expired: Date.now() > req.user.exp * 1000
+      }
+    })
+  } catch (error) {
+    console.error('Debug endpoint error:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })
 

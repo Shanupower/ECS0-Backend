@@ -8,7 +8,7 @@ const __dirname = path.dirname(__filename)
 
 export const {
   PORT = 8080,
-  ARANGO_URL = 'http://localhost:8529',
+  ARANGO_URL = 'https://db.ecsfinancial.tech',
   ARANGO_USERNAME = 'root',
   ARANGO_PASSWORD = '',
   ARANGO_DATABASE = 'ecs_backend',

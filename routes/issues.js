@@ -6,33 +6,44 @@ import { uploadSingle } from '../middleware/upload.js'
 const router = express.Router()
 
 // Create new issue report
-router.post('/', uploadSingle, async (req, res) => {
+router.post('/', requireAuth, uploadSingle, async (req, res) => {
   try {
-    const { issue, description } = req.body || {}
+    const { title, description } = req.body || {}
     
-    if (!issue || !description) {
+    if (!title || !description) {
       return res.status(400).json({ error: 'missing_fields', detail: 'Issue title and description are required' })
     }
 
-    // Handle screenshot upload if provided
-    let screenshotFile = null
+    // Handle photo upload if provided
+    let photoFile = null
     if (req.file) {
-      screenshotFile = {
+      photoFile = {
         id: Date.now() + Math.random(),
         original_name: req.file.originalname,
         filename: req.file.filename,
         file_size: req.file.size,
         mime_type: req.file.mimetype,
-        uploaded_at: new Date().toISOString()
+        uploaded_at: new Date().toISOString(),
+        file_path: req.file.path
       }
     }
 
+    // Get the next issue ID
+    const maxIdResult = await q(`
+      FOR issue IN issues
+      COLLECT AGGREGATE maxId = MAX(issue.id)
+      RETURN maxId
+    `)
+    const nextId = (maxIdResult[0] || 0) + 1
+
     const issueDoc = {
-      issue,
+      id: nextId,
+      title,
       description,
-      screenshot: screenshotFile,
-      status: 'open',
+      photo: photoFile,
+      created_by: req.user.sub,
       created_at: new Date().toISOString(),
+      status: 'open',
       ip_address: req.ip,
       user_agent: req.get('User-Agent')
     }
@@ -40,8 +51,17 @@ router.post('/', uploadSingle, async (req, res) => {
     const result = await getCollection('issues').save(issueDoc)
     
     res.status(201).json({ 
-      id: result._key,
-      message: 'Issue reported successfully'
+      id: nextId,
+      message: 'Issue reported successfully',
+      issue: {
+        id: nextId,
+        title,
+        description,
+        photo: photoFile,
+        created_by: req.user.sub,
+        created_at: issueDoc.created_at,
+        status: 'open'
+      }
     })
   } catch (error) {
     console.error('Error creating issue report:', error)
@@ -49,6 +69,7 @@ router.post('/', uploadSingle, async (req, res) => {
     // Clean up uploaded file if database insert fails
     if (req.file) {
       try {
+        const fs = await import('fs')
         fs.unlinkSync(req.file.path)
       } catch (unlinkError) {
         console.error('Failed to clean up file:', unlinkError)
@@ -76,7 +97,7 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
 
     const [sortCol, sortDirRaw] = String(sort).split(':')
     const sortDir = String(sortDirRaw || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC'
-    const allowedSort = new Set(['created_at', 'status', 'issue'])
+    const allowedSort = new Set(['created_at', 'status', 'title', 'id'])
     const orderBy = allowedSort.has(sortCol) ? sortCol : 'created_at'
 
     let filterClause = ''
@@ -125,6 +146,36 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
   }
 })
 
+// Get single issue by ID
+router.get('/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+    
+    const issues = await q(`
+      FOR issue IN issues
+      FILTER issue.id == @id
+      LIMIT 1
+      RETURN issue
+    `, { id: parseInt(id) })
+    
+    if (!issues.length) {
+      return res.status(404).json({ error: 'not_found', detail: 'Issue not found' })
+    }
+    
+    const issue = issues[0]
+    
+    // Check if user can access this issue (admin or creator)
+    if (req.user.role !== 'admin' && issue.created_by !== req.user.sub) {
+      return res.status(403).json({ error: 'forbidden', detail: 'Access denied' })
+    }
+    
+    res.json(issue)
+  } catch (error) {
+    console.error('Error fetching issue:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
 // Update issue status (admin only)
 router.patch('/:id/status', requireAuth, requireRole('admin'), async (req, res) => {
   try {
@@ -142,14 +193,14 @@ router.patch('/:id/status', requireAuth, requireRole('admin'), async (req, res) 
     
     const result = await q(`
       FOR issue IN issues
-      FILTER issue._key == @id
+      FILTER issue.id == @id
       UPDATE issue WITH { 
         status: @status,
         updated_at: DATE_NOW(),
         updated_by: @user_id
       } IN issues
       RETURN NEW
-    `, { id, status, user_id: req.user.sub })
+    `, { id: parseInt(id), status, user_id: req.user.sub })
     
     if (!result.length) {
       return res.status(404).json({ error: 'not_found' })

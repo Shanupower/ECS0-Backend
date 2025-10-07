@@ -63,6 +63,12 @@ async function setupDatabase() {
         options: {
           keyOptions: { type: 'autoincrement' }
         }
+      },
+      {
+        name: 'issues',
+        options: {
+          keyOptions: { type: 'autoincrement' }
+        }
       }
     ]
     
@@ -197,6 +203,27 @@ async function setupDatabase() {
         collection: 'branches',
         type: 'persistent',
         fields: ['is_active']
+      },
+      {
+        collection: 'issues',
+        type: 'persistent',
+        fields: ['id'],
+        unique: true
+      },
+      {
+        collection: 'issues',
+        type: 'persistent',
+        fields: ['created_by']
+      },
+      {
+        collection: 'issues',
+        type: 'persistent',
+        fields: ['status']
+      },
+      {
+        collection: 'issues',
+        type: 'persistent',
+        fields: ['created_at']
       }
     ]
     
