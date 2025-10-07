@@ -58,8 +58,8 @@ export const normalizeBranchName = (userBranch) => {
     'HEADOFFICE': 'HO',
     
     // Chennai branch mappings
-    'CHENNAI RO': 'CHENNAI T NAGAR',
-    'CHENNAI - MADIPAKKAM': 'MADIPAKKAM CHENNAI',
+    'CHENNAI RO': 'CHENNAI',
+    'CHENNAI - MADIPAKKAM': 'MADIPAKKAM',
     
     // Mumbai branch mappings
     'CHEMBUR - MUMBAI': 'CHEMBUR',
