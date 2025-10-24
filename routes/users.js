@@ -2,6 +2,7 @@ import express from 'express'
 import bcrypt from 'bcryptjs'
 import { q, getCollection } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
+import { validateEmail, validateEmpCode, validatePassword, validateRequired } from '../utils/validators.js'
 
 const router = express.Router()
 
@@ -51,13 +52,38 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
 // Create new user (admin only)
 router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   const { emp_code, name, email, branch, role = 'employee', password } = req.body || {}
-  if (!emp_code || !name || !password) return res.status(400).json({ error: 'missing_fields' })
   
-  const hash = await bcrypt.hash(password, 10)
+  // Validate required fields
+  const nameValidation = validateRequired(name, 'Name')
+  if (!nameValidation.valid) {
+    return res.status(400).json({ error: 'validation_error', detail: nameValidation.error })
+  }
+
+  // Validate employee code
+  const empCodeValidation = validateEmpCode(emp_code, true)
+  if (!empCodeValidation.valid) {
+    return res.status(400).json({ error: 'validation_error', detail: empCodeValidation.error })
+  }
+
+  // Validate password strength
+  const passwordValidation = validatePassword(password, true)
+  if (!passwordValidation.valid) {
+    return res.status(400).json({ error: 'validation_error', detail: passwordValidation.error })
+  }
+
+  // Validate email if provided
+  if (email) {
+    const emailValidation = validateEmail(email, false)
+    if (!emailValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: emailValidation.error })
+    }
+  }
+  
+  const hash = await bcrypt.hash(passwordValidation.value, 10)
   try {
     const userDoc = {
-      emp_code,
-      name,
+      emp_code: empCodeValidation.value,
+      name: nameValidation.value,
       email: email || null,
       branch: branch || null,
       role,
@@ -100,9 +126,14 @@ router.patch('/:id/password', requireAuth, async (req, res) => {
   if (!(req.user.role === 'admin' || String(req.user.sub) === String(uid))) return res.status(403).json({ error: 'forbidden' })
   
   const { password } = req.body || {}
-  if (!password) return res.status(400).json({ error: 'missing_password' })
   
-  const hash = await bcrypt.hash(password, 10)
+  // Validate password strength
+  const passwordValidation = validatePassword(password, true)
+  if (!passwordValidation.valid) {
+    return res.status(400).json({ error: 'validation_error', detail: passwordValidation.error })
+  }
+  
+  const hash = await bcrypt.hash(passwordValidation.value, 10)
   
   try {
     await getCollection('users').update(uid, { password_hash: hash })

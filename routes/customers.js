@@ -2,6 +2,7 @@ import express from 'express'
 import { q, getCollection, getUserBranch, normalizeBranchName, canAccessCustomer } from '../config/database.js'
 import { requireAuth } from '../middleware/auth.js'
 import { uploadMultiple } from '../middleware/upload.js'
+import { validatePAN, validateEmail, validateMobile, validateAadhar, validatePIN, validateRequired } from '../utils/validators.js'
 
 const router = express.Router()
 
@@ -403,22 +404,22 @@ router.get('/', requireAuth, async (req, res) => {
       bindVars.userBranch = normalizedUserBranch
     }
 
-    // Search functionality
+    // Search functionality (case-insensitive)
     if (search) {
       const searchFilter = `
-        FILTER customer.name LIKE @search 
-           OR customer.investor_id LIKE @search 
-           OR customer.pan LIKE @search 
-           OR customer.email LIKE @search 
-           OR customer.mobile LIKE @search
+        FILTER LOWER(customer.name) LIKE LOWER(@search)
+           OR LOWER(customer.investor_id) LIKE LOWER(@search)
+           OR LOWER(customer.pan) LIKE LOWER(@search)
+           OR LOWER(customer.email) LIKE LOWER(@search)
+           OR LOWER(customer.mobile) LIKE LOWER(@search)
       `
       
       if (filterClause) {
-        filterClause += ` AND (customer.name LIKE @search 
-           OR customer.investor_id LIKE @search 
-           OR customer.pan LIKE @search 
-           OR customer.email LIKE @search 
-           OR customer.mobile LIKE @search)`
+        filterClause += ` AND (LOWER(customer.name) LIKE LOWER(@search)
+           OR LOWER(customer.investor_id) LIKE LOWER(@search)
+           OR LOWER(customer.pan) LIKE LOWER(@search)
+           OR LOWER(customer.email) LIKE LOWER(@search)
+           OR LOWER(customer.mobile) LIKE LOWER(@search))`
       } else {
         filterClause = searchFilter
       }
@@ -581,8 +582,44 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       country
     } = req.body || {}
 
-    if (!name) {
-      return res.status(400).json({ error: 'missing_fields', detail: 'Customer name is required' })
+    // Validate required fields
+    const nameValidation = validateRequired(name, 'Customer name')
+    if (!nameValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: nameValidation.error })
+    }
+
+    // Validate email (required)
+    const emailValidation = validateEmail(email, true)
+    if (!emailValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: emailValidation.error })
+    }
+
+    // Validate mobile (required)
+    const mobileValidation = validateMobile(mobile, true)
+    if (!mobileValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: mobileValidation.error })
+    }
+
+    // Validate PAN (required)
+    const panValidation = validatePAN(pan, true)
+    if (!panValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: panValidation.error })
+    }
+
+    // Validate Aadhar (optional)
+    if (aadhar_number) {
+      const aadharValidation = validateAadhar(aadhar_number, false)
+      if (!aadharValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: aadharValidation.error })
+      }
+    }
+
+    // Validate PIN code (optional)
+    if (pin) {
+      const pinValidation = validatePIN(pin, false)
+      if (!pinValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: pinValidation.error })
+      }
     }
 
     // Get user's branch to assign as relationship manager
@@ -592,17 +629,15 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       return res.status(400).json({ error: 'invalid_user', detail: 'User branch not found' })
     }
 
-    // Check if PAN already exists (if provided)
-    if (pan && pan.trim() !== '') {
-      const existingPan = await q(`
-        FOR customer IN customers 
-        FILTER customer.pan == @pan
-        LIMIT 1
-        RETURN customer.investor_id
-      `, { pan })
-      if (existingPan.length) {
-        return res.status(400).json({ error: 'duplicate_pan', detail: 'PAN number already exists' })
-      }
+    // Check if PAN already exists (after validation)
+    const existingPan = await q(`
+      FOR customer IN customers 
+      FILTER customer.pan == @pan
+      LIMIT 1
+      RETURN customer.investor_id
+    `, { pan: panValidation.value })
+    if (existingPan.length) {
+      return res.status(400).json({ error: 'duplicate_pan', detail: 'PAN number already exists' })
     }
 
     // Get the next investor_id
@@ -631,10 +666,10 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     const customerDoc = {
       investor_id: nextId,
       title: title || null,
-      name,
-      pan: pan && pan.trim() !== '' ? pan : null,
-      email: email || null,
-      mobile: mobile || null,
+      name: nameValidation.value,
+      pan: panValidation.value,
+      email: emailValidation.value,
+      mobile: mobileValidation.value,
       address1: address1 || null,
       address2: address2 || null,
       address3: address3 || null,
@@ -742,8 +777,28 @@ router.patch('/:id', requireAuth, async (req, res) => {
       })
     }
 
-    // Check if PAN already exists for another customer (if provided)
-    if (pan && pan.trim() !== '') {
+    // Validate fields if provided
+    if (email !== undefined && email !== null && email !== '') {
+      const emailValidation = validateEmail(email, false)
+      if (!emailValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: emailValidation.error })
+      }
+    }
+
+    if (mobile !== undefined && mobile !== null && mobile !== '') {
+      const mobileValidation = validateMobile(mobile, false)
+      if (!mobileValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: mobileValidation.error })
+      }
+    }
+
+    if (pan !== undefined && pan !== null && pan !== '') {
+      const panValidation = validatePAN(pan, false)
+      if (!panValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: panValidation.error })
+      }
+
+      // Check if PAN already exists for another customer
       console.log(`[Customer Update] Checking PAN uniqueness: ${pan}`)
       try {
         const existingPan = await q(`
@@ -751,7 +806,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
           FILTER customer.pan == @pan AND customer.investor_id != @id
           LIMIT 1
           RETURN customer.investor_id
-        `, { pan: pan.trim().toUpperCase(), id: Number(id) })
+        `, { pan: panValidation.value, id: Number(id) })
         
         if (existingPan.length) {
           console.log(`[Customer Update] PAN already exists for customer: ${existingPan[0]}`)
@@ -770,12 +825,41 @@ router.patch('/:id', requireAuth, async (req, res) => {
       }
     }
 
-    // Build updates object
+    if (aadhar_number !== undefined && aadhar_number !== null && aadhar_number !== '') {
+      const aadharValidation = validateAadhar(aadhar_number, false)
+      if (!aadharValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: aadharValidation.error })
+      }
+    }
+
+    if (pin !== undefined && pin !== null && pin !== '') {
+      const pinValidation = validatePIN(pin, false)
+      if (!pinValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: pinValidation.error })
+      }
+    }
+
+    // Build updates object with validated values
     const updates = {}
     if (name !== undefined) updates.name = name
-    if (pan !== undefined) updates.pan = pan && pan.trim() !== '' ? pan.trim().toUpperCase() : null
-    if (email !== undefined) updates.email = email
-    if (mobile !== undefined) updates.mobile = mobile
+    if (pan !== undefined && pan !== null && pan !== '') {
+      const panValidation = validatePAN(pan, false)
+      updates.pan = panValidation.value
+    } else if (pan === null || pan === '') {
+      updates.pan = null
+    }
+    if (email !== undefined && email !== null && email !== '') {
+      const emailValidation = validateEmail(email, false)
+      updates.email = emailValidation.value
+    } else if (email === null || email === '') {
+      updates.email = null
+    }
+    if (mobile !== undefined && mobile !== null && mobile !== '') {
+      const mobileValidation = validateMobile(mobile, false)
+      updates.mobile = mobileValidation.value
+    } else if (mobile === null || mobile === '') {
+      updates.mobile = null
+    }
     if (address1 !== undefined) updates.address1 = address1
     if (address2 !== undefined) updates.address2 = address2
     if (address3 !== undefined) updates.address3 = address3

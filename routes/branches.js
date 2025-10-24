@@ -2,6 +2,7 @@ import express from 'express'
 import bcrypt from 'bcryptjs'
 import { q } from '../config/database.js'
 import { requireAuth, requireRole, requireBranchAccess } from '../middleware/auth.js'
+import { validateBranchCode, validateEmail, validateMobile, validatePIN, validateRequired } from '../utils/validators.js'
 
 const router = express.Router()
 
@@ -278,8 +279,31 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const { branch_code, branch_name, branch_type, address, phone, email, password } = req.body
     
-    if (!branch_code || !branch_name) {
-      return res.status(400).json({ error: 'missing_fields', detail: 'Branch code and name are required' })
+    // Validate required fields
+    const branchCodeValidation = validateBranchCode(branch_code, true)
+    if (!branchCodeValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: branchCodeValidation.error })
+    }
+
+    const branchNameValidation = validateRequired(branch_name, 'Branch name')
+    if (!branchNameValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: branchNameValidation.error })
+    }
+
+    // Validate email if provided
+    if (email) {
+      const emailValidation = validateEmail(email, false)
+      if (!emailValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: emailValidation.error })
+      }
+    }
+
+    // Validate phone if provided
+    if (phone) {
+      const phoneValidation = validateMobile(phone, false)
+      if (!phoneValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: phoneValidation.error })
+      }
     }
 
     // Check if branch already exists
@@ -287,7 +311,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       FOR branch IN branches
       FILTER branch.branch_code == @branch_code OR LOWER(branch.branch_name) == LOWER(@branch_name)
       RETURN branch
-    `, { branch_code, branch_name })
+    `, { branch_code: branchCodeValidation.value, branch_name: branchNameValidation.value })
 
     if (existingBranches.length > 0) {
       return res.status(409).json({ error: 'branch_exists', detail: 'Branch with this code or name already exists' })
@@ -330,6 +354,22 @@ router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) =
     const { branchCode } = req.params
     const { branch_name, branch_type, address, phone, email, password } = req.body
 
+    // Validate email if provided
+    if (email !== undefined && email !== null && email !== '') {
+      const emailValidation = validateEmail(email, false)
+      if (!emailValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: emailValidation.error })
+      }
+    }
+
+    // Validate phone if provided
+    if (phone !== undefined && phone !== null && phone !== '') {
+      const phoneValidation = validateMobile(phone, false)
+      if (!phoneValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: phoneValidation.error })
+      }
+    }
+
     const updateData = {
       updated_at: new Date().toISOString()
     }
@@ -337,8 +377,18 @@ router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) =
     if (branch_name) updateData.branch_name = branch_name
     if (branch_type) updateData.branch_type = branch_type
     if (address !== undefined) updateData.address = address
-    if (phone !== undefined) updateData.phone = phone
-    if (email !== undefined) updateData.email = email
+    if (phone !== undefined && phone !== null && phone !== '') {
+      const phoneValidation = validateMobile(phone, false)
+      updateData.phone = phoneValidation.value
+    } else if (phone !== undefined) {
+      updateData.phone = phone
+    }
+    if (email !== undefined && email !== null && email !== '') {
+      const emailValidation = validateEmail(email, false)
+      updateData.email = emailValidation.value
+    } else if (email !== undefined) {
+      updateData.email = email
+    }
     if (password) updateData.password_hash = await bcrypt.hash(password, 10)
 
     const result = await q(`

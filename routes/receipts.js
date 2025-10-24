@@ -4,6 +4,7 @@ import path from 'path'
 import { q, getCollection } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
+import { validateRequired, validatePositiveNumber, validateDate } from '../utils/validators.js'
 
 const router = express.Router()
 
@@ -12,6 +13,85 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
   try {
     const d = req.body || {}
     const today = new Date().toISOString().slice(0,10)
+
+    // Validate required fields
+    const receiptNoValidation = validateRequired(d.receiptNo || d.receipt_no, 'Receipt number')
+    if (!receiptNoValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: receiptNoValidation.error })
+    }
+
+    // Validate investor ID
+    const investorIdValidation = validateRequired(d.investorId || d.investor_id, 'Investor ID')
+    if (!investorIdValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: investorIdValidation.error })
+    }
+
+    // Validate investment amount if provided
+    if (d.investmentAmount || d.investment_amount || d.amount) {
+      const amountValidation = validatePositiveNumber(
+        d.investmentAmount || d.investment_amount || d.amount, 
+        'Investment amount', 
+        false
+      )
+      if (!amountValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: amountValidation.error })
+      }
+    }
+
+    // Validate date if provided
+    const dateValue = d.date === '{{today}}' ? today : d.date
+    if (dateValue) {
+      const dateValidation = validateDate(dateValue, 'Receipt date', false)
+      if (!dateValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: dateValidation.error })
+      }
+    }
+
+    // Validate product category specific fields
+    const productCategory = d.product_category || d.productCategory
+    
+    if (productCategory === 'MF') {
+      // Mutual Fund validations
+      if (!d.schemeName && !d.scheme_name) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Scheme name is required for Mutual Funds' })
+      }
+      if (!d.investmentAmount && !d.investment_amount && !d.amount) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Investment amount is required for Mutual Funds' })
+      }
+      if (!d.mode) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Mode (Lump Sum/SIP/STP/SWP) is required for Mutual Funds' })
+      }
+    } else if (productCategory === 'INS') {
+      // Insurance validations
+      if (!d.issuerCompany && !d.issuer_company) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Issuer company is required for Insurance' })
+      }
+      if (!d.investmentAmount && !d.investment_amount && !d.amount) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Premium amount is required for Insurance' })
+      }
+    } else if (productCategory === 'FD') {
+      // Fixed Deposit validations
+      if (!d.issuerCompany && !d.issuer_company) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Company name is required for Fixed Deposit' })
+      }
+      if (!d.investmentAmount && !d.investment_amount && !d.amount) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Deposit amount is required for Fixed Deposit' })
+      }
+      if (!d.roi && !d.roi_percent) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Interest rate is required for Fixed Deposit' })
+      }
+      if (!d.depositPeriodYM && !d.deposit_period_ym) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Deposit period is required for Fixed Deposit' })
+      }
+    } else if (productCategory === 'BOND') {
+      // Bonds validations
+      if (!d.issuerCompany && !d.issuer_company) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Issuer company is required for Bonds' })
+      }
+      if (!d.investmentAmount && !d.investment_amount && !d.amount) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Investment amount is required for Bonds' })
+      }
+    }
 
     // Replace placeholders if needed
     const receiptNo = (d.receiptNo || '').replace('{{today}}', today)
