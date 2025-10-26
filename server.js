@@ -11,6 +11,7 @@ import userRoutes from './routes/users.js'
 import customerRoutes from './routes/customers.js'
 import receiptRoutes from './routes/receipts.js'
 import receiptMediaRoutes from './routes/receipt-media.js'
+import receiptPdfRoutes from './routes/receipt-pdf.js'
 import branchRoutes from './routes/branches.js'
 import statsRoutes from './routes/stats.js'
 import exportRoutes from './routes/export.js'
@@ -53,6 +54,7 @@ app.use('/api/users', userRoutes)
 app.use('/api/customers', customerRoutes)
 app.use('/api/receipts', receiptRoutes)
 app.use('/api/receipts', receiptMediaRoutes) // Receipt media routes
+app.use('/api/receipts', receiptPdfRoutes) // Receipt PDF routes
 app.use('/api/branches', branchRoutes)
 app.use('/api/stats', statsRoutes)
 app.use('/api/export', exportRoutes)

@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # ArangoDB Database
+  arangodb:
+    image: arangodb:3.11
+    container_name: ecs-arangodb
+    environment:
+      ARANGO_ROOT_PASSWORD: ${ARANGO_PASSWORD:-}
+      ARANGO_NO_AUTH: 1
+    ports:
+      - "8529:8529"
+    volumes:
+      - arangodb_data:/var/lib/arangodb3
+      - arangodb_apps:/var/lib/arangodb3-apps
+    networks:
+      - ecs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8529/_api/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ECS Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ecs-backend
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      ARANGO_URL: http://arangodb:8529
+      ARANGO_USERNAME: root
+      ARANGO_PASSWORD: ${ARANGO_PASSWORD:-}
+      ARANGO_DATABASE: ecs_backend
+      JWT_SECRET: ${JWT_SECRET:-ecs_backend_production_secret_key_2024_change_this_in_production}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      NODE_ENV: production
+    volumes:
+      - ./uploads:/app/uploads
+      - ./data:/app/data
+    depends_on:
+      arangodb:
+        condition: service_healthy
+    networks:
+      - ecs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  ecs-network:
+    driver: bridge
+
+volumes:
+  arangodb_data:
+  arangodb_apps:
+

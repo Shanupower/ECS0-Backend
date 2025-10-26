@@ -139,6 +139,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       renewal_amount: d.renewalAmount || d.renewal_amount || null,
       issuer_company: d.issuerCompany || d.issuer_company || null,
       issuer_category: d.issuerCategory || d.issuer_category || null,
+      status: 'Pending', // Default status for new receipts
       is_deleted: false,
       created_at: new Date().toISOString()
     }
@@ -164,6 +165,25 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
 
       // Update the receipt with files
       await getCollection('receipts').update(receiptId, { files: uploadedFiles })
+    }
+
+    // Generate and store PDF in background
+    try {
+      // Import PDF generation function dynamically
+      const pdfModule = await import('./receipt-pdf.js')
+      const pdfBuffer = await pdfModule.generateReceiptPDF(receiptDoc)
+      
+      // Store PDF in database
+      const updateResult = await getCollection('receipts').update(receiptId, {
+        pdf_data: pdfBuffer.toString('base64'),
+        pdf_generated_at: new Date().toISOString()
+      })
+      
+      console.log(`PDF auto-generated and stored for receipt ${receiptId}`, updateResult)
+    } catch (pdfError) {
+      console.error('Failed to generate PDF on receipt creation:', pdfError)
+      console.error('PDF Error stack:', pdfError.stack)
+      // Don't fail the receipt creation if PDF generation fails
     }
 
     res.status(201).json({ 
@@ -198,6 +218,7 @@ router.get('/', requireAuth, async (req, res) => {
       from,
       to,
       category,
+      status,
       mode,
       issuer,
       emp_code,
@@ -237,6 +258,15 @@ router.get('/', requireAuth, async (req, res) => {
     if (category) {
       filterConditions.push('receipt.product_category == @category')
       bindVars.category = category
+    }
+    if (status) {
+      // Handle status filtering - treat null/undefined as 'Pending'
+      if (status === 'Pending') {
+        filterConditions.push('(receipt.status == null || receipt.status == @status)')
+      } else {
+        filterConditions.push('receipt.status == @status')
+      }
+      bindVars.status = status
     }
     if (mode) {
       filterConditions.push('receipt.mode == @mode')
@@ -307,6 +337,9 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
     const {
       from,
       to,
+      category,
+      status,
+      issuer,
       page = '1',
       size = '20',
       sort = 'created_at:desc',
@@ -348,6 +381,29 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
       filterConditions.push('receipt.date >= @from AND receipt.date <= @to')
       bindVars.from = from.trim()
       bindVars.to = to.trim()
+    }
+
+    // Category filter
+    if (category) {
+      filterConditions.push('receipt.product_category == @category')
+      bindVars.category = category
+    }
+
+    // Status filter
+    if (status) {
+      // Handle status filtering - treat null/undefined as 'Pending'
+      if (status === 'Pending') {
+        filterConditions.push('(receipt.status == null || receipt.status == @status)')
+      } else {
+        filterConditions.push('receipt.status == @status')
+      }
+      bindVars.status = status
+    }
+
+    // Issuer filter (for issuer company)
+    if (issuer) {
+      filterConditions.push('receipt.issuer_company LIKE @issuer')
+      bindVars.issuer = `%${issuer}%`
     }
 
     // includeDeleted only for admins
