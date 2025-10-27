@@ -82,8 +82,82 @@ export function generateReceiptPDF(receipt) {
       if (receipt.product_category || receipt.productCategory) {
         yPos = addKeyValue('Product Category', receipt.product_category || receipt.productCategory, 60, yPos, 490)
       }
+      
+      // New MF-specific details
+      if (receipt.amc_name || receipt.amc_code) {
+        yPos = addKeyValue('AMC', receipt.amc_name || receipt.amc_code, 60, yPos, 490)
+      }
       if (receipt.scheme_name || receipt.schemeName) {
-        yPos = addKeyValue('Scheme Name', receipt.scheme_name || receipt.schemeName, 60, yPos, 490)
+        const schemeName = receipt.scheme_name || receipt.schemeName
+        const nfoTag = receipt.scheme_is_nfo ? ' [NFO]' : ''
+        yPos = addKeyValue('Scheme Name', schemeName + nfoTag, 60, yPos, 490)
+      }
+      if (receipt.scheme_category) {
+        yPos = addKeyValue('Category', `${receipt.scheme_category}${receipt.scheme_sub_category ? ' - ' + receipt.scheme_sub_category : ''}`, 60, yPos, 490)
+      }
+      if (receipt.scheme_plan && receipt.scheme_type) {
+        yPos = addKeyValue('Plan & Type', `${receipt.scheme_plan} - ${receipt.scheme_type}`, 60, yPos, 490)
+      }
+      if (receipt.folio_number) {
+        yPos = addKeyValue('Folio Number', receipt.folio_number, 60, yPos, 490)
+      }
+      
+      // Transaction type details
+      if (receipt.transaction_type) {
+        yPos += 10
+        yPos = addKeyValue('Transaction Type', receipt.transaction_type, 60, yPos, 490)
+        
+        // SIP details
+        if (receipt.transaction_type === 'SIP' && receipt.sip_frequency) {
+          yPos = addKeyValue('SIP Frequency', receipt.sip_frequency, 60, yPos, 490)
+        }
+        if (receipt.sip_start_date) {
+          yPos = addKeyValue('Start Date', new Date(receipt.sip_start_date).toLocaleDateString('en-IN'), 60, yPos, 490)
+        }
+        if (receipt.sip_end_date) {
+          yPos = addKeyValue('End Date', new Date(receipt.sip_end_date).toLocaleDateString('en-IN'), 60, yPos, 490)
+        } else if (receipt.sip_is_perpetual) {
+          yPos = addKeyValue('Type', 'Perpetual (30 years)', 60, yPos, 490)
+        }
+        
+        // SWP details
+        if (receipt.transaction_type === 'SWP' && receipt.swp_frequency) {
+          yPos = addKeyValue('SWP Frequency', receipt.swp_frequency, 60, yPos, 490)
+        }
+        if (receipt.swp_start_date) {
+          yPos = addKeyValue('SWP Start Date', new Date(receipt.swp_start_date).toLocaleDateString('en-IN'), 60, yPos, 490)
+        }
+        if (receipt.swp_amount) {
+          yPos = addKeyValue('SWP Amount', new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.swp_amount), 60, yPos, 490)
+        }
+        
+        // STP details
+        if (receipt.transaction_type === 'STP' && receipt.stp_target_scheme_name) {
+          yPos = addKeyValue('Transfer to Scheme', receipt.stp_target_scheme_name, 60, yPos, 490)
+        }
+        if (receipt.stp_frequency) {
+          yPos = addKeyValue('STP Frequency', receipt.stp_frequency, 60, yPos, 490)
+        }
+        if (receipt.stp_start_date) {
+          yPos = addKeyValue('STP Start Date', new Date(receipt.stp_start_date).toLocaleDateString('en-IN'), 60, yPos, 490)
+        }
+        if (receipt.stp_amount) {
+          yPos = addKeyValue('Transfer Amount', new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.stp_amount), 60, yPos, 490)
+        }
+        
+        // Switch Over details
+        if (receipt.transaction_type === 'Switch Over' && receipt.switch_to_scheme_name) {
+          yPos = addKeyValue('Switch to Scheme', receipt.switch_to_scheme_name, 60, yPos, 490)
+        }
+        if (receipt.switch_from_scheme_name) {
+          yPos = addKeyValue('Switch from Scheme', receipt.switch_from_scheme_name, 60, yPos, 490)
+        }
+        if (receipt.switch_type && receipt.switch_value) {
+          const switchValue = receipt.switch_type === 'Amount' 
+            ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.switch_value)
+            : `${receipt.switch_value} units`
+          yPos = addKeyValue('Switch Value', switchValue, 60, yPos, 490)
+        }
       }
       if (receipt.txn_type || receipt.txnType) {
         yPos = addKeyValue('Transaction Type', receipt.txn_type || receipt.txnType, 60, yPos, 490)
@@ -161,7 +235,6 @@ export function generateReceiptPDF(receipt) {
 // Generate or get receipt PDF
 router.get('/:id/pdf', requireAuth, async (req, res) => {
   try {
-    console.log(`PDF generation request for receipt: ${req.params.id}`)
     const receiptId = req.params.id
     
     // Get receipt
@@ -173,7 +246,6 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     `, { id: receiptId })
     
     if (!receiptRows.length) {
-      console.log(`Receipt not found: ${receiptId}`)
       return res.status(404).json({ error: 'receipt_not_found' })
     }
     
@@ -181,7 +253,6 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     
     // Check permissions
     if (!(req.user.role === 'admin' || String(receipt.user_id) === String(req.user.sub))) {
-      console.log(`Forbidden access to receipt: ${receiptId} by user: ${req.user.sub}`)
       return res.status(403).json({ error: 'forbidden' })
     }
     
@@ -191,22 +262,17 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     if (receipt.pdf_data) {
       // PDF exists, convert from base64
       pdfBuffer = Buffer.from(receipt.pdf_data, 'base64')
-      console.log(`Using existing PDF for receipt ${receiptId} (${pdfBuffer.length} bytes)`)
-      console.log(`PDF generated at: ${receipt.pdf_generated_at}`)
     } else {
       // PDF doesn't exist, generate it
-      console.log(`Generating new PDF for receipt ${receiptId}`)
       pdfBuffer = await generateReceiptPDF(receipt)
       
       // Store PDF in database as base64
       const receiptsCollection = getCollection('receipts')
       
-      const updateResult = await receiptsCollection.update(receiptId, {
+      await receiptsCollection.update(receiptId, {
         pdf_data: pdfBuffer.toString('base64'),
         pdf_generated_at: new Date().toISOString()
       })
-      
-      console.log(`PDF stored in database for receipt ${receiptId}`, updateResult)
     }
     
     // Set response headers for PDF download
@@ -215,12 +281,10 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     res.setHeader('Content-Length', pdfBuffer.length)
     
     // Send PDF
-    console.log(`Sending PDF for receipt ${receiptId} (${pdfBuffer.length} bytes)`)
     res.send(pdfBuffer)
     
   } catch (error) {
-    console.error('Error generating receipt PDF for receipt:', req.params.id, error)
-    console.error('Error stack:', error.stack)
+    console.error('Error generating receipt PDF:', error)
     res.status(500).json({ error: 'pdf_generation_failed', detail: error.message })
   }
 })

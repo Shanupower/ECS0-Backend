@@ -139,6 +139,62 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       renewal_amount: d.renewalAmount || d.renewal_amount || null,
       issuer_company: d.issuerCompany || d.issuer_company || null,
       issuer_category: d.issuerCategory || d.issuer_category || null,
+      // New MF-specific fields
+      amc_code: d.amc_code || null,
+      amc_name: d.amc_name || null,
+      scheme_code: d.scheme_code || null,
+      scheme_category: d.scheme_category || null,
+      scheme_sub_category: d.scheme_sub_category || null,
+      scheme_plan: d.scheme_plan || null,
+      scheme_type: d.scheme_type || null,
+      scheme_is_nfo: d.scheme_is_nfo || null,
+      // Transaction details
+      transaction_type: d.transaction_type || null,
+      has_existing_folio: d.has_existing_folio || null,
+      folio_number: d.folio_number || null,
+      // SIP fields
+      sip_frequency: d.sip_frequency || null,
+      sip_start_date: d.sip_start_date || null,
+      sip_end_date: d.sip_end_date || null,
+      sip_is_perpetual: d.sip_is_perpetual || null,
+      // SWP fields
+      swp_frequency: d.swp_frequency || null,
+      swp_start_date: d.swp_start_date || null,
+      swp_amount: d.swp_amount || null,
+      // STP fields
+      stp_target_scheme_code: d.stp_target_scheme_code || null,
+      stp_target_scheme_name: d.stp_target_scheme_name || null,
+      stp_frequency: d.stp_frequency || null,
+      stp_start_date: d.stp_start_date || null,
+      stp_amount: d.stp_amount || null,
+      // Switch Over fields
+      switch_from_scheme_code: d.switch_from_scheme_code || null,
+      switch_from_scheme_name: d.switch_from_scheme_name || null,
+      switch_to_scheme_code: d.switch_to_scheme_code || null,
+      switch_to_scheme_name: d.switch_to_scheme_name || null,
+      switch_type: d.switch_type || null,
+      switch_value: d.switch_value || null,
+      // FD-specific fields
+      fd_issuer_key: d.fd_issuer_key || null,
+      fd_issuer_name: d.fd_issuer_name || null,
+      fd_issuer_type: d.fd_issuer_type || null,
+      fd_scheme_id: d.fd_scheme_id || null,
+      fd_scheme_name: d.fd_scheme_name || null,
+      fd_is_cumulative: d.fd_is_cumulative || null,
+      fd_deposit_amount: d.fd_deposit_amount || null,
+      fd_tenure_months: d.fd_tenure_months || null,
+      fd_payout_frequency: d.fd_payout_frequency || null,
+      fd_base_rate_pa: d.fd_base_rate_pa || null,
+      fd_senior_citizen_bonus: d.fd_senior_citizen_bonus || null,
+      fd_women_bonus: d.fd_women_bonus || null,
+      fd_renewal_bonus: d.fd_renewal_bonus || null,
+      fd_total_rate_pa: d.fd_total_rate_pa || null,
+      fd_maturity_amount: d.fd_maturity_amount || null,
+      fd_maturity_date: d.fd_maturity_date || null,
+      fd_application_number: d.fd_application_number || null,
+      fd_deposit_date: d.fd_deposit_date || null,
+      fd_tds_applicable: d.fd_tds_applicable || null,
+      fd_form_15g_15h: d.fd_form_15g_15h || null,
       status: 'Pending', // Default status for new receipts
       is_deleted: false,
       created_at: new Date().toISOString()
@@ -174,15 +230,12 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       const pdfBuffer = await pdfModule.generateReceiptPDF(receiptDoc)
       
       // Store PDF in database
-      const updateResult = await getCollection('receipts').update(receiptId, {
+      await getCollection('receipts').update(receiptId, {
         pdf_data: pdfBuffer.toString('base64'),
         pdf_generated_at: new Date().toISOString()
       })
-      
-      console.log(`PDF auto-generated and stored for receipt ${receiptId}`, updateResult)
     } catch (pdfError) {
       console.error('Failed to generate PDF on receipt creation:', pdfError)
-      console.error('PDF Error stack:', pdfError.stack)
       // Don't fail the receipt creation if PDF generation fails
     }
 

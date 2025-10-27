@@ -243,13 +243,6 @@ router.delete('/:id/media/:mediaId', requireAuth, async (req, res) => {
       UPDATE receipt WITH { files: @files } IN receipts
     `, { id: receiptId, files: updatedFiles })
     
-    // Optionally delete the physical file (uncomment if you want to delete files permanently)
-    // try {
-    //   const filePath = path.join(uploadsDir, mediaFile.filename)
-    //   fs.unlinkSync(filePath)
-    // } catch (unlinkError) {
-    //   console.error('Failed to delete physical file:', unlinkError)
-    // }
     
     res.status(204).end()
     

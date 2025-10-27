@@ -471,19 +471,15 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const id = req.params.id
-    console.log(`[Customer Get] Fetching customer ID: ${id}, User: ${req.user.sub}`)
     
     // Validate and convert ID to number
     if (!id || isNaN(Number(id))) {
-      console.log(`[Customer Get] Invalid customer ID: ${id}`)
       return res.status(400).json({ error: 'invalid_customer_id', detail: 'Customer ID must be a valid number' })
     }
     
     const customerId = Number(id)
-    console.log(`[Customer Get] Converted ID to number: ${customerId}`)
     
     // Check if customer exists
-    console.log(`[Customer Get] Searching for customer...`)
     const customers = await q(`
       FOR customer IN customers 
       FILTER customer.investor_id == @id
@@ -492,21 +488,16 @@ router.get('/:id', requireAuth, async (req, res) => {
     `, { id: customerId })
     
     if (!customers.length) {
-      console.log(`[Customer Get] Customer not found: ${customerId}`)
       return res.status(404).json({ error: 'not_found', detail: `Customer with ID ${customerId} not found` })
     }
     
     const customer = customers[0]
-    console.log(`[Customer Get] Found customer: ${customer.investor_id} - ${customer.name || customer.investor_name}`)
     
     // Check if user can access this customer (branch-based filtering)
-    console.log(`[Customer Get] Checking access permissions...`)
     try {
       const canAccess = await canAccessCustomer(req.user.sub, customer.relationship_manager)
-      console.log(`[Customer Get] Access check result: ${canAccess}`)
       
       if (!canAccess) {
-        console.log(`[Customer Get] Access denied for user ${req.user.sub} to customer ${customerId}`)
         return res.status(403).json({ 
           error: 'forbidden', 
           detail: 'Access denied - customer belongs to different branch',
@@ -523,7 +514,6 @@ router.get('/:id', requireAuth, async (req, res) => {
       })
     }
     
-    console.log(`[Customer Get] Successfully returning customer ${customerId}`)
     res.json(customer)
     
   } catch (error) {
@@ -707,11 +697,9 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
 router.patch('/:id', requireAuth, async (req, res) => {
   try {
     const id = req.params.id
-    console.log(`[Customer Update] Starting update for customer ID: ${id}, User: ${req.user.sub}`)
     
     // Validate input
     if (!id || isNaN(Number(id))) {
-      console.log(`[Customer Update] Invalid customer ID: ${id}`)
       return res.status(400).json({ error: 'invalid_customer_id', detail: 'Customer ID must be a valid number' })
     }
 
@@ -734,10 +722,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
       aadhar_number
     } = req.body || {}
 
-    console.log(`[Customer Update] Request body fields:`, Object.keys(req.body || {}))
-
     // Check if customer exists and get full customer data
-    console.log(`[Customer Update] Checking if customer exists...`)
     const existing = await q(`
       FOR customer IN customers 
       FILTER customer.investor_id == @id
@@ -746,21 +731,16 @@ router.patch('/:id', requireAuth, async (req, res) => {
     `, { id: Number(id) })
     
     if (!existing.length) {
-      console.log(`[Customer Update] Customer not found: ${id}`)
       return res.status(404).json({ error: 'not_found', detail: `Customer with ID ${id} not found` })
     }
 
     const customer = existing[0]
-    console.log(`[Customer Update] Found customer: ${customer.investor_id} - ${customer.name || customer.investor_name}`)
     
     // Check if user can access this customer (branch-based filtering)
-    console.log(`[Customer Update] Checking access permissions...`)
     try {
       const canAccess = await canAccessCustomer(req.user.sub, customer.relationship_manager)
-      console.log(`[Customer Update] Access check result: ${canAccess}`)
       
       if (!canAccess) {
-        console.log(`[Customer Update] Access denied for user ${req.user.sub} to customer ${id}`)
         return res.status(403).json({ 
           error: 'forbidden', 
           detail: 'Access denied - customer belongs to different branch',
@@ -799,7 +779,6 @@ router.patch('/:id', requireAuth, async (req, res) => {
       }
 
       // Check if PAN already exists for another customer
-      console.log(`[Customer Update] Checking PAN uniqueness: ${pan}`)
       try {
         const existingPan = await q(`
           FOR customer IN customers 
@@ -809,7 +788,6 @@ router.patch('/:id', requireAuth, async (req, res) => {
         `, { pan: panValidation.value, id: Number(id) })
         
         if (existingPan.length) {
-          console.log(`[Customer Update] PAN already exists for customer: ${existingPan[0]}`)
           return res.status(400).json({ 
             error: 'duplicate_pan', 
             detail: `PAN number already exists for customer ID ${existingPan[0]}` 
@@ -876,15 +854,11 @@ router.patch('/:id', requireAuth, async (req, res) => {
     // Add update timestamp
     updates.updated_at = new Date().toISOString()
 
-    console.log(`[Customer Update] Update fields:`, Object.keys(updates))
-
     if (Object.keys(updates).length === 1) { // Only updated_at
-      console.log(`[Customer Update] No fields to update`)
       return res.status(400).json({ error: 'no_updates', detail: 'No valid fields provided for update' })
     }
 
     // Perform the update
-    console.log(`[Customer Update] Executing update query...`)
     const updateResult = await q(`
       FOR customer IN customers
       FILTER customer.investor_id == @id
@@ -893,14 +867,12 @@ router.patch('/:id', requireAuth, async (req, res) => {
     `, { id: Number(id), updates })
 
     if (!updateResult || updateResult.length === 0) {
-      console.log(`[Customer Update] Update query returned no results`)
       return res.status(500).json({ 
         error: 'update_failed', 
         detail: 'Customer update query did not affect any records' 
       })
     }
 
-    console.log(`[Customer Update] Successfully updated customer ${id}`)
     res.status(204).end()
     
   } catch (error) {

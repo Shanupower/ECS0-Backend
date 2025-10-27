@@ -69,6 +69,24 @@ async function setupDatabase() {
         options: {
           keyOptions: { type: 'autoincrement' }
         }
+      },
+      {
+        name: 'fd_issuers',
+        options: {
+          keyOptions: { type: 'traditional' }
+        }
+      },
+      {
+        name: 'amcs',
+        options: {
+          keyOptions: { type: 'traditional' }
+        }
+      },
+      {
+        name: 'mf_schemes',
+        options: {
+          keyOptions: { type: 'autoincrement' }
+        }
       }
     ]
     
@@ -251,6 +269,88 @@ async function setupDatabase() {
           console.warn(`Failed to create index on ${index.collection}.${index.fields.join(', ')}:`, error.message)
         }
       }
+    }
+    
+    // Add schema validation for fd_issuers
+    const fdIssuersSchema = {
+      "type": "object",
+      "required": ["legal_name", "short_name", "type", "min_deposit_amount", "premature_withdrawal_policy", "is_active", "schemes"],
+      "additionalProperties": false,
+      "properties": {
+        "_key": { "type": "string", "pattern": "^[a-z0-9_\\-]+$" },
+        "legal_name": { "type": "string", "minLength": 3 },
+        "short_name": { "type": "string", "minLength": 2 },
+        "type": { "type": "string", "enum": ["NBFC", "Bank", "Corporate FD"] },
+        "credit_rating_agency": { "type": ["string", "null"], "minLength": 1 },
+        "credit_rating": { "type": ["string", "null"], "minLength": 1 },
+        "min_deposit_amount": { "type": "number", "minimum": 1 },
+        "max_deposit_amount": { "type": ["number", "null"], "minimum": 1 },
+        "premature_withdrawal_policy": { "type": "string", "minLength": 5 },
+        "notes_compliance": { "type": ["string", "null"] },
+        "is_active": { "type": "boolean" },
+        "schemes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["scheme_id", "scheme_name", "is_cumulative", "payout_frequency_type", "lock_in_months", "premature_allowed", "min_tenure_months", "max_tenure_months", "senior_citizen_bonus_bps", "women_bonus_bps", "renewal_bonus_bps", "tds_applicable", "show_form15g15h_option", "is_active", "rate_slabs"],
+            "additionalProperties": false,
+            "properties": {
+              "scheme_id": { "type": "string", "pattern": "^[A-Z0-9_\\-]+$", "minLength": 3 },
+              "scheme_name": { "type": "string", "minLength": 3 },
+              "description_short": { "type": ["string", "null"], "minLength": 3 },
+              "is_cumulative": { "type": "boolean" },
+              "payout_frequency_type": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "type": "string", "enum": ["Monthly", "Quarterly", "Half-Yearly", "Yearly", "On Maturity"] }
+              },
+              "lock_in_months": { "type": "number", "minimum": 0, "multipleOf": 1 },
+              "premature_allowed": { "type": "boolean" },
+              "premature_terms": { "type": ["string", "null"] },
+              "min_tenure_months": { "type": "number", "minimum": 1, "multipleOf": 1 },
+              "max_tenure_months": { "type": "number", "minimum": 1, "multipleOf": 1 },
+              "min_amount": { "type": ["number", "null"], "minimum": 1 },
+              "max_amount": { "type": ["number", "null"], "minimum": 1 },
+              "senior_citizen_bonus_bps": { "type": "number", "minimum": 0, "multipleOf": 1 },
+              "women_bonus_bps": { "type": "number", "minimum": 0, "multipleOf": 1 },
+              "renewal_bonus_bps": { "type": "number", "minimum": 0, "multipleOf": 1 },
+              "tds_applicable": { "type": "boolean" },
+              "show_form15g15h_option": { "type": "boolean" },
+              "is_active": { "type": "boolean" },
+              "rate_slabs": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["slab_id", "tenure_min_months", "tenure_max_months", "payout_frequency_type", "base_interest_rate_pa", "compounding_frequency", "is_active"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "slab_id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 3 },
+                    "tenure_min_months": { "type": "number", "minimum": 1, "multipleOf": 1 },
+                    "tenure_max_months": { "type": "number", "minimum": 1, "multipleOf": 1 },
+                    "payout_frequency_type": { "type": "string", "enum": ["Monthly", "Quarterly", "Half-Yearly", "Yearly", "On Maturity"] },
+                    "base_interest_rate_pa": { "type": "number", "minimum": 0, "maximum": 30, "multipleOf": 0.01 },
+                    "compounding_frequency": { "type": "string", "enum": ["Quarterly", "Half-Yearly", "Yearly"] },
+                    "effective_yield_pa": { "type": ["number", "null"], "minimum": 0, "maximum": 30, "multipleOf": 0.01 },
+                    "notes_public_display": { "type": ["string", "null"] },
+                    "is_active": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    try {
+      const fdIssuersCollection = appDb.collection('fd_issuers')
+      await fdIssuersCollection.save({ schema: fdIssuersSchema, level: 'moderate' })
+      console.log('Schema validation added to fd_issuers collection')
+    } catch (error) {
+      console.warn('Could not add schema validation to fd_issuers:', error.message)
     }
     
     console.log('ArangoDB setup completed successfully!')

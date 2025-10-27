@@ -1,0 +1,122 @@
+[
+  {
+    "_key": "shriram_finance",
+    "legal_name": "Shriram Finance Limited",
+    "short_name": "Shriram Finance",
+    "type": "NBFC",
+    "credit_rating_agency": "CRISIL",
+    "credit_rating": "AAA (Stable)",
+    "min_deposit_amount": 25000,
+    "max_deposit_amount": 10000000,
+    "premature_withdrawal_policy": "Allowed with 1% penalty after 90 days lock-in",
+    "notes_compliance": "Strong NBFC with high credit rating",
+    "is_active": true,
+    "schemes": [
+      {
+        "scheme_id": "SHRIRAM_REG_MONTHLY",
+        "scheme_name": "Regular FD - Monthly Payout",
+        "description_short": "Best for regular income with monthly interest payouts",
+        "is_cumulative": false,
+        "payout_frequency_type": ["Monthly", "On Maturity"],
+        "lock_in_months": 0,
+        "premature_allowed": true,
+        "premature_terms": "1% penalty on premature withdrawal after 90 days",
+        "min_tenure_months": 12,
+        "max_tenure_months": 60,
+        "min_amount": null,
+        "max_amount": null,
+        "senior_citizen_bonus_bps": 50,
+        "women_bonus_bps": 0,
+        "renewal_bonus_bps": 25,
+        "tds_applicable": true,
+        "show_form15g15h_option": true,
+        "is_active": true,
+        "rate_slabs": [
+          {
+            "slab_id": "12M_MONTHLY",
+            "tenure_min_months": 12,
+            "tenure_max_months": 23,
+            "payout_frequency_type": "Monthly",
+            "base_interest_rate_pa": 7.75,
+            "compounding_frequency": "Quarterly",
+            "notes_public_display": "Rates effective as of Oct 2024",
+            "is_active": true
+          },
+          {
+            "slab_id": "24M_MONTHLY",
+            "tenure_min_months": 24,
+            "tenure_max_months": 35,
+            "payout_frequency_type": "Monthly",
+            "base_interest_rate_pa": 8.25,
+            "compounding_frequency": "Quarterly",
+            "notes_public_display": "Rates effective as of Oct 2024",
+            "is_active": true
+          },
+          {
+            "slab_id": "36M_MONTHLY",
+            "tenure_min_months": 36,
+            "tenure_max_months": 60,
+            "payout_frequency_type": "Monthly",
+            "base_interest_rate_pa": 8.75,
+            "compounding_frequency": "Quarterly",
+            "notes_public_display": "Rates effective as of Oct 2024",
+            "is_active": true
+          }
+        ]
+      },
+      {
+        "scheme_id": "SHRIRAM_CUM_MATURITY",
+        "scheme_name": "Cumulative FD - Interest at Maturity",
+        "description_short": "Higher returns with interest paid at maturity",
+        "is_cumulative": true,
+        "payout_frequency_type": ["On Maturity"],
+        "lock_in_months": 6,
+        "premature_allowed": true,
+        "premature_terms": "Interest recalculated at premature withdrawal rates",
+        "min_tenure_months": 12,
+        "max_tenure_months": 60,
+        "min_amount": null,
+        "max_amount": null,
+        "senior_citizen_bonus_bps": 50,
+        "women_bonus_bps": 0,
+        "renewal_bonus_bps": 25,
+        "tds_applicable": true,
+        "show_form15g15h_option": true,
+        "is_active": true,
+        "rate_slabs": [
+          {
+            "slab_id": "12M_CUM",
+            "tenure_min_months": 12,
+            "tenure_max_months": 23,
+            "payout_frequency_type": "On Maturity",
+            "base_interest_rate_pa": 8.25,
+            "compounding_frequency": "Quarterly",
+            "notes_public_display": "Rates effective as of Oct 2024",
+            "is_active": true
+          },
+          {
+            "slab_id": "24M_CUM",
+            "tenure_min_months": 24,
+            "tenure_max_months": 35,
+            "payout_frequency_type": "On Maturity",
+            "base_interest_rate_pa": 8.75,
+            "compounding_frequency": "Quarterly",
+            "notes_public_display": "Rates effective as of Oct 2024",
+            "is_active": true
+          },
+          {
+            "slab_id": "36M_CUM",
+            "tenure_min_months": 36,
+            "tenure_max_months": 60,
+            "payout_frequency_type": "On Maturity",
+            "base_interest_rate_pa": 9.25,
+            "compounding_frequency": "Quarterly",
+            "notes_public_display": "Rates effective as of Oct 2024",
+            "is_active": true
+          }
+        ]
+      }
+    ]
+  }
+]
+

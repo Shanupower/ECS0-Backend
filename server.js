@@ -16,6 +16,8 @@ import branchRoutes from './routes/branches.js'
 import statsRoutes from './routes/stats.js'
 import exportRoutes from './routes/export.js'
 import issueRoutes from './routes/issues.js'
+import schemeRoutes from './routes/schemes.js'
+import fdSchemeRoutes from './routes/fd-schemes.js'
 
 const app = express()
 
@@ -59,6 +61,8 @@ app.use('/api/branches', branchRoutes)
 app.use('/api/stats', statsRoutes)
 app.use('/api/export', exportRoutes)
 app.use('/api/issues', issueRoutes)
+app.use('/api/schemes', schemeRoutes) // MF Schemes routes
+app.use('/api/fd-schemes', fdSchemeRoutes) // FD Schemes routes
 
 // Health endpoint for database connection
 app.get('/health', async (req, res) => {
