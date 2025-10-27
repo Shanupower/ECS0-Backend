@@ -153,6 +153,35 @@ router.get('/issuer/:issuer_key/scheme/:scheme_id', async (req, res) => {
   }
 })
 
+// Get rate slabs for a scheme
+router.get('/issuer/:issuer_key/scheme/:scheme_id/slabs', async (req, res) => {
+  try {
+    const { issuer_key, scheme_id } = req.params
+    
+    const issuers = await q(`
+      FOR issuer IN fd_issuers
+      FILTER issuer._key == @issuer_key
+      RETURN issuer
+    `, { issuer_key })
+    
+    if (!issuers || issuers.length === 0) {
+      return res.status(404).json({ error: 'Issuer not found' })
+    }
+    
+    const scheme = issuers[0].schemes?.find(s => s.scheme_id === scheme_id)
+    
+    if (!scheme) {
+      return res.status(404).json({ error: 'Scheme not found' })
+    }
+    
+    const slabs = scheme.rate_slabs || []
+    res.json(slabs)
+  } catch (error) {
+    console.error('Error fetching rate slabs:', error)
+    res.status(500).json({ error: 'Failed to fetch rate slabs' })
+  }
+})
+
 // Calculate FD interest rate
 router.post('/calculate-rate', async (req, res) => {
   try {
@@ -222,18 +251,46 @@ router.post('/issuer', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const issuerData = req.body
     
-    // Generate issuer key if not provided
-    const issuer_key = issuerData._key || issuerData.short_name.toLowerCase().replace(/\s+/g, '_')
-    
-    // Check if exists
-    const existing = await q(`
-      FOR issuer IN fd_issuers
-      FILTER issuer._key == @issuer_key
-      RETURN issuer
-    `, { issuer_key })
-    
-    if (existing && existing.length > 0) {
-      return res.status(400).json({ error: 'Issuer with this key already exists' })
+    // Generate unique issuer key if not provided
+    let issuer_key = issuerData._key
+    if (!issuer_key) {
+      // Create base key from short name
+      const baseKey = issuerData.short_name.toLowerCase().replace(/\s+/g, '_')
+      issuer_key = baseKey
+      
+      // Check if exists and generate unique key
+      let counter = 1
+      while (true) {
+        const existing = await q(`
+          FOR issuer IN fd_issuers
+          FILTER issuer._key == @issuer_key
+          RETURN issuer
+        `, { issuer_key })
+        
+        if (!existing || existing.length === 0) {
+          break // Key is available
+        }
+        
+        // Key exists, try with suffix
+        issuer_key = `${baseKey}_${counter}`
+        counter++
+        
+        // Safety check to prevent infinite loop
+        if (counter > 100) {
+          return res.status(400).json({ error: 'Unable to generate unique issuer key' })
+        }
+      }
+    } else {
+      // Provided key, check if exists
+      const existing = await q(`
+        FOR issuer IN fd_issuers
+        FILTER issuer._key == @issuer_key
+        RETURN issuer
+      `, { issuer_key })
+      
+      if (existing && existing.length > 0) {
+        return res.status(400).json({ error: 'Issuer with this key already exists' })
+      }
     }
     
     // Validate business rules
@@ -482,9 +539,20 @@ router.post('/issuer/:issuer_key/scheme/:scheme_id/slab', requireAuth, requireRo
       return res.status(400).json({ error: 'Rate slab with this ID already exists' })
     }
     
+    // For non-cumulative schemes, set compounding_frequency and effective_yield_pa to null if not provided
+    const processedSlabData = { ...slabData }
+    if (!scheme.is_cumulative) {
+      if (processedSlabData.compounding_frequency !== undefined) {
+        processedSlabData.compounding_frequency = null
+      }
+      if (processedSlabData.effective_yield_pa !== undefined) {
+        processedSlabData.effective_yield_pa = null
+      }
+    }
+    
     const updatedScheme = {
       ...scheme,
-      rate_slabs: [...(scheme.rate_slabs || []), slabData]
+      rate_slabs: [...(scheme.rate_slabs || []), processedSlabData]
     }
     
     const updatedIssuer = {
@@ -542,7 +610,18 @@ router.put('/issuer/:issuer_key/scheme/:scheme_id/slab/:slab_id', requireAuth, r
       return res.status(404).json({ error: 'Rate slab not found' })
     }
     
-    const updatedSlab = { ...scheme.rate_slabs[slabIndex], ...updateData }
+    // For non-cumulative schemes, set compounding_frequency and effective_yield_pa to null if not provided
+    const processedUpdateData = { ...updateData }
+    if (!scheme.is_cumulative) {
+      if (processedUpdateData.compounding_frequency !== undefined) {
+        processedUpdateData.compounding_frequency = null
+      }
+      if (processedUpdateData.effective_yield_pa !== undefined) {
+        processedUpdateData.effective_yield_pa = null
+      }
+    }
+    
+    const updatedSlab = { ...scheme.rate_slabs[slabIndex], ...processedUpdateData }
     const updatedScheme = {
       ...scheme,
       rate_slabs: [
@@ -564,6 +643,9 @@ router.put('/issuer/:issuer_key/scheme/:scheme_id/slab/:slab_id', requireAuth, r
     // Validate
     const validationErrors = validateBusinessRules(updatedIssuer)
     if (validationErrors.length > 0) {
+      console.error('Validation errors when updating rate slab:', validationErrors)
+      console.error('Updated slab data:', updatedSlab)
+      console.error('Scheme data:', updatedScheme)
       return res.status(400).json({ error: 'Validation failed', details: validationErrors })
     }
     

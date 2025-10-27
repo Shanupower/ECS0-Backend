@@ -324,7 +324,7 @@ async function setupDatabase() {
                 "minItems": 1,
                 "items": {
                   "type": "object",
-                  "required": ["slab_id", "tenure_min_months", "tenure_max_months", "payout_frequency_type", "base_interest_rate_pa", "compounding_frequency", "is_active"],
+                  "required": ["slab_id", "tenure_min_months", "tenure_max_months", "payout_frequency_type", "base_interest_rate_pa", "is_active"],
                   "additionalProperties": false,
                   "properties": {
                     "slab_id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 3 },
@@ -332,7 +332,7 @@ async function setupDatabase() {
                     "tenure_max_months": { "type": "number", "minimum": 1, "multipleOf": 1 },
                     "payout_frequency_type": { "type": "string", "enum": ["Monthly", "Quarterly", "Half-Yearly", "Yearly", "On Maturity"] },
                     "base_interest_rate_pa": { "type": "number", "minimum": 0, "maximum": 30, "multipleOf": 0.01 },
-                    "compounding_frequency": { "type": "string", "enum": ["Quarterly", "Half-Yearly", "Yearly"] },
+                    "compounding_frequency": { "type": ["string", "null"], "enum": ["Quarterly", "Half-Yearly", "Yearly", null] },
                     "effective_yield_pa": { "type": ["number", "null"], "minimum": 0, "maximum": 30, "multipleOf": 0.01 },
                     "notes_public_display": { "type": ["string", "null"] },
                     "is_active": { "type": "boolean" }
