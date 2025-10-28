@@ -229,9 +229,23 @@ router.post('/calculate-rate', async (req, res) => {
     
     totalRate += bonuses.senior_citizen + bonuses.women + bonuses.renewal
     
+    // Calculate effective yield for cumulative schemes
+    let effective_yield_pa = null
+    if (scheme.is_cumulative && slab.compounding_frequency && slab.effective_yield_pa) {
+      effective_yield_pa = Math.round(slab.effective_yield_pa * 100) / 100
+    } else if (scheme.is_cumulative && slab.compounding_frequency) {
+      // Calculate effective yield based on compounding frequency
+      const r = totalRate / 100
+      const n = slab.compounding_frequency === 'Monthly' ? 12 :
+                slab.compounding_frequency === 'Quarterly' ? 4 :
+                slab.compounding_frequency === 'Half-Yearly' ? 2 : 1
+      effective_yield_pa = Math.round(((Math.pow(1 + r / n, n) - 1) * 100) * 100) / 100
+    }
+    
     res.json({
       base_rate_pa: baseRate,
       total_rate_pa: totalRate,
+      effective_yield_pa: effective_yield_pa,
       bonuses,
       slab: slab.slab_id,
       compounding_frequency: slab.compounding_frequency
@@ -410,6 +424,7 @@ router.post('/issuer/:issuer_key/scheme', requireAuth, requireRole('admin'), asy
     // Validate
     const validationErrors = validateBusinessRules(updatedIssuer)
     if (validationErrors.length > 0) {
+      console.error('FD Scheme validation errors:', validationErrors)
       return res.status(400).json({ error: 'Validation failed', details: validationErrors })
     }
     

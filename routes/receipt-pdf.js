@@ -102,8 +102,8 @@ export function generateReceiptPDF(receipt) {
         yPos = addKeyValue('Folio Number', receipt.folio_number, 60, yPos, 490)
       }
       
-      // Transaction type details
-      if (receipt.transaction_type) {
+      // Transaction type details (skip for FD)
+      if (receipt.transaction_type && !receipt.fd_issuer_name) {
         yPos += 10
         yPos = addKeyValue('Transaction Type', receipt.transaction_type, 60, yPos, 490)
         
@@ -159,25 +159,69 @@ export function generateReceiptPDF(receipt) {
           yPos = addKeyValue('Switch Value', switchValue, 60, yPos, 490)
         }
       }
-      if (receipt.txn_type || receipt.txnType) {
-        yPos = addKeyValue('Transaction Type', receipt.txn_type || receipt.txnType, 60, yPos, 490)
+      // Skip generic fields for FD receipts
+      if (!receipt.fd_issuer_name) {
+        if (receipt.txn_type || receipt.txnType) {
+          yPos = addKeyValue('Transaction Type', receipt.txn_type || receipt.txnType, 60, yPos, 490)
+        }
+        if (receipt.mode) {
+          yPos = addKeyValue('Mode', receipt.mode, 60, yPos, 490)
+        }
+        if (receipt.investment_amount || receipt.investmentAmount) {
+          const amount = new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: 'INR',
+            maximumFractionDigits: 2
+          }).format(receipt.investment_amount || receipt.investmentAmount)
+          yPos = addKeyValue('Investment Amount', amount, 60, yPos, 490)
+        }
+        if (receipt.folio_policy_no || receipt.folioPolicyNo) {
+          yPos = addKeyValue('Folio/Policy No', receipt.folio_policy_no || receipt.folioPolicyNo, 60, yPos, 490)
+        }
+        if (receipt.issuer_company || receipt.issuerCompany) {
+          yPos = addKeyValue('Issuer Company', receipt.issuer_company || receipt.issuerCompany, 60, yPos, 490)
+        }
       }
-      if (receipt.mode) {
-        yPos = addKeyValue('Mode', receipt.mode, 60, yPos, 490)
-      }
-      if (receipt.investment_amount || receipt.investmentAmount) {
-        const amount = new Intl.NumberFormat('en-IN', {
-          style: 'currency',
-          currency: 'INR',
-          maximumFractionDigits: 2
-        }).format(receipt.investment_amount || receipt.investmentAmount)
-        yPos = addKeyValue('Investment Amount', amount, 60, yPos, 490)
-      }
-      if (receipt.folio_policy_no || receipt.folioPolicyNo) {
-        yPos = addKeyValue('Folio/Policy No', receipt.folio_policy_no || receipt.folioPolicyNo, 60, yPos, 490)
-      }
-      if (receipt.issuer_company || receipt.issuerCompany) {
-        yPos = addKeyValue('Issuer Company', receipt.issuer_company || receipt.issuerCompany, 60, yPos, 490)
+      
+      // FD-specific details
+      if (receipt.fd_issuer_name) {
+        yPos += 10
+        doc.fontSize(11).font('Helvetica-Bold').fillColor('#dc2626').text('FIXED DEPOSIT DETAILS', 60, yPos)
+        yPos += 20
+        
+        yPos = addKeyValue('Issuer', receipt.fd_issuer_name + (receipt.fd_issuer_type ? ` (${receipt.fd_issuer_type})` : ''), 60, yPos, 490)
+        yPos = addKeyValue('Scheme', receipt.fd_scheme_name, 60, yPos, 490)
+        if (receipt.fd_deposit_amount) {
+          const amount = new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: 'INR',
+            maximumFractionDigits: 2
+          }).format(receipt.fd_deposit_amount)
+          yPos = addKeyValue('Deposit Amount', amount, 60, yPos, 490)
+        }
+        if (receipt.fd_tenure_months) {
+          yPos = addKeyValue('Tenure', `${receipt.fd_tenure_months} months (${Math.floor(receipt.fd_tenure_months/12)} years)`, 60, yPos, 490)
+        }
+        if (receipt.fd_payout_frequency) {
+          yPos = addKeyValue('Payout Frequency', receipt.fd_payout_frequency, 60, yPos, 490)
+        }
+        if (receipt.fd_locked_interest_rate_pa) {
+          yPos = addKeyValue('Interest Rate', `${receipt.fd_locked_interest_rate_pa.toFixed(2)}% p.a.`, 60, yPos, 490)
+        }
+        if (receipt.fd_maturity_amount) {
+          const maturityAmt = new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: 'INR',
+            maximumFractionDigits: 2
+          }).format(receipt.fd_maturity_amount)
+          yPos = addKeyValue('Maturity Amount', maturityAmt, 60, yPos, 490)
+        }
+        if (receipt.fd_maturity_date) {
+          yPos = addKeyValue('Maturity Date', new Date(receipt.fd_maturity_date).toLocaleDateString('en-IN'), 60, yPos, 490)
+        }
+        if (receipt.fd_application_number) {
+          yPos = addKeyValue('Application/FD Number', receipt.fd_application_number, 60, yPos, 490)
+        }
       }
       
       // Additional details in two columns
