@@ -242,6 +242,39 @@ async function setupDatabase() {
         collection: 'issues',
         type: 'persistent',
         fields: ['created_at']
+      },
+      // MF Schemes indexes
+      {
+        collection: 'mf_schemes',
+        type: 'persistent',
+        fields: ['scheme_code'],
+        unique: true
+      },
+      {
+        collection: 'mf_schemes',
+        type: 'persistent',
+        fields: ['amc_code']
+      },
+      {
+        collection: 'mf_schemes',
+        type: 'persistent',
+        fields: ['amc_code', 'base_name', 'plan', 'option'],
+        unique: true
+      },
+      {
+        collection: 'mf_schemes',
+        type: 'persistent',
+        fields: ['is_active']
+      },
+      {
+        collection: 'mf_schemes',
+        type: 'persistent',
+        fields: ['option']
+      },
+      {
+        collection: 'mf_schemes',
+        type: 'persistent',
+        fields: ['is_nfo']
       }
     ]
     

@@ -40,6 +40,7 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
       name: user.name,
       email: user.email,
       branch: user.branch,
+      branch_code: user.branch_code,
       role: user.role,
       is_active: user.is_active,
       last_login_at: user.last_login_at,
@@ -81,11 +82,27 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   
   const hash = await bcrypt.hash(passwordValidation.value, 10)
   try {
+    // If branch is provided, look up branch_code
+    let branchCode = null
+    if (branch) {
+      const branchQuery = await q(`
+        FOR b IN branches
+        FILTER b.branch_name == @branchName OR b.branch_code == @branchName
+        LIMIT 1
+        RETURN b
+      `, { branchName: branch })
+      
+      if (branchQuery.length > 0) {
+        branchCode = branchQuery[0].branch_code
+      }
+    }
+    
     const userDoc = {
       emp_code: empCodeValidation.value,
       name: nameValidation.value,
       email: email || null,
       branch: branch || null,
+      branch_code: branchCode,
       role,
       password_hash: hash,
       is_active: true,
@@ -106,9 +123,36 @@ router.patch('/:id', requireAuth, requireRole('admin'), async (req, res) => {
   
   if (name !== undefined) updates.name = name
   if (email !== undefined) updates.email = email
-  if (branch !== undefined) updates.branch = branch
   if (role !== undefined) updates.role = role
   if (is_active !== undefined) updates.is_active = is_active
+  
+  // If branch is being updated, also update branch_code
+  if (branch !== undefined) {
+    updates.branch = branch
+    
+    // Look up branch_code
+    if (branch) {
+      try {
+        const branchQuery = await q(`
+          FOR b IN branches
+          FILTER b.branch_name == @branchName OR b.branch_code == @branchName
+          LIMIT 1
+          RETURN b
+        `, { branchName: branch })
+        
+        if (branchQuery.length > 0) {
+          updates.branch_code = branchQuery[0].branch_code
+        } else {
+          updates.branch_code = null
+        }
+      } catch (err) {
+        console.error('Error looking up branch:', err)
+        updates.branch_code = null
+      }
+    } else {
+      updates.branch_code = null
+    }
+  }
   
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no_updates' })
   

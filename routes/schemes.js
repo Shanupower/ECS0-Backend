@@ -5,6 +5,27 @@ import { requireAuth, requireRole } from '../middleware/auth.js'
 const router = express.Router()
 
 // ===================================
+// UTILITY FUNCTIONS
+// ===================================
+
+// Helper function to generate display name
+function generateDisplayName(baseName, plan, option) {
+  const planTitle = plan === 'REGULAR' ? 'Regular' : 'Direct'
+  const optionTitle = 
+    option === 'GROWTH' ? 'Growth' :
+    option === 'IDCW_PAYOUT' ? 'IDCW – Payout' :
+    'IDCW – Reinvestment'
+  return `${baseName} – ${planTitle} – ${optionTitle}`
+}
+
+// Helper function to check ETF + IDCW warning
+function checkETFIDCWWarning(category, subCategory, option) {
+  const isETF = /ETF|Index/i.test(category || '') || /ETF|Index/i.test(subCategory || '')
+  const isIDCW = option === 'IDCW_PAYOUT' || option === 'IDCW_REINVEST'
+  return isETF && isIDCW ? ['IDCW not typical for ETF/Index schemes'] : []
+}
+
+// ===================================
 // GET ROUTES (Everyone can access)
 // ===================================
 
@@ -108,7 +129,7 @@ router.post('/amc', requireAuth, requireRole('admin'), async (req, res) => {
   }
 })
 
-// Create Scheme
+// Create Scheme (legacy single scheme creation)
 router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const {
@@ -119,6 +140,8 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       category,
       sub_category,
       plan,
+      option,
+      base_name,
       type,
       nav_latest,
       nav_date,
@@ -142,20 +165,29 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       return res.status(400).json({ error: 'Scheme code already exists' })
     }
     
+    // Calculate display name if option is provided
+    const displayName = (option && base_name) 
+      ? generateDisplayName(base_name, plan || 'REGULAR', option)
+      : scheme_name
+    
     const schemesCollection = getCollection('mf_schemes')
     const result = await schemesCollection.save({
       scheme_code,
       scheme_name,
+      display_name: displayName,
+      base_name: base_name || scheme_name,
       amc_code,
       amc_name,
       category,
       sub_category,
-      plan,
+      plan: plan || 'REGULAR',
+      option: option || 'GROWTH',
       type,
       nav_latest: nav_latest || 0,
       nav_date: nav_date || null,
       is_nfo: is_nfo || false,
       nfo_validity: is_nfo ? nfo_validity : null,
+      is_active: true,
       created_at: new Date().toISOString()
     })
     
@@ -163,6 +195,269 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   } catch (error) {
     console.error('Error creating scheme:', error)
     res.status(500).json({ error: 'Failed to create scheme' })
+  }
+})
+
+// Expand Preview - Generate plan × option variants
+router.post('/expand-preview', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const {
+      amc_code,
+      amc_name,
+      base_name,
+      category,
+      sub_category,
+      type,
+      is_nfo,
+      plans,
+      options,
+      proposedAmfiCodes
+    } = req.body
+    
+    // Validation
+    if (!amc_code || !base_name) {
+      return res.status(400).json({ error: 'amc_code and base_name are required' })
+    }
+    
+    if (!plans || !Array.isArray(plans) || plans.length === 0) {
+      return res.status(400).json({ error: 'At least one plan must be selected' })
+    }
+    
+    if (!options || !Array.isArray(options) || options.length === 0) {
+      return res.status(400).json({ error: 'At least one option must be selected' })
+    }
+    
+    // Generate cartesian product of plans × options
+    const variants = []
+    
+    for (const plan of plans) {
+      for (const option of options) {
+        const displayName = generateDisplayName(base_name, plan, option)
+        const comboKey = `${plan}|${option}`
+        const proposedCode = proposedAmfiCodes?.[comboKey] || ''
+        
+        // Check if this combination already exists
+        const existingCheck = await q(`
+          FOR scheme IN mf_schemes
+          FILTER scheme.amc_code == @amc_code
+          FILTER scheme.base_name == @base_name
+          FILTER scheme.plan == @plan
+          FILTER scheme.option == @option
+          LIMIT 1
+          RETURN scheme
+        `, { amc_code, base_name, plan, option })
+        
+        const exists = existingCheck.length > 0
+        const missingAmfi = !proposedCode && !is_nfo
+        const warnings = checkETFIDCWWarning(category, sub_category, option)
+        
+        variants.push({
+          plan,
+          option,
+          display_name: displayName,
+          amfi_code: proposedCode,
+          exists,
+          missingAmfi,
+          warnings,
+          existing_scheme_code: exists ? existingCheck[0].scheme_code : null
+        })
+      }
+    }
+    
+    res.json({ variants })
+  } catch (error) {
+    console.error('Error in expand-preview:', error)
+    res.status(500).json({ error: 'Failed to generate preview' })
+  }
+})
+
+// Commit Variants - Bulk create/update scheme variants
+router.post('/commit-variants', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const {
+      amc_code,
+      amc_name,
+      base_name,
+      category,
+      sub_category,
+      type,
+      is_nfo,
+      nfo_validity,
+      variants
+    } = req.body
+    
+    // Validation
+    if (!amc_code || !amc_name || !base_name) {
+      return res.status(400).json({ error: 'amc_code, amc_name, and base_name are required' })
+    }
+    
+    if (!variants || !Array.isArray(variants) || variants.length === 0) {
+      return res.status(400).json({ error: 'At least one variant must be provided' })
+    }
+    
+    // Filter only selected variants
+    const selectedVariants = variants.filter(v => v.selected === true)
+    
+    if (selectedVariants.length === 0) {
+      return res.status(400).json({ error: 'No variants selected' })
+    }
+    
+    let created = 0
+    let updated = 0
+    let skipped = 0
+    const errors = []
+    
+    const schemesCollection = getCollection('mf_schemes')
+    
+    for (const variant of selectedVariants) {
+      try {
+        const { plan, option, amfi_code, updateIfExists } = variant
+        
+        // Validate AMFI code requirement
+        if (!amfi_code && !is_nfo) {
+          errors.push({
+            variant: `${plan}|${option}`,
+            error: 'AMFI code is required for non-NFO schemes'
+          })
+          skipped++
+          continue
+        }
+        
+        const displayName = generateDisplayName(base_name, plan, option)
+        
+        // Check if scheme with this AMFI code exists
+        const existingByCode = amfi_code ? await q(`
+          FOR scheme IN mf_schemes
+          FILTER scheme.scheme_code == @scheme_code
+          LIMIT 1
+          RETURN scheme
+        `, { scheme_code: amfi_code }) : []
+        
+        // Check if combination exists
+        const existingByCombo = await q(`
+          FOR scheme IN mf_schemes
+          FILTER scheme.amc_code == @amc_code
+          FILTER scheme.base_name == @base_name
+          FILTER scheme.plan == @plan
+          FILTER scheme.option == @option
+          LIMIT 1
+          RETURN scheme
+        `, { amc_code, base_name, plan, option })
+        
+        const schemeData = {
+          scheme_code: amfi_code || `${amc_code}_${plan}_${option}_${Date.now()}`,
+          scheme_name: base_name, // Store base name in scheme_name
+          display_name: displayName,
+          base_name: base_name,
+          amc_code,
+          amc_name,
+          category: category || '',
+          sub_category: sub_category || '',
+          plan,
+          option,
+          type: type || 'OPEN_ENDED',
+          nav_latest: 0,
+          nav_date: null,
+          is_nfo: is_nfo || false,
+          nfo_validity: is_nfo ? nfo_validity : null,
+          is_active: is_nfo ? false : true, // NFO schemes start as inactive
+          updated_at: new Date().toISOString()
+        }
+        
+        if (existingByCode.length > 0) {
+          // Update existing scheme by AMFI code
+          if (updateIfExists) {
+            await q(`
+              FOR scheme IN mf_schemes
+              FILTER scheme.scheme_code == @scheme_code
+              UPDATE scheme WITH @data IN mf_schemes
+            `, { scheme_code: amfi_code, data: schemeData })
+            updated++
+          } else {
+            errors.push({
+              variant: `${plan}|${option}`,
+              error: `Scheme with code ${amfi_code} already exists`
+            })
+            skipped++
+          }
+        } else if (existingByCombo.length > 0) {
+          // Update existing combination
+          if (updateIfExists) {
+            await q(`
+              FOR scheme IN mf_schemes
+              FILTER scheme.amc_code == @amc_code
+              FILTER scheme.base_name == @base_name
+              FILTER scheme.plan == @plan
+              FILTER scheme.option == @option
+              UPDATE scheme WITH @data IN mf_schemes
+            `, { amc_code, base_name, plan, option, data: schemeData })
+            updated++
+          } else {
+            skipped++
+          }
+        } else {
+          // Create new scheme
+          schemeData.created_at = new Date().toISOString()
+          await schemesCollection.save(schemeData)
+          created++
+        }
+        
+      } catch (variantError) {
+        console.error(`Error processing variant:`, variantError)
+        errors.push({
+          variant: `${variant.plan}|${variant.option}`,
+          error: variantError.message
+        })
+        skipped++
+      }
+    }
+    
+    res.json({
+      created,
+      updated,
+      skipped,
+      errors
+    })
+    
+  } catch (error) {
+    console.error('Error in commit-variants:', error)
+    res.status(500).json({ error: 'Failed to commit variants' })
+  }
+})
+
+// Check Duplicate - Check if a variant already exists
+router.get('/check-duplicate', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { amc_code, base_name, plan, option } = req.query
+    
+    if (!amc_code || !base_name || !plan || !option) {
+      return res.status(400).json({ error: 'amc_code, base_name, plan, and option are required' })
+    }
+    
+    const existing = await q(`
+      FOR scheme IN mf_schemes
+      FILTER scheme.amc_code == @amc_code
+      FILTER scheme.base_name == @base_name
+      FILTER scheme.plan == @plan
+      FILTER scheme.option == @option
+      LIMIT 1
+      RETURN scheme
+    `, { amc_code, base_name, plan, option })
+    
+    if (existing.length > 0) {
+      res.json({
+        exists: true,
+        scheme_code: existing[0].scheme_code
+      })
+    } else {
+      res.json({
+        exists: false
+      })
+    }
+    
+  } catch (error) {
+    console.error('Error checking duplicate:', error)
+    res.status(500).json({ error: 'Failed to check duplicate' })
   }
 })
 
@@ -199,14 +494,17 @@ router.put('/:scheme_code', requireAuth, requireRole('admin'), async (req, res) 
     const { scheme_code } = req.params
     const {
       scheme_name,
+      base_name,
       category,
       sub_category,
       plan,
+      option,
       type,
       nav_latest,
       nav_date,
       is_nfo,
-      nfo_validity
+      nfo_validity,
+      is_active
     } = req.body
     
     // Build update object with only provided fields
@@ -215,14 +513,36 @@ router.put('/:scheme_code', requireAuth, requireRole('admin'), async (req, res) 
     }
     
     if (scheme_name !== undefined) updateData.scheme_name = scheme_name
+    if (base_name !== undefined) updateData.base_name = base_name
     if (category !== undefined) updateData.category = category
     if (sub_category !== undefined) updateData.sub_category = sub_category
     if (plan !== undefined) updateData.plan = plan
+    if (option !== undefined) updateData.option = option
     if (type !== undefined) updateData.type = type
     if (nav_latest !== undefined) updateData.nav_latest = nav_latest
     if (nav_date !== undefined) updateData.nav_date = nav_date
     if (is_nfo !== undefined) updateData.is_nfo = is_nfo
     if (nfo_validity !== undefined) updateData.nfo_validity = is_nfo ? nfo_validity : null
+    if (is_active !== undefined) updateData.is_active = is_active
+    
+    // Regenerate display_name if relevant fields changed
+    if ((base_name !== undefined || plan !== undefined || option !== undefined)) {
+      // Get current scheme to fetch missing fields
+      const currentScheme = await q(`
+        FOR scheme IN mf_schemes
+        FILTER scheme.scheme_code == @scheme_code
+        LIMIT 1
+        RETURN scheme
+      `, { scheme_code })
+      
+      if (currentScheme.length > 0) {
+        const current = currentScheme[0]
+        const finalBaseName = base_name || current.base_name || current.scheme_name
+        const finalPlan = plan || current.plan || 'REGULAR'
+        const finalOption = option || current.option || 'GROWTH'
+        updateData.display_name = generateDisplayName(finalBaseName, finalPlan, finalOption)
+      }
+    }
     
     const schemesCollection = getCollection('mf_schemes')
     
