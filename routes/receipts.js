@@ -167,6 +167,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       stp_frequency: d.stp_frequency || null,
       stp_start_date: d.stp_start_date || null,
       stp_amount: d.stp_amount || null,
+      stp_original_amount: d.stp_original_amount || null,
       // Switch Over fields
       switch_from_scheme_code: d.switch_from_scheme_code || null,
       switch_from_scheme_name: d.switch_from_scheme_name || null,

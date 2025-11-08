@@ -135,6 +135,9 @@ export function generateReceiptPDF(receipt) {
         if (receipt.transaction_type === 'STP' && receipt.stp_target_scheme_name) {
           yPos = addKeyValue('Transfer to Scheme', receipt.stp_target_scheme_name, 60, yPos, 490)
         }
+        if (receipt.stp_original_amount) {
+          yPos = addKeyValue('Total Original Scheme Amount', new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.stp_original_amount), 60, yPos, 490)
+        }
         if (receipt.stp_frequency) {
           yPos = addKeyValue('STP Frequency', receipt.stp_frequency, 60, yPos, 490)
         }
