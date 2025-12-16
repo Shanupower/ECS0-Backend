@@ -20,18 +20,24 @@ router.get('/summary', requireAuth, async (req, res) => {
     filterConditions.push('receipt.date <= @to')
     bindVars.to = to
   }
+  // Filter by user_id for employees, or by emp_code if provided (for admins viewing personal data)
   if (req.user.role === 'employee') {
     filterConditions.push('receipt.user_id == @user_id')
     bindVars.user_id = req.user.sub
   } else if (emp_code) {
-      filterConditions.push('receipt.emp_code == @emp_code')
+    // For admins/managers, filter by emp_code when provided
+    filterConditions.push('receipt.emp_code == @emp_code')
     bindVars.emp_code = emp_code
   }
   if (!(req.user.role === 'admin' && includeDeleted === '1')) {
     filterConditions.push('receipt.is_deleted == false')
   }
-  // Only include completed receipts in investment calculations
-  filterConditions.push('receipt.status == "Completed"')
+  // Include pending transactions if requested
+  const includePending = req.query.includePending === '1'
+  if (!includePending) {
+    // Only include completed receipts in investment calculations
+    filterConditions.push('receipt.status == "Completed"')
+  }
   
   if (filterConditions.length > 0) {
     filterClause = `FILTER ${filterConditions.join(' AND ')}\n`
@@ -42,15 +48,17 @@ router.get('/summary', requireAuth, async (req, res) => {
     ${filterClause}
     COLLECT AGGREGATE 
       total_receipts = LENGTH(1),
-      total_collections = SUM(receipt.investment_amount || 0)
-    RETURN { total_receipts, total_collections }
+      total_collections = SUM(TO_NUMBER(receipt.investment_amount) || 0),
+      total_cc = SUM(TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0),
+      total_si = SUM(TO_NUMBER(receipt.service_income || receipt.si || 0) || 0)
+    RETURN { total_receipts, total_collections, total_cc, total_si }
   `
   
   const byCatQuery = `
     FOR receipt IN receipts
     ${filterClause}
     COLLECT category = receipt.product_category 
-    AGGREGATE n = LENGTH(1), amount = SUM(receipt.investment_amount || 0)
+    AGGREGATE n = LENGTH(1), amount = SUM(TO_NUMBER(receipt.investment_amount) || 0)
     SORT amount DESC
     RETURN { category, n, amount }
   `
@@ -59,7 +67,7 @@ router.get('/summary', requireAuth, async (req, res) => {
     FOR receipt IN receipts
     ${filterClause}
     COLLECT date = receipt.date 
-    AGGREGATE n = LENGTH(1), amount = SUM(receipt.investment_amount || 0)
+    AGGREGATE n = LENGTH(1), amount = SUM(TO_NUMBER(receipt.investment_amount) || 0)
     SORT date ASC
     RETURN { date, n, amount }
   `
@@ -71,18 +79,76 @@ router.get('/summary', requireAuth, async (req, res) => {
   ])
   
   const totalCollections = totals[0]?.total_collections || 0
-  const commissions_total = Number(totalCollections) * 0.01
+  const totalCC = totals[0]?.total_cc || 0
+  const totalSI = totals[0]?.total_si || 0
   
-  // Get total customers count - filter by branch for non-admin users
+  // Get total customers count - show ALL customers in the branch, not just those with receipts
   let customersQuery = ''
   let customersBindVars = {}
   
+  // Check if this is "all branches" view (admin with viewMode=all, indicated by no emp_code and no branch filter)
+  const viewMode = req.query.viewMode || (emp_code ? 'personal' : 'all')
+  
   if (req.user.role === 'admin') {
-    // Admin sees all customers
-    customersQuery = `
-      FOR customer IN customers
-      RETURN LENGTH(1)
-    `
+    if (emp_code) {
+      // Personal view: Get the employee's branch and show all customers in that branch
+      const empUser = await q(`
+        FOR user IN users
+        FILTER user.emp_code == @emp_code
+        LIMIT 1
+        RETURN user.branch
+      `, { emp_code })
+      
+      if (empUser.length > 0 && empUser[0]) {
+        const empBranch = empUser[0]
+        const normalizedEmpBranch = normalizeBranchName(empBranch)
+        if (normalizedEmpBranch) {
+          customersQuery = `
+            FOR customer IN customers
+            FILTER customer.relationship_manager == @userBranch
+            RETURN LENGTH(1)
+          `
+          customersBindVars.userBranch = normalizedEmpBranch
+        } else {
+          // If no branch found, show all customers
+          customersQuery = `
+            FOR customer IN customers
+            RETURN LENGTH(1)
+          `
+        }
+      } else {
+        // Employee not found, show all customers
+        customersQuery = `
+          FOR customer IN customers
+          RETURN LENGTH(1)
+        `
+      }
+    } else if (viewMode === 'branch') {
+      // Branch view: Show all customers in admin's own branch
+      const userBranch = await getUserBranch(req.user.sub)
+      const normalizedUserBranch = normalizeBranchName(userBranch)
+      
+      if (normalizedUserBranch) {
+        customersQuery = `
+          FOR customer IN customers
+          FILTER customer.relationship_manager == @userBranch
+          RETURN LENGTH(1)
+        `
+        customersBindVars.userBranch = normalizedUserBranch
+      } else {
+        customersQuery = `
+          FOR customer IN customers
+          FILTER customer.relationship_manager == null
+          RETURN LENGTH(1)
+        `
+      }
+    } else {
+      // All branches view: Show all customers
+      customersQuery = `
+        FOR customer IN customers
+        RETURN LENGTH(1)
+      `
+    }
   } else {
     // Non-admin users see only their branch customers
     const userBranch = await getUserBranch(req.user.sub)
@@ -107,14 +173,21 @@ router.get('/summary', requireAuth, async (req, res) => {
   const customersResult = await q(customersQuery, customersBindVars)
   const totalCustomers = customersResult.length
 
-  res.json({
+  const response = {
     total_receipts: Number(totals[0]?.total_receipts || 0),
     total_investments: Number(totalCollections),
     total_customers: totalCustomers,
-    commissions_total,
+    collection_credit_earned: Number(totalCC),
     by_category: byCat,
     by_day: byDay
-  })
+  }
+  
+  // Only include service_income_earned for admins
+  if (req.user.role === 'admin') {
+    response.service_income_earned = Number(totalSI)
+  }
+  
+  res.json(response)
 })
 
 // Get statistics by category
@@ -133,18 +206,24 @@ router.get('/by-category', requireAuth, async (req, res) => {
     filterConditions.push('receipt.date <= @to')
     bindVars.to = to
   }
+  // Filter by user_id for employees, or by emp_code if provided (for admins viewing personal data)
   if (req.user.role === 'employee') {
     filterConditions.push('receipt.user_id == @user_id')
     bindVars.user_id = req.user.sub
   } else if (emp_code) {
+    // For admins/managers, filter by emp_code when provided
     filterConditions.push('receipt.emp_code == @emp_code')
     bindVars.emp_code = emp_code
   }
   if (!(req.user.role === 'admin' && includeDeleted === '1')) {
     filterConditions.push('receipt.is_deleted == false')
   }
-  // Only include completed receipts in investment calculations
-  filterConditions.push('receipt.status == "Completed"')
+  // Include pending transactions if requested
+  const includePending = req.query.includePending === '1'
+  if (!includePending) {
+    // Only include completed receipts in investment calculations
+    filterConditions.push('receipt.status == "Completed"')
+  }
   
   if (filterConditions.length > 0) {
     filterClause = `FILTER ${filterConditions.join(' AND ')}\n`
@@ -154,7 +233,7 @@ router.get('/by-category', requireAuth, async (req, res) => {
     FOR receipt IN receipts
     ${filterClause}
     COLLECT category = receipt.product_category 
-    AGGREGATE n = LENGTH(1), amount = SUM(receipt.investment_amount || 0)
+    AGGREGATE n = LENGTH(1), amount = SUM(TO_NUMBER(receipt.investment_amount) || 0)
     SORT amount DESC
     RETURN { category, n, amount }
   `
@@ -179,18 +258,24 @@ router.get('/by-day', requireAuth, async (req, res) => {
     filterConditions.push('receipt.date <= @to')
     bindVars.to = to
   }
+  // Filter by user_id for employees, or by emp_code if provided (for admins viewing personal data)
   if (req.user.role === 'employee') {
     filterConditions.push('receipt.user_id == @user_id')
     bindVars.user_id = req.user.sub
   } else if (emp_code) {
+    // For admins/managers, filter by emp_code when provided
     filterConditions.push('receipt.emp_code == @emp_code')
     bindVars.emp_code = emp_code
   }
   if (!(req.user.role === 'admin' && includeDeleted === '1')) {
     filterConditions.push('receipt.is_deleted == false')
   }
-  // Only include completed receipts in investment calculations
-  filterConditions.push('receipt.status == "Completed"')
+  // Include pending transactions if requested
+  const includePending = req.query.includePending === '1'
+  if (!includePending) {
+    // Only include completed receipts in investment calculations
+    filterConditions.push('receipt.status == "Completed"')
+  }
   
   if (filterConditions.length > 0) {
     filterClause = `FILTER ${filterConditions.join(' AND ')}\n`
@@ -200,7 +285,7 @@ router.get('/by-day', requireAuth, async (req, res) => {
     FOR receipt IN receipts
     ${filterClause}
     COLLECT date = receipt.date 
-    AGGREGATE n = LENGTH(1), amount = SUM(receipt.investment_amount || 0)
+    AGGREGATE n = LENGTH(1), amount = SUM(TO_NUMBER(receipt.investment_amount) || 0)
     SORT date ASC
     RETURN { date, n, amount }
   `
@@ -227,8 +312,12 @@ router.get('/branches', requireAuth, async (req, res) => {
     if (includeDeleted !== '1') {
       filterConditions.push('receipt.is_deleted == false')
     }
-    // Only include completed receipts in investment calculations
-    filterConditions.push('receipt.status == "Completed"')
+    // Include pending transactions if requested
+    const includePending = req.query.includePending === '1'
+    if (!includePending) {
+      // Only include completed receipts in investment calculations
+      filterConditions.push('receipt.status == "Completed"')
+    }
     
     if (filterConditions.length > 0) {
       dateFilter = `FILTER ${filterConditions.join(' AND ')}\n`
@@ -239,13 +328,18 @@ router.get('/branches', requireAuth, async (req, res) => {
       FOR receipt IN receipts
       ${dateFilter}
       COLLECT branch = receipt.branch 
-      AGGREGATE receipt_count = LENGTH(1), total_investments = SUM(receipt.investment_amount || 0)
+      AGGREGATE 
+        receipt_count = LENGTH(1), 
+        total_investments = SUM(TO_NUMBER(receipt.investment_amount) || 0),
+        total_cc = SUM(TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0),
+        total_si = SUM(TO_NUMBER(receipt.service_income || receipt.si || 0) || 0)
       SORT total_investments DESC
       RETURN {
         branch,
         total_receipts: receipt_count,
         total_investments,
-        commissions: total_investments * 0.01
+        total_cc,
+        total_si
       }
     `
     
@@ -266,17 +360,26 @@ router.get('/branches', requireAuth, async (req, res) => {
       const employeeData = employeeStats.find(emp => emp.branch === branch.branch)
       return {
         ...branch,
-        total_employees: employeeData?.employee_count || 0
+        total_employees: employeeData?.employee_count || 0,
+        commissions: branch.total_cc, // Alias for backward compatibility
+        collection_credit: branch.total_cc
       }
     })
     
-    res.json({
+    const response = {
       total_branches: mergedStats.length,
       total_investments: mergedStats.reduce((sum, branch) => sum + branch.total_investments, 0),
       total_receipts: mergedStats.reduce((sum, branch) => sum + branch.total_receipts, 0),
-      total_commissions: mergedStats.reduce((sum, branch) => sum + branch.commissions, 0),
+      total_collection_credit: mergedStats.reduce((sum, branch) => sum + branch.total_cc, 0),
       branches: mergedStats
-    })
+    }
+    
+    // Only include service income for admins
+    if (req.user.role === 'admin') {
+      response.total_service_income = mergedStats.reduce((sum, branch) => sum + branch.total_si, 0)
+    }
+    
+    res.json(response)
   } catch (error) {
     console.error('Error fetching branch stats:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })

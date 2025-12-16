@@ -44,7 +44,9 @@ router.get('/receipts', requireAuth, async (req, res) => {
         created_by: receipt.user_id,
         created_at: receipt.created_at,
         status: receipt.is_deleted ? 'deleted' : 'active',
-        notes: receipt.notes || ''
+        notes: receipt.notes || '',
+        cc: receipt.collection_credit || receipt.cc || 0,
+        si: receipt.service_income || receipt.si || 0
       }
     `
     
@@ -54,7 +56,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
     const headers = [
       'Receipt ID', 'Investor ID', 'Investor Name', 'PAN', 'Phone', 'Email',
       'Amount', 'Category', 'Payment Method', 'Branch Code', 'Branch Name',
-      'Created By', 'Created At', 'Status', 'Notes'
+      'Created By', 'Created At', 'Status', 'Notes', 'CC', 'SI'
     ]
     
     const csvRows = [headers.join(',')]
@@ -75,7 +77,10 @@ router.get('/receipts', requireAuth, async (req, res) => {
         receipt.created_by,
         receipt.created_at,
         receipt.status,
-        `"${receipt.notes || ''}"`
+        `"${receipt.notes || ''}"`,
+        receipt.cc || 0,
+        // Hide SI from non-admins
+        req.user.role === 'admin' ? (receipt.si || 0) : ''
       ]
       csvRows.push(row.join(','))
     })
@@ -88,6 +93,125 @@ router.get('/receipts', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export receipts' })
+  }
+})
+
+// Export detailed transaction history to CSV
+router.get('/transactions', requireAuth, async (req, res) => {
+  try {
+    const {
+      from,
+      to,
+      branch_code,
+      emp_code,
+      status,
+      category
+    } = req.query
+
+    let query = `
+      FOR receipt IN receipts
+      FILTER receipt.is_deleted == false
+    `
+    const bindVars = {}
+
+    if (from) {
+      query += ` AND receipt.date >= @from`
+      bindVars.from = from
+    }
+    if (to) {
+      query += ` AND receipt.date <= @to`
+      bindVars.to = to
+    }
+    if (branch_code) {
+      query += ` AND receipt.branch == @branch_code`
+      bindVars.branch_code = branch_code
+    }
+    if (emp_code) {
+      query += ` AND receipt.emp_code == @emp_code`
+      bindVars.emp_code = emp_code
+    }
+    if (status) {
+      if (status === 'Pending') {
+        query += ` AND (receipt.status == null OR receipt.status == @status)`
+      } else {
+        query += ` AND receipt.status == @status`
+      }
+      bindVars.status = status
+    }
+    if (category) {
+      query += ` AND receipt.product_category == @category`
+      bindVars.category = category
+    }
+
+    query += `
+      SORT receipt.date DESC
+      RETURN {
+        receipt_id: receipt._key,
+        date: receipt.date,
+        branch: receipt.branch,
+        emp_code: receipt.emp_code,
+        investor_id: receipt.investor_id,
+        investor_name: receipt.investor_name,
+        product_category: receipt.product_category,
+        investment_amount: receipt.investment_amount,
+        cc: receipt.collection_credit || receipt.cc || 0,
+        si: receipt.service_income || receipt.si || 0,
+        status: receipt.status || 'Pending',
+        transaction_type: receipt.transaction_type || receipt.txn_type || null,
+        mode: receipt.mode || null,
+        txn_details: receipt.transaction_details || null
+      }
+    `
+
+    const rows = await q(query, bindVars)
+
+    const headers = [
+      'Receipt ID', 'Date', 'Branch', 'Employee Code',
+      'Investor ID', 'Investor Name', 'Product Category',
+      'Investment Amount', 'CC', 'SI', 'Status',
+      'Transaction Type', 'Mode',
+      'Entry Mode', 'Channel', 'Reference No', 'Txn Date',
+      'Txn Bank Name', 'Txn Account Last4', 'Txn Notes'
+    ]
+
+    const csvRows = [headers.join(',')]
+
+    rows.forEach(r => {
+      const td = r.txn_details || {}
+      const row = [
+        r.receipt_id,
+        r.date || '',
+        `"${r.branch || ''}"`,
+        r.emp_code || '',
+        r.investor_id || '',
+        `"${r.investor_name || ''}"`,
+        r.product_category || '',
+        r.investment_amount || 0,
+        r.cc || 0,
+        // Hide SI for non-admins
+        req.user.role === 'admin' ? (r.si || 0) : '',
+        r.status || 'Pending',
+        r.transaction_type || '',
+        r.mode || '',
+        td.entry_mode || '',
+        td.channel || '',
+        td.reference_no || '',
+        td.txn_date || '',
+        `"${td.bank_name || ''}"`,
+        td.account_last4 || '',
+        `"${td.notes || ''}"`
+      ]
+      csvRows.push(row.join(','))
+    })
+
+    const csv = csvRows.join('\n')
+
+    res.setHeader('Content-Type', 'text/csv')
+    res.setHeader('Content-Disposition', `attachment; filename="transactions_${new Date().toISOString().split('T')[0]}.csv"`)
+    res.send(csv)
+  } catch (error) {
+    console.error('CSV transaction export error:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to export transactions' })
   }
 })
 

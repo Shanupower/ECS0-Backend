@@ -425,6 +425,91 @@ router.post('/commit-variants', requireAuth, requireRole('admin'), async (req, r
   }
 })
 
+// Bulk CC/SI update for MF and FD schemes (admin only)
+router.post('/bulk-cc-si-update', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { items } = req.body || {}
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'invalid_payload', detail: 'items array is required' })
+    }
+
+    const results = {
+      updated: 0,
+      failed: 0,
+      errors: []
+    }
+
+    for (const item of items) {
+      const { type, scheme_code, issuer_key, scheme_id, cc, si } = item || {}
+      try {
+        const ccVal = cc !== undefined && cc !== null ? Number(cc) : null
+        const siVal = si !== undefined && si !== null ? Number(si) : null
+
+        if (!type || (type !== 'MF' && type !== 'FD')) {
+          throw new Error('type must be MF or FD')
+        }
+
+        if (type === 'MF') {
+          if (!scheme_code) throw new Error('scheme_code is required for MF')
+          await q(`
+            FOR scheme IN mf_schemes
+            FILTER scheme.scheme_code == @scheme_code
+            UPDATE scheme WITH {
+              cc: @ccVal,
+              si: @siVal
+            } IN mf_schemes
+          `, { scheme_code, ccVal, siVal })
+          results.updated++
+        } else if (type === 'FD') {
+          if (!issuer_key || !scheme_id) throw new Error('issuer_key and scheme_id are required for FD')
+
+          const issuers = await q(`
+            FOR issuer IN fd_issuers
+            FILTER issuer._key == @issuer_key
+            LIMIT 1
+            RETURN issuer
+          `, { issuer_key })
+
+          if (!issuers.length) {
+            throw new Error(`FD issuer not found for key ${issuer_key}`)
+          }
+
+          const issuer = issuers[0]
+          const schemes = issuer.schemes || []
+          const updatedSchemes = schemes.map(s => {
+            if (s.scheme_id === scheme_id) {
+              return {
+                ...s,
+                cc: ccVal,
+                si: siVal
+              }
+            }
+            return s
+          })
+
+          await q(`
+            FOR issuer IN fd_issuers
+            FILTER issuer._key == @issuer_key
+            UPDATE issuer WITH { schemes: @schemes } IN fd_issuers
+          `, { issuer_key, schemes: updatedSchemes })
+          results.updated++
+        }
+      } catch (err) {
+        results.failed++
+        results.errors.push({
+          item,
+          detail: err.message || String(err)
+        })
+      }
+    }
+
+    res.json(results)
+  } catch (error) {
+    console.error('Error in bulk-cc-si-update:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to bulk update CC/SI' })
+  }
+})
+
 // Check Duplicate - Check if a variant already exists
 router.get('/check-duplicate', requireAuth, requireRole('admin'), async (req, res) => {
   try {

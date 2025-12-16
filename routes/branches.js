@@ -1,6 +1,6 @@
 import express from 'express'
 import bcrypt from 'bcryptjs'
-import { q } from '../config/database.js'
+import { q, normalizeBranchName } from '../config/database.js'
 import { requireAuth, requireRole, requireBranchAccess } from '../middleware/auth.js'
 import { validateBranchCode, validateEmail, validateMobile, validatePIN, validateRequired } from '../utils/validators.js'
 
@@ -107,17 +107,22 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
       deletedFilter = 'FILTER receipt.is_deleted == false'
     }
     
-    // Get branch statistics - only include completed receipts
+    // Get branch statistics - include pending if requested
+    const includePending = req.query.includePending === '1'
+    const statusFilter = includePending ? '' : 'FILTER receipt.status == "Completed"'
+    
     const statsQuery = `
       FOR receipt IN receipts
       FILTER receipt.branch == @branchName
-      FILTER receipt.status == "Completed"
+      ${statusFilter}
       ${dateFilter}
       ${deletedFilter}
       COLLECT AGGREGATE 
         total_receipts = LENGTH(1),
-        total_investments = SUM(receipt.investment_amount || 0)
-      RETURN { total_receipts, total_investments }
+        total_investments = SUM(TO_NUMBER(receipt.investment_amount) || 0),
+        total_cc = SUM(TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0),
+        total_si = SUM(TO_NUMBER(receipt.service_income || receipt.si || 0) || 0)
+      RETURN { total_receipts, total_investments, total_cc, total_si }
     `
     
     const stats = await q(statsQuery, { ...bindVars, branchName: branch.branch_name })
@@ -130,16 +135,18 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
       RETURN total
     `, { branchName: branch.branch_name })
     
-    // Get customer count for this branch
+    // Get customer count for this branch - all customers in the branch
+    const normalizedBranchName = normalizeBranchName(branch.branch_name)
     const customerCount = await q(`
-      FOR receipt IN receipts
-      FILTER receipt.branch == @branchName
-      ${dateFilter}
-      ${deletedFilter}
-      COLLECT investor_id = receipt.investor_id WITH COUNT INTO total
-      COLLECT WITH COUNT INTO unique_customers
-      RETURN unique_customers
-    `, { ...bindVars, branchName: branch.branch_name })
+      FOR customer IN customers
+      FILTER customer.relationship_manager == @normalizedBranch
+      COLLECT WITH COUNT INTO total
+      RETURN total
+    `, { normalizedBranch: normalizedBranchName || branch.branch_name })
+    
+    const totalInvestments = stats[0]?.total_investments || 0
+    const totalCC = stats[0]?.total_cc || 0
+    const totalSI = stats[0]?.total_si || 0
     
     const result = {
       branch: {
@@ -152,9 +159,15 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
         total_employees: employeeCount[0] || 0,
         total_customers: customerCount[0] || 0,
         total_receipts: stats[0]?.total_receipts || 0,
-        total_investments: stats[0]?.total_investments || 0,
-        commissions: (stats[0]?.total_investments || 0) * 0.01
+        total_investments: totalInvestments,
+        collection_credit: totalCC,
+        commissions: totalCC // Alias for backward compatibility
       }
+    }
+    
+    // Only include service income for admins
+    if (req.user.role === 'admin') {
+      result.statistics.service_income = totalSI
     }
     
     res.json(result)
