@@ -297,13 +297,13 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       fd_details: fdDetails,
       // Transaction details (for online/offline, RTGS, etc.)
       transaction_details: {
-        entry_mode: d.transaction_details?.entry_mode || d.entry_mode || null, // Online / Offline
-        channel: d.transaction_details?.channel || d.transaction_channel || null, // UPI / NEFT / RTGS / ...
-        reference_no: d.transaction_details?.reference_no || d.transaction_reference_no || null,
+        entry_mode: d.transaction_details?.entry_mode || d.entry_mode || d.transactionType || null, // Online / Offline / Others
+        channel: d.transaction_details?.channel || d.transaction_channel || d.othersTransactionType || null, // UPI / NEFT / RTGS / ...
+        reference_no: d.transaction_details?.reference_no || d.transaction_reference_no || d.transactionNumber || null,
         txn_date: d.transaction_details?.txn_date || d.txn_date || null,
-        bank_name: d.transaction_details?.bank_name || d.bank_name || null,
+        bank_name: d.transaction_details?.bank_name || d.bankName || d.bank_name || null,
         account_last4: d.transaction_details?.account_last4 || d.account_last4 || null,
-        notes: d.transaction_details?.notes || d.transaction_notes || null
+        notes: d.transaction_details?.notes || d.transaction_notes || (d.transactionType === 'Others' ? d.othersTransactionType : null) || null
       },
       // CC and SI calculated and stored at transaction time (for audit & dashboards)
       collection_credit: collectionCredit,
@@ -750,7 +750,16 @@ router.patch('/:id', requireAuth, async (req, res) => {
     RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status }
   `, { id })
   if (!own.length) return res.status(404).json({ error: 'not_found' })
-  if (!(req.user.role === 'admin' || String(own[0].user_id) === String(req.user.sub))) return res.status(403).json({ error: 'forbidden' })
+  
+  const currentStatus = own[0].status || 'Pending'
+  const isOwner = String(own[0].user_id) === String(req.user.sub)
+  const isAdmin = req.user.role === 'admin'
+  const isPending = currentStatus === 'Pending'
+  
+  // Allow editing if: admin, owner, OR status is Pending (all users can edit pending receipts)
+  if (!(isAdmin || isOwner || isPending)) {
+    return res.status(403).json({ error: 'forbidden', detail: 'Only admins, owners, or pending receipts can be edited' })
+  }
   
   const allowed = [
     'date','branch','scheme_name','scheme_option','investment_amount','folio_policy_no','mode',
@@ -770,7 +779,6 @@ router.patch('/:id', requireAuth, async (req, res) => {
   }
 
   // Enforce transaction-details immutability once status is not Pending
-  const currentStatus = own[0].status || 'Pending'
   if (currentStatus !== 'Pending') {
     const transactionKeys = [
       'mode','txn_type','from_text','to_text','units_or_amount',
