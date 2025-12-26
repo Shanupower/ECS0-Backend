@@ -70,17 +70,21 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         return res.status(400).json({ error: 'validation_error', detail: 'Premium amount is required for Insurance' })
       }
     } else if (productCategory === 'FD') {
-      // Fixed Deposit validations
-      if (!d.issuerCompany && !d.issuer_company) {
+      // Fixed Deposit validations - support both old and new field names
+      const hasIssuer = d.issuerCompany || d.issuer_company || d.fd_issuer_name || d.fd_issuer_key
+      if (!hasIssuer) {
         return res.status(400).json({ error: 'validation_error', detail: 'Company name is required for Fixed Deposit' })
       }
-      if (!d.investmentAmount && !d.investment_amount && !d.amount) {
+      const hasAmount = d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount
+      if (!hasAmount) {
         return res.status(400).json({ error: 'validation_error', detail: 'Deposit amount is required for Fixed Deposit' })
       }
-      if (!d.roi && !d.roi_percent) {
+      const hasRoi = d.roi || d.roi_percent || d.fd_total_rate_pa || d.fd_locked_interest_rate_pa
+      if (!hasRoi) {
         return res.status(400).json({ error: 'validation_error', detail: 'Interest rate is required for Fixed Deposit' })
       }
-      if (!d.depositPeriodYM && !d.deposit_period_ym) {
+      const hasPeriod = d.depositPeriodYM || d.deposit_period_ym || d.fd_tenure_months
+      if (!hasPeriod) {
         return res.status(400).json({ error: 'validation_error', detail: 'Deposit period is required for Fixed Deposit' })
       }
     } else if (productCategory === 'BOND') {
@@ -101,7 +105,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     // This ensures we store the CC/SI amount at the moment of transaction creation
     let collectionCredit = 0
     let serviceIncome = 0
-    const investmentAmount = parseFloat(d.investmentAmount || d.investment_amount || d.amount || 0)
+    const investmentAmount = parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || 0)
     
     // Check if CC/SI are already provided (from frontend calculation)
     if (d.collection_credit !== undefined || d.cc !== undefined) {
@@ -206,11 +210,11 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       pin_code: d.pinCode || d.pin_code || null,
       pan: d.pan || null,
       email: d.email || null,
-      scheme_name: d.schemeName || d.scheme_name || null,
+      scheme_name: d.schemeName || d.scheme_name || d.fd_scheme_name || null,
       scheme_option: d.schemeOption || d.scheme_option || null,
       product_category: d.product_category || d.productCategory || null,
-      investment_amount: d.investmentAmount || d.amount || null,
-      folio_policy_no: d.folioPolicyNo || d.folio_policy_no || null,
+      investment_amount: d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || null,
+      folio_policy_no: d.folioPolicyNo || d.folio_policy_no || d.fd_application_number || null,
       mode: d.mode || null,
       period_installments: d.period_installments || d.sip_stp_swp_period || null,
       installments_count: d.noOfInstallments || d.installments_count || null,
@@ -220,8 +224,8 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       units_or_amount: d.unitsOrAmount || d.units_or_amount || null,
       fd_type: d.fdType || d.fd_type || null,
       client_type: d.clientType || d.client_type || null,
-      deposit_period_ym: d.depositPeriodYM || d.deposit_period_ym || null,
-      roi_percent: d.roi || d.roi_percent || null,
+      deposit_period_ym: d.depositPeriodYM || d.deposit_period_ym || (d.fd_tenure_months ? `${Math.floor(d.fd_tenure_months / 12)}Y ${d.fd_tenure_months % 12}M` : null),
+      roi_percent: d.roi || d.roi_percent || d.fd_total_rate_pa || d.fd_locked_interest_rate_pa || null,
       interest_payable: d.interestPayable || d.interest_payable || null,
       interest_frequency: d.interestFrequency || d.interest_frequency || null,
       instrument_type: d.instrumentType || d.instrument_type || null,
@@ -233,8 +237,8 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       renewal_due_date: d.renewalDueDate || d.renewal_due_date || null,
       maturity_amount: d.maturityAmount || d.maturity_amount || null,
       renewal_amount: d.renewalAmount || d.renewal_amount || null,
-      issuer_company: d.issuerCompany || d.issuer_company || null,
-      issuer_category: d.issuerCategory || d.issuer_category || null,
+      issuer_company: d.issuerCompany || d.issuer_company || d.fd_issuer_name || null,
+      issuer_category: d.issuerCategory || d.issuer_category || (d.fd_issuer_type ? 'Fixed Deposit' : null),
       // New MF-specific fields (legacy top-level, kept for backwards compatibility)
       amc_code: d.amc_code || null,
       amc_name: d.amc_name || null,
