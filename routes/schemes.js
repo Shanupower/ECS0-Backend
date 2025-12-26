@@ -8,6 +8,33 @@ const router = express.Router()
 // UTILITY FUNCTIONS
 // ===================================
 
+// Helper function to automatically expire NFOs that have passed their validity date
+async function expireNFOs() {
+  try {
+    const today = new Date().toISOString().split('T')[0]
+    
+    // Find and update expired NFOs
+    const expiredSchemes = await q(`
+      FOR scheme IN mf_schemes
+      FILTER scheme.is_nfo == true
+      FILTER scheme.nfo_validity != null
+      FILTER scheme.nfo_validity < @today
+      UPDATE scheme WITH { is_nfo: false, nfo_validity: null } IN mf_schemes
+      RETURN scheme.scheme_code
+    `, { today })
+    
+    if (expiredSchemes.length > 0) {
+      console.log(`[NFO Expiry] Automatically expired ${expiredSchemes.length} NFO scheme(s)`)
+    }
+    
+    return expiredSchemes.length
+  } catch (error) {
+    console.error('Error expiring NFOs:', error)
+    // Don't throw - allow the request to continue even if expiry check fails
+    return 0
+  }
+}
+
 // Helper function to generate display name
 function generateDisplayName(baseName, plan, option) {
   const planTitle = plan === 'REGULAR' ? 'Regular' : 'Direct'
@@ -51,6 +78,9 @@ router.get('/amc/:amc_code', async (req, res) => {
     const { amc_code } = req.params
     const today = new Date().toISOString().split('T')[0] // Get date in YYYY-MM-DD format
     
+    // Automatically expire NFOs that have passed their validity date
+    await expireNFOs()
+    
     const schemes = await q(`
       FOR scheme IN mf_schemes
       FILTER scheme.amc_code == @amc_code
@@ -70,6 +100,9 @@ router.get('/amc/:amc_code', async (req, res) => {
 router.get('/:scheme_code', async (req, res) => {
   try {
     const { scheme_code } = req.params
+    
+    // Automatically expire NFOs that have passed their validity date
+    await expireNFOs()
     
     const schemes = await q(`
       FOR scheme IN mf_schemes
@@ -716,23 +749,15 @@ router.delete('/:scheme_code', requireAuth, requireRole('admin'), async (req, re
 // NFO VALIDITY CHECK (Admin/System)
 // ===================================
 
-// Check and expire NFOs
+// Check and expire NFOs (manual trigger - also runs automatically on scheme fetches)
 router.post('/check-nfo-validity', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0]
-    
-    const expiredSchemes = await q(`
-      FOR scheme IN mf_schemes
-      FILTER scheme.is_nfo == true
-      FILTER scheme.nfo_validity < @today
-      UPDATE scheme WITH { is_nfo: false, nfo_validity: null } IN mf_schemes
-      RETURN scheme.scheme_name
-    `, { today })
+    const expiredCount = await expireNFOs()
     
     res.json({ 
       message: 'NFO validity check completed',
-      expired_count: expiredSchemes.length,
-      expired_schemes: expiredSchemes
+      expired_count: expiredCount,
+      note: 'NFOs are automatically expired when schemes are fetched. This endpoint allows manual triggering.'
     })
   } catch (error) {
     console.error('Error checking NFO validity:', error)

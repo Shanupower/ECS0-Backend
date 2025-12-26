@@ -139,7 +139,10 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
     const normalizedBranchName = normalizeBranchName(branch.branch_name)
     const customerCount = await q(`
       FOR customer IN customers
-      FILTER customer.relationship_manager == @normalizedBranch
+      FILTER (
+        (IS_ARRAY(customer.relationship_manager) && @normalizedBranch IN customer.relationship_manager) ||
+        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @normalizedBranch)
+      )
       COLLECT WITH COUNT INTO total
       RETURN total
     `, { normalizedBranch: normalizedBranchName || branch.branch_name })

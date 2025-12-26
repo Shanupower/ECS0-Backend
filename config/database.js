@@ -89,6 +89,7 @@ export const normalizeBranchName = (userBranch) => {
 }
 
 // Helper function to check if user can access customer (branch-based filtering)
+// Supports both single branch (string) and multiple branches (array) for backward compatibility
 export const canAccessCustomer = async (userId, customerRelationshipManager) => {
   try {
     console.log(`[Access Check] Checking access for user ${userId} to customer with RM ${customerRelationshipManager}`)
@@ -114,7 +115,16 @@ export const canAccessCustomer = async (userId, customerRelationshipManager) => 
     console.log(`[Access Check] Normalized user branch: ${normalizedUserBranch}`)
     console.log(`[Access Check] Customer RM: ${customerRelationshipManager}`)
     
-    const hasAccess = normalizedUserBranch && normalizedUserBranch === customerRelationshipManager
+    // Handle both single branch (string) and multiple branches (array)
+    let hasAccess = false
+    if (Array.isArray(customerRelationshipManager)) {
+      // Check if user's branch is in the customer's branches array
+      hasAccess = normalizedUserBranch && customerRelationshipManager.includes(normalizedUserBranch)
+    } else {
+      // Backward compatibility: single branch string
+      hasAccess = normalizedUserBranch && normalizedUserBranch === customerRelationshipManager
+    }
+    
     console.log(`[Access Check] Access result: ${hasAccess}`)
     
     return hasAccess

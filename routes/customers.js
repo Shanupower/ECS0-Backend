@@ -52,7 +52,10 @@ router.get('/search', requireAuth, async (req, res) => {
 
     // Branch-based filtering (unless admin)
     if (!isAdmin && normalizedUserBranch) {
-      filterClause = `FILTER customer.relationship_manager == @userBranch`
+      filterClause = `FILTER (
+        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+      )`
       bindVars.userBranch = normalizedUserBranch
     }
 
@@ -199,7 +202,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       // Use fulltext search for better performance
       query = `
         FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
-        ${!isAdmin && normalizedUserBranch ? 'FILTER customer.relationship_manager == @userBranch' : ''}
+        ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
         SORT customer.${orderBy} ${sortDir}
         LIMIT @offset, @limit
         RETURN {
@@ -235,8 +238,12 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       }
 
       // Branch-based filtering (unless admin)
+      // Support both single branch (string) and multiple branches (array)
       if (!isAdmin && normalizedUserBranch) {
-        filterClause = `FILTER customer.relationship_manager == @userBranch`
+        filterClause = `FILTER (
+          (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+          (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+        )`
         bindVars.userBranch = normalizedUserBranch
       }
 
@@ -303,12 +310,12 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
 
     const countQuery = useFulltext === 'true' ? `
       FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
-      ${!isAdmin && normalizedUserBranch ? 'FILTER customer.relationship_manager == @userBranch' : ''}
+      ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
       COLLECT WITH COUNT INTO total
       RETURN total
     ` : `
       FOR customer IN customers
-      ${!isAdmin && normalizedUserBranch ? 'FILTER customer.relationship_manager == @userBranch' : ''}
+      ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
       FILTER (
         LOWER(customer.name) LIKE LOWER(@searchQuery) 
         OR customer.investor_id == @exactId
@@ -400,7 +407,10 @@ router.get('/', requireAuth, async (req, res) => {
 
     // Branch-based filtering (unless admin)
     if (!isAdmin && normalizedUserBranch) {
-      filterClause = `FILTER customer.relationship_manager == @userBranch`
+      filterClause = `FILTER (
+        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+      )`
       bindVars.userBranch = normalizedUserBranch
     }
 
@@ -612,12 +622,55 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       }
     }
 
-    // Get user's branch to assign as relationship manager
-    const userBranch = await getUserBranch(req.user.sub)
-    const normalizedUserBranch = normalizeBranchName(userBranch)
-    if (!normalizedUserBranch) {
-      return res.status(400).json({ error: 'invalid_user', detail: 'User branch not found' })
+    // Handle branches - accept either 'branches' array or single 'relationship_manager' for backward compatibility
+    // FormData with multer may send arrays in different formats, so handle all cases
+    let branches = []
+    
+    // Check for branches array (could be from JSON or FormData)
+    // Multer may parse FormData arrays as req.body['branches[]'] or req.body.branches
+    const branchesInput = req.body.branches || req.body['branches[]']
+    
+    if (branchesInput) {
+      if (Array.isArray(branchesInput)) {
+        // Already an array (from FormData with brackets or JSON)
+        branches = branchesInput.map(b => normalizeBranchName(b)).filter(Boolean)
+      } else if (typeof branchesInput === 'string') {
+        // Single string or JSON string - try to parse
+        try {
+          const parsed = JSON.parse(branchesInput)
+          if (Array.isArray(parsed)) {
+            branches = parsed.map(b => normalizeBranchName(b)).filter(Boolean)
+          } else {
+            branches = [normalizeBranchName(branchesInput)].filter(Boolean)
+          }
+        } catch {
+          // Not JSON, treat as single branch string
+          branches = [normalizeBranchName(branchesInput)].filter(Boolean)
+        }
+      }
+      
+      if (branches.length === 0) {
+        return res.status(400).json({ error: 'validation_error', detail: 'At least one valid branch must be provided' })
+      }
+    } else if (req.body.relationship_manager) {
+      // Single branch provided (backward compatibility)
+      const normalizedBranch = normalizeBranchName(req.body.relationship_manager)
+      if (!normalizedBranch) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Invalid branch name' })
+      }
+      branches = [normalizedBranch]
+    } else {
+      // Auto-assign user's branch if no branches specified
+      const userBranch = await getUserBranch(req.user.sub)
+      const normalizedUserBranch = normalizeBranchName(userBranch)
+      if (!normalizedUserBranch) {
+        return res.status(400).json({ error: 'invalid_user', detail: 'User branch not found' })
+      }
+      branches = [normalizedUserBranch]
     }
+    
+    // Store as array (even if single branch for consistency)
+    const relationshipManager = branches.length === 1 ? branches[0] : branches
 
     // Check if PAN already exists (after validation)
     const existingPan = await q(`
@@ -674,7 +727,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       annual_income: annual_income ? Number(annual_income) : null,
       aadhar_number: aadhar_number || null,
       media_documents: mediaDocuments,
-      relationship_manager: normalizedUserBranch, // Auto-assign user's branch
+      relationship_manager: relationshipManager, // Can be single branch (string) or multiple branches (array)
       created_at: new Date().toISOString(),
       is_active: true,
       source_type: 'manual_entry'
@@ -683,9 +736,12 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     const result = await getCollection('customers').save(customerDoc)
     res.status(201).json({ 
       investor_id: nextId,
-      relationship_manager: normalizedUserBranch,
+      relationship_manager: relationshipManager,
+      branches: branches,
       media_files: mediaDocuments.length,
-      message: 'Customer created and assigned to your branch'
+      message: branches.length === 1 
+        ? 'Customer created and assigned to your branch'
+        : `Customer created and assigned to ${branches.length} branch(es)`
     })
   } catch (error) {
     console.error('Error creating customer:', error)
@@ -719,7 +775,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
       mother_name,
       occupation,
       annual_income,
-      aadhar_number
+      aadhar_number,
+      branches, // New: array of branches
+      relationship_manager // Backward compatibility: single branch
     } = req.body || {}
 
     // Check if customer exists and get full customer data
@@ -850,6 +908,29 @@ router.patch('/:id', requireAuth, async (req, res) => {
     if (occupation !== undefined) updates.occupation = occupation
     if (annual_income !== undefined) updates.annual_income = annual_income ? Number(annual_income) : null
     if (aadhar_number !== undefined) updates.aadhar_number = aadhar_number
+    
+    // Handle branch updates - support both 'branches' array and 'relationship_manager' for backward compatibility
+    if (branches !== undefined || relationship_manager !== undefined) {
+      let newBranches = []
+      
+      if (branches !== undefined && Array.isArray(branches)) {
+        // Multiple branches provided
+        newBranches = branches.map(b => normalizeBranchName(b)).filter(Boolean)
+        if (newBranches.length === 0) {
+          return res.status(400).json({ error: 'validation_error', detail: 'At least one valid branch must be provided' })
+        }
+      } else if (relationship_manager !== undefined) {
+        // Single branch provided (backward compatibility)
+        const normalizedBranch = normalizeBranchName(relationship_manager)
+        if (!normalizedBranch) {
+          return res.status(400).json({ error: 'validation_error', detail: 'Invalid branch name' })
+        }
+        newBranches = [normalizedBranch]
+      }
+      
+      // Store as array if multiple branches, or single string if one branch (for backward compatibility)
+      updates.relationship_manager = newBranches.length === 1 ? newBranches[0] : newBranches
+    }
 
     // Add update timestamp
     updates.updated_at = new Date().toISOString()

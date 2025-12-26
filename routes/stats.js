@@ -224,7 +224,10 @@ router.get('/summary', requireAuth, async (req, res) => {
         if (normalizedEmpBranch) {
           customersQuery = `
             FOR customer IN customers
-            FILTER customer.relationship_manager == @userBranch
+            FILTER (
+              (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+              (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+            )
             RETURN LENGTH(1)
           `
           customersBindVars.userBranch = normalizedEmpBranch

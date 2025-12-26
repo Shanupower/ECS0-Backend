@@ -194,7 +194,10 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       application_number: d.fd_application_number || null,
       deposit_date: d.fd_deposit_date || null,
       tds_applicable: d.fd_tds_applicable || null,
-      form_15g_15h: d.fd_form_15g_15h || null
+      form_15g_15h: d.fd_form_15g_15h || null,
+      transaction_type: d.fd_transaction_type || null, // Fresh or Renewal
+      renewal_investment_type: d.fd_renewal_investment_type || null, // same, increased, decreased
+      renewal_additional_amount: d.fd_renewal_additional_amount || null
     } : null
 
     const receiptDoc = {
@@ -218,7 +221,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       mode: d.mode || null,
       period_installments: d.period_installments || d.sip_stp_swp_period || null,
       installments_count: d.noOfInstallments || d.installments_count || null,
-      txn_type: d.txnType || d.txn_type || null,
+      txn_type: d.txnType || d.txn_type || d.fd_transaction_type || null, // For FD, use fd_transaction_type
       from_text: d.from || d.from_text || null,
       to_text: d.to || d.to_text || null,
       units_or_amount: d.unitsOrAmount || d.units_or_amount || null,
@@ -296,6 +299,9 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       fd_deposit_date: d.fd_deposit_date || null,
       fd_tds_applicable: d.fd_tds_applicable || null,
       fd_form_15g_15h: d.fd_form_15g_15h || null,
+      fd_transaction_type: d.fd_transaction_type || null, // Fresh or Renewal
+      fd_renewal_investment_type: d.fd_renewal_investment_type || null, // same, increased, decreased
+      fd_renewal_additional_amount: d.fd_renewal_additional_amount || null,
       // Nested product-specific details for cleaner schema
       mf_details: mfDetails,
       fd_details: fdDetails,
@@ -423,7 +429,10 @@ function withNormalizedDetails(receipt) {
       application_number: normalized.fd_application_number || null,
       deposit_date: normalized.fd_deposit_date || null,
       tds_applicable: normalized.fd_tds_applicable || null,
-      form_15g_15h: normalized.fd_form_15g_15h || null
+      form_15g_15h: normalized.fd_form_15g_15h || null,
+      transaction_type: normalized.fd_transaction_type || normalized.txn_type || null,
+      renewal_investment_type: normalized.fd_renewal_investment_type || null,
+      renewal_additional_amount: normalized.fd_renewal_additional_amount || null
     }
   }
 
@@ -456,6 +465,8 @@ router.get('/', requireAuth, async (req, res) => {
       mode,
       issuer,
       emp_code,
+      branch_code,
+      search, // Search by investor name/ID or receipt ID
       includeDeleted = '0'
     } = req.query
 
@@ -509,6 +520,19 @@ router.get('/', requireAuth, async (req, res) => {
     if (issuer) {
       filterConditions.push('receipt.issuer_company LIKE @issuer')
       bindVars.issuer = `%${issuer}%`
+    }
+
+    // Branch filter (for admins)
+    if (branch_code && req.user.role === 'admin') {
+      filterConditions.push('receipt.branch == @branch_code')
+      bindVars.branch_code = branch_code
+    }
+
+    // Search filter (investor name/ID or receipt ID)
+    if (search && search.trim().length > 0) {
+      const searchTerm = `%${search.trim()}%`
+      filterConditions.push('(receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search OR receipt.receipt_no LIKE @search)')
+      bindVars.search = searchTerm
     }
 
     if (req.user.role === 'employee') {
@@ -576,6 +600,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
       category,
       status,
       issuer,
+      search, // Search by investor name/ID or receipt ID
       page = '1',
       size = '20',
       sort = 'created_at:desc',
@@ -640,6 +665,13 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
     if (issuer) {
       filterConditions.push('receipt.issuer_company LIKE @issuer')
       bindVars.issuer = `%${issuer}%`
+    }
+
+    // Search filter (investor name/ID or receipt ID)
+    if (search && search.trim().length > 0) {
+      const searchTerm = `%${search.trim()}%`
+      filterConditions.push('(receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search OR receipt.receipt_no LIKE @search)')
+      bindVars.search = searchTerm
     }
 
     // includeDeleted only for admins
@@ -772,7 +804,8 @@ router.patch('/:id', requireAuth, async (req, res) => {
     'instrument_type','instrument_no','instrument_date','bank_name','bank_branch','fdr_demat_policy',
     'renewal_due_date','maturity_amount','renewal_amount','issuer_company','issuer_category','product_category',
     'collection_credit','cc','service_income','si', // Allow manual updates to CC/SI if needed
-    'transaction_details','entry_mode','transaction_channel','transaction_reference_no','txn_date','account_last4','transaction_notes'
+    'transaction_details','entry_mode','transaction_channel','transaction_reference_no','txn_date','account_last4','transaction_notes',
+    'fd_transaction_type' // Fresh or Renewal for FD receipts
   ]
   const d = req.body || {}
   const updates = {}

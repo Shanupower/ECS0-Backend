@@ -1,11 +1,17 @@
 import express from 'express'
 import PDFDocument from 'pdfkit'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
 import { q, getCollection } from '../config/database.js'
 import { requireAuth } from '../middleware/auth.js'
 
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
 const router = express.Router()
 
-// Generate professional receipt PDF
+// Generate professional receipt PDF matching traditional receipt format
 export function generateReceiptPDF(receipt) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 50, size: 'A4' })
@@ -19,197 +25,246 @@ export function generateReceiptPDF(receipt) {
     doc.on('error', reject)
     
     try {
-      // Helper function to add key-value pair with better formatting
-      const addKeyValue = (key, value, x, y, maxWidth) => {
-        if (!value || value === 'N/A') return y
-        
-        const labelWidth = 140
-        const valueWidth = maxWidth - labelWidth
-        
-        doc.fontSize(9).font('Helvetica').fillColor('#666').text(key + ':', x, y, { width: labelWidth })
-        doc.fontSize(10).font('Helvetica').fillColor('#000').text(String(value), x + labelWidth, y, { width: valueWidth })
-        
-        return y + 20
+      // Helper to add key-value pair in traditional format (compact spacing)
+      const addField = (label, value, x, y, labelWidth = 180, valueWidth = 300) => {
+        if (!value || value === 'N/A' || value === '—') {
+          doc.fontSize(9).font('Helvetica').fillColor('#666').text(label + ':', x, y, { width: labelWidth })
+          doc.fontSize(9).font('Helvetica').fillColor('#000').text('N/A', x + labelWidth, y, { width: valueWidth })
+          return y + 15
+        }
+        doc.fontSize(9).font('Helvetica').fillColor('#666').text(label + ':', x, y, { width: labelWidth })
+        doc.fontSize(9).font('Helvetica').fillColor('#000').text(String(value), x + labelWidth, y, { width: valueWidth })
+        return y + 15
       }
       
-      // Helper to add section header
-      const addSectionHeader = (title, y) => {
-        doc.fontSize(14).font('Helvetica-Bold').fillColor('#dc2626').text(title, 50, y)
-        // Underline
-        const textWidth = doc.widthOfString(title)
-        doc.moveTo(50, y + 15).lineTo(50 + textWidth, y + 15).strokeColor('#dc2626').lineWidth(2).stroke()
-        return y + 30
-      }
+      let yPos = 40
       
-      // Header Section with Box
-      doc.rect(40, 40, 515, 80).strokeColor('#dc2626').lineWidth(2).stroke()
-      doc.fontSize(32).font('Helvetica-Bold').fillColor('#dc2626').text('ECS FINANCIAL', 60, 55)
-      doc.fontSize(11).font('Helvetica').fillColor('#666').text('AMFI Registered Mutual Fund Distributor', 60, 85)
+      // Page number (top right)
+      doc.fontSize(8).font('Helvetica').fillColor('#666').text('Page 1 of 1', 450, yPos, { align: 'right' })
+      yPos += 12
       
-      // Receipt Number and Date (Right Aligned in header box)
+      // Date and Receipt ID (top right)
+      const dateStr = receipt.date ? new Date(receipt.date).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN')
       const receiptNo = receipt.receipt_no || receipt.receiptNo || 'N/A'
-      const dateStr = receipt.date ? new Date(receipt.date).toLocaleDateString('en-IN') : 'N/A'
+      const receiptId = `ECS-${dateStr.replace(/\//g, '')}-${receiptNo}`
       
-      doc.fontSize(14).font('Helvetica-Bold').fillColor('#000').text(`Receipt: ${receiptNo}`, { align: 'right', width: 200 })
-      doc.fontSize(10).font('Helvetica').fillColor('#666').text(`Date: ${dateStr}`, { align: 'right', width: 200 })
+      doc.fontSize(9).font('Helvetica').fillColor('#000').text(`Date: ${dateStr}`, 400, yPos, { align: 'right', width: 150 })
+      yPos += 12
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(`Receipt ID: ${receiptId}`, 400, yPos, { align: 'right', width: 150 })
+      yPos += 15
       
-      let yPos = 150
+      // Logo and Company Header (smaller)
+      const logoPath = path.join(__dirname, '../assets/ecs-logo.png')
+      try {
+        if (fs.existsSync(logoPath)) {
+          doc.image(logoPath, 50, yPos, { width: 45, height: 45 })
+        }
+      } catch (error) {
+        console.warn('Could not load logo:', error.message)
+      }
       
-      // Employee Details Section
-      yPos = addSectionHeader('EMPLOYEE INFORMATION', yPos)
+      doc.fontSize(18).font('Helvetica-Bold').fillColor('#dc2626').text('ECS Financial', 105, yPos + 8)
+      doc.fontSize(8).font('Helvetica').fillColor('#666').text('AMFI Regd. Mutual Fund Distributor', 105, yPos + 25)
       
-      yPos = addKeyValue('Name', receipt.employee_name || receipt.employeeName, 60, yPos, 490)
-      yPos = addKeyValue('Code', receipt.emp_code || receipt.empCode, 60, yPos, 490)
-      yPos = addKeyValue('Branch', receipt.branch, 60, yPos, 490)
+      yPos += 60
       
-      yPos += 20
+      // Divider line
+      doc.moveTo(50, yPos).lineTo(545, yPos).strokeColor('#000').lineWidth(1).stroke()
+      yPos += 12
+      
+      // ACKNOWLEDGEMENT RECEIPT Section Header
+      doc.fontSize(12).font('Helvetica-Bold').fillColor('#000').text('ACKNOWLEDGEMENT RECEIPT', 50, yPos)
+      yPos += 18
+      
+      // Branch / Place and Relationship Manager Section
+      yPos = addField('Branch / Place', receipt.branch || 'N/A', 50, yPos)
+      yPos = addField('Relationship Manager', receipt.employee_name || receipt.employeeName || 'N/A', 50, yPos)
+      yPos = addField('Manager Mobile', receipt.employee_mobile || 'N/A', 50, yPos)
+      yPos = addField('Email ID (Manager)', receipt.employee_email || receipt.email || 'N/A', 50, yPos)
+      
+      yPos += 8
       
       // Investor Details Section
-      yPos = addSectionHeader('INVESTOR INFORMATION', yPos)
+      yPos = addField('Investor Name', receipt.investor_name || receipt.investorName || 'N/A', 50, yPos)
+      yPos = addField('Investor ID', receipt.investor_id || receipt.investorId || 'N/A', 50, yPos)
+      yPos = addField('Mobile Number (Investor)', receipt.investor_mobile || receipt.mobile || 'N/A', 50, yPos)
+      yPos = addField('PAN', receipt.pan || 'N/A', 50, yPos)
+      yPos = addField('Email ID (Investor)', receipt.email || 'N/A', 50, yPos)
       
-      yPos = addKeyValue('Investor ID', receipt.investor_id || receipt.investorId, 60, yPos, 490)
-      yPos = addKeyValue('Name', receipt.investor_name || receipt.investorName, 60, yPos, 490)
-      yPos = addKeyValue('PAN', receipt.pan, 60, yPos, 490)
-      yPos = addKeyValue('Email', receipt.email, 60, yPos, 490)
-      yPos = addKeyValue('PIN Code', receipt.pin_code || receipt.pinCode, 60, yPos, 490)
-      yPos = addKeyValue('Address', receipt.investor_address || receipt.investorAddress, 60, yPos, 490)
+      yPos += 12
       
-      yPos += 20
+      // Divider line
+      doc.moveTo(50, yPos).lineTo(545, yPos).strokeColor('#000').lineWidth(1).stroke()
+      yPos += 12
       
       // Investment Details Section
-      yPos = addSectionHeader('INVESTMENT DETAILS', yPos)
+      doc.fontSize(12).font('Helvetica-Bold').fillColor('#000').text('Investment Details', 50, yPos)
+      yPos += 18
       
-      if (receipt.product_category || receipt.productCategory) {
-        yPos = addKeyValue('Product Category', receipt.product_category || receipt.productCategory, 60, yPos, 490)
-      }
+      // Product category box (red shade box) - smaller
+      const productCategory = receipt.product_category || receipt.productCategory || 'Mutual Funds'
+      const boxHeight = 22
+      // Light red shade background
+      doc.rect(50, yPos, 495, boxHeight).fillColor('#fee2e2').fill()
+      doc.rect(50, yPos, 495, boxHeight).strokeColor('#dc2626').lineWidth(1).stroke()
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#dc2626').text(productCategory, 60, yPos + 6)
+      yPos += boxHeight + 10
       
-      // New MF-specific details
+      // Investment fields
       if (receipt.amc_name || receipt.amc_code) {
-        yPos = addKeyValue('AMC', receipt.amc_name || receipt.amc_code, 60, yPos, 490)
+        yPos = addField('AMC Name', receipt.amc_name || receipt.amc_code, 50, yPos)
       }
+      
       if (receipt.scheme_name || receipt.schemeName) {
         const schemeName = receipt.scheme_name || receipt.schemeName
         const nfoTag = receipt.scheme_is_nfo ? ' [NFO]' : ''
-        yPos = addKeyValue('Scheme Name', schemeName + nfoTag, 60, yPos, 490)
-      }
-      if (receipt.scheme_category) {
-        yPos = addKeyValue('Category', `${receipt.scheme_category}${receipt.scheme_sub_category ? ' - ' + receipt.scheme_sub_category : ''}`, 60, yPos, 490)
-      }
-      if (receipt.scheme_plan && receipt.scheme_type) {
-        yPos = addKeyValue('Plan & Type', `${receipt.scheme_plan} - ${receipt.scheme_type}`, 60, yPos, 490)
-      }
-      if (receipt.folio_number) {
-        yPos = addKeyValue('Folio Number', receipt.folio_number, 60, yPos, 490)
+        yPos = addField('Target Scheme', schemeName + nfoTag, 50, yPos)
       }
       
-      // Transaction type details (skip for FD)
-      if (receipt.transaction_type && !receipt.fd_issuer_name) {
-        yPos += 10
-        yPos = addKeyValue('Transaction Type', receipt.transaction_type, 60, yPos, 490)
-        
-        // SIP details
-        if (receipt.transaction_type === 'SIP' && receipt.sip_frequency) {
-          yPos = addKeyValue('SIP Frequency', receipt.sip_frequency, 60, yPos, 490)
-        }
-        if (receipt.sip_start_date) {
-          yPos = addKeyValue('Start Date', new Date(receipt.sip_start_date).toLocaleDateString('en-IN'), 60, yPos, 490)
-        }
-        if (receipt.sip_end_date) {
-          yPos = addKeyValue('End Date', new Date(receipt.sip_end_date).toLocaleDateString('en-IN'), 60, yPos, 490)
-        } else if (receipt.sip_is_perpetual) {
-          yPos = addKeyValue('Type', 'Perpetual (30 years)', 60, yPos, 490)
-        }
-        
-        // SWP details
-        if (receipt.transaction_type === 'SWP' && receipt.swp_frequency) {
-          yPos = addKeyValue('SWP Frequency', receipt.swp_frequency, 60, yPos, 490)
-        }
-        if (receipt.swp_start_date) {
-          yPos = addKeyValue('SWP Start Date', new Date(receipt.swp_start_date).toLocaleDateString('en-IN'), 60, yPos, 490)
-        }
-        if (receipt.swp_amount) {
-          yPos = addKeyValue('SWP Amount', new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.swp_amount), 60, yPos, 490)
-        }
-        
-        // STP details
-        if (receipt.transaction_type === 'STP' && receipt.stp_target_scheme_name) {
-          yPos = addKeyValue('Transfer to Scheme', receipt.stp_target_scheme_name, 60, yPos, 490)
-        }
-        if (receipt.stp_original_amount) {
-          yPos = addKeyValue('Total Original Scheme Amount', new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.stp_original_amount), 60, yPos, 490)
-        }
-        if (receipt.stp_frequency) {
-          yPos = addKeyValue('STP Frequency', receipt.stp_frequency, 60, yPos, 490)
-        }
-        if (receipt.stp_start_date) {
-          yPos = addKeyValue('STP Start Date', new Date(receipt.stp_start_date).toLocaleDateString('en-IN'), 60, yPos, 490)
-        }
-        if (receipt.stp_amount) {
-          yPos = addKeyValue('Transfer Amount', new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.stp_amount), 60, yPos, 490)
-        }
-        
-        // Switch Over details
-        if (receipt.transaction_type === 'Switch Over' && receipt.switch_to_scheme_name) {
-          yPos = addKeyValue('Switch to Scheme', receipt.switch_to_scheme_name, 60, yPos, 490)
-        }
-        if (receipt.switch_from_scheme_name) {
-          yPos = addKeyValue('Switch from Scheme', receipt.switch_from_scheme_name, 60, yPos, 490)
-        }
+      if (receipt.switch_from_scheme_name || receipt.from_scheme_name) {
+        yPos = addField('Existing Scheme', receipt.switch_from_scheme_name || receipt.from_scheme_name, 50, yPos)
+      }
+      
+      if (receipt.scheme_plan || receipt.plan) {
+        yPos = addField('Plan', receipt.scheme_plan || receipt.plan, 50, yPos)
+      }
+      
+      if (receipt.scheme_option || receipt.schemeOption) {
+        const option = receipt.scheme_option || receipt.schemeOption
+        let optionText = option
+        if (option === 'GROWTH') optionText = 'GROWTH'
+        else if (option === 'IDCW_PAYOUT') optionText = 'IDCW - Payout'
+        else if (option === 'IDCW_REINVEST') optionText = 'IDCW - Reinvestment'
+        yPos = addField('Option', optionText, 50, yPos)
+      }
+      
+      if (receipt.transaction_type || receipt.txn_type || receipt.txnType) {
+        const txnType = receipt.transaction_type || receipt.txn_type || receipt.txnType
+        yPos = addField('Transaction Type', txnType, 50, yPos)
+      }
+      
+      if (receipt.folio_number || receipt.folio_policy_no || receipt.folioPolicyNo) {
+        const folioNo = receipt.folio_number || receipt.folio_policy_no || receipt.folioPolicyNo
+        yPos = addField('Folio Status', 'Existing Folio', 50, yPos)
+        yPos = addField('Number (Folio Number)', folioNo, 50, yPos)
+      }
+      
+      if (receipt.investment_amount || receipt.investmentAmount) {
+        const amount = new Intl.NumberFormat('en-IN', {
+          style: 'currency',
+          currency: 'INR',
+          maximumFractionDigits: 2
+        }).format(receipt.investment_amount || receipt.investmentAmount)
+        yPos = addField('Amount', amount, 50, yPos)
+      }
+      
+      // Switch Over details
+      if (receipt.transaction_type === 'Switch Over' || receipt.txn_type === 'Switch Over') {
         if (receipt.switch_type && receipt.switch_value) {
           const switchValue = receipt.switch_type === 'Amount' 
             ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.switch_value)
             : `${receipt.switch_value} units`
-          yPos = addKeyValue('Switch Value', switchValue, 60, yPos, 490)
-        }
-      }
-      // Skip generic fields for FD receipts
-      if (!receipt.fd_issuer_name) {
-        if (receipt.txn_type || receipt.txnType) {
-          yPos = addKeyValue('Transaction Type', receipt.txn_type || receipt.txnType, 60, yPos, 490)
-        }
-        if (receipt.mode) {
-          yPos = addKeyValue('Mode', receipt.mode, 60, yPos, 490)
-        }
-        if (receipt.investment_amount || receipt.investmentAmount) {
-          const amount = new Intl.NumberFormat('en-IN', {
-            style: 'currency',
-            currency: 'INR',
-            maximumFractionDigits: 2
-          }).format(receipt.investment_amount || receipt.investmentAmount)
-          yPos = addKeyValue('Investment Amount', amount, 60, yPos, 490)
-        }
-        if (receipt.folio_policy_no || receipt.folioPolicyNo) {
-          yPos = addKeyValue('Folio/Policy No', receipt.folio_policy_no || receipt.folioPolicyNo, 60, yPos, 490)
-        }
-        if (receipt.issuer_company || receipt.issuerCompany) {
-          yPos = addKeyValue('Issuer Company', receipt.issuer_company || receipt.issuerCompany, 60, yPos, 490)
+          yPos = addField('Switch Type', receipt.switch_type, 50, yPos)
+          yPos = addField('Switch Value', switchValue, 50, yPos)
         }
       }
       
-      // FD-specific details
+      // SIP details
+      if (receipt.transaction_type === 'SIP' || receipt.txn_type === 'SIP') {
+        if (receipt.sip_frequency) yPos = addField('SIP Frequency', receipt.sip_frequency, 50, yPos)
+        if (receipt.sip_start_date) {
+          yPos = addField('Start Date', new Date(receipt.sip_start_date).toLocaleDateString('en-IN'), 50, yPos)
+        }
+        if (receipt.sip_end_date) {
+          yPos = addField('End Date', new Date(receipt.sip_end_date).toLocaleDateString('en-IN'), 50, yPos)
+        } else if (receipt.sip_is_perpetual) {
+          yPos = addField('Type', 'Perpetual (30 years)', 50, yPos)
+        }
+      }
+      
+      // STP details
+      if (receipt.transaction_type === 'STP' || receipt.txn_type === 'STP') {
+        if (receipt.stp_target_scheme_name) {
+          yPos = addField('Target Scheme', receipt.stp_target_scheme_name, 50, yPos)
+        }
+        if (receipt.stp_original_amount) {
+          const originalAmt = new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: 'INR',
+            maximumFractionDigits: 2
+          }).format(receipt.stp_original_amount)
+          yPos = addField('Total Original Scheme Amount', originalAmt, 50, yPos)
+        }
+        if (receipt.stp_frequency) yPos = addField('STP Frequency', receipt.stp_frequency, 50, yPos)
+        if (receipt.stp_start_date) {
+          yPos = addField('STP Start Date', new Date(receipt.stp_start_date).toLocaleDateString('en-IN'), 50, yPos)
+        }
+        if (receipt.stp_amount) {
+          const stpAmt = new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: 'INR',
+            maximumFractionDigits: 2
+          }).format(receipt.stp_amount)
+          yPos = addField('Transfer Amount', stpAmt, 50, yPos)
+        }
+      }
+      
+      // SWP details
+      if (receipt.transaction_type === 'SWP' || receipt.txn_type === 'SWP') {
+        if (receipt.swp_frequency) yPos = addField('SWP Frequency', receipt.swp_frequency, 50, yPos)
+        if (receipt.swp_start_date) {
+          yPos = addField('SWP Start Date', new Date(receipt.swp_start_date).toLocaleDateString('en-IN'), 50, yPos)
+        }
+        if (receipt.swp_amount) {
+          const swpAmt = new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: 'INR',
+            maximumFractionDigits: 2
+          }).format(receipt.swp_amount)
+          yPos = addField('Withdrawal Amount', swpAmt, 50, yPos)
+        }
+      }
+      
+      // Branch Manager
+      if (receipt.employee_name || receipt.employeeName) {
+        const empCode = receipt.emp_code || receipt.empCode || ''
+        yPos = addField('Branch Manager', `${receipt.employee_name || receipt.employeeName}${empCode ? ` (${empCode})` : ''}`, 50, yPos)
+      }
+      
+      yPos += 10
+      
+      // FD Details (if applicable)
       if (receipt.fd_issuer_name) {
-        yPos += 10
-        doc.fontSize(11).font('Helvetica-Bold').fillColor('#dc2626').text('FIXED DEPOSIT DETAILS', 60, yPos)
-        yPos += 20
+        doc.moveTo(50, yPos).lineTo(545, yPos).strokeColor('#000').lineWidth(1).stroke()
+        yPos += 12
         
-        yPos = addKeyValue('Issuer', receipt.fd_issuer_name + (receipt.fd_issuer_type ? ` (${receipt.fd_issuer_type})` : ''), 60, yPos, 490)
-        yPos = addKeyValue('Scheme', receipt.fd_scheme_name, 60, yPos, 490)
+        doc.fontSize(12).font('Helvetica-Bold').fillColor('#000').text('Fixed Deposit Details', 50, yPos)
+        yPos += 18
+        
+        // FD category box (red shade) - smaller
+        doc.rect(50, yPos, 495, 22).fillColor('#fee2e2').fill()
+        doc.rect(50, yPos, 495, 22).strokeColor('#dc2626').lineWidth(1).stroke()
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#dc2626').text('Fixed Deposit', 60, yPos + 6)
+        yPos += 32
+        
+        yPos = addField('Issuer', receipt.fd_issuer_name + (receipt.fd_issuer_type ? ` (${receipt.fd_issuer_type})` : ''), 50, yPos)
+        if (receipt.fd_scheme_name) yPos = addField('Scheme', receipt.fd_scheme_name, 50, yPos)
         if (receipt.fd_deposit_amount) {
           const amount = new Intl.NumberFormat('en-IN', {
             style: 'currency',
             currency: 'INR',
             maximumFractionDigits: 2
           }).format(receipt.fd_deposit_amount)
-          yPos = addKeyValue('Deposit Amount', amount, 60, yPos, 490)
+          yPos = addField('Deposit Amount', amount, 50, yPos)
         }
         if (receipt.fd_tenure_months) {
-          yPos = addKeyValue('Tenure', `${receipt.fd_tenure_months} months (${Math.floor(receipt.fd_tenure_months/12)} years)`, 60, yPos, 490)
+          yPos = addField('Tenure', `${receipt.fd_tenure_months} months (${Math.floor(receipt.fd_tenure_months/12)} years)`, 50, yPos)
         }
         if (receipt.fd_payout_frequency) {
-          yPos = addKeyValue('Payout Frequency', receipt.fd_payout_frequency, 60, yPos, 490)
+          yPos = addField('Payout Frequency', receipt.fd_payout_frequency, 50, yPos)
         }
         if (receipt.fd_locked_interest_rate_pa) {
-          yPos = addKeyValue('Interest Rate', `${receipt.fd_locked_interest_rate_pa.toFixed(2)}% p.a.`, 60, yPos, 490)
+          yPos = addField('Interest Rate', `${receipt.fd_locked_interest_rate_pa.toFixed(2)}% p.a.`, 50, yPos)
         }
         if (receipt.fd_maturity_amount) {
           const maturityAmt = new Intl.NumberFormat('en-IN', {
@@ -217,60 +272,85 @@ export function generateReceiptPDF(receipt) {
             currency: 'INR',
             maximumFractionDigits: 2
           }).format(receipt.fd_maturity_amount)
-          yPos = addKeyValue('Maturity Amount', maturityAmt, 60, yPos, 490)
+          yPos = addField('Maturity Amount', maturityAmt, 50, yPos)
         }
         if (receipt.fd_maturity_date) {
-          yPos = addKeyValue('Maturity Date', new Date(receipt.fd_maturity_date).toLocaleDateString('en-IN'), 60, yPos, 490)
+          yPos = addField('Maturity Date', new Date(receipt.fd_maturity_date).toLocaleDateString('en-IN'), 50, yPos)
         }
         if (receipt.fd_application_number) {
-          yPos = addKeyValue('Application/FD Number', receipt.fd_application_number, 60, yPos, 490)
+          yPos = addField('Application/FD Number', receipt.fd_application_number, 50, yPos)
         }
-      }
-      
-      // Additional details in two columns
-      if (receipt.scheme_option || receipt.schemeOption || receipt.roi_percent || receipt.roi || 
-          receipt.period_installments || receipt.deposit_period_ym) {
+        if (receipt.fd_transaction_type || receipt.txn_type) {
+          yPos = addField('Transaction Type', receipt.fd_transaction_type || receipt.txn_type || 'Fresh', 50, yPos)
+        }
+        if (receipt.fd_transaction_type === 'Renewal' && receipt.fd_renewal_investment_type) {
+          let renewalText = ''
+          if (receipt.fd_renewal_investment_type === 'same') {
+            renewalText = 'Same Amount'
+          } else if (receipt.fd_renewal_investment_type === 'increased') {
+            renewalText = 'Increased Amount'
+            if (receipt.fd_renewal_additional_amount) {
+              const additionalAmt = new Intl.NumberFormat('en-IN', {
+                style: 'currency',
+                currency: 'INR',
+                maximumFractionDigits: 2
+              }).format(receipt.fd_renewal_additional_amount)
+              renewalText += ` (Additional: ${additionalAmt})`
+            }
+          } else if (receipt.fd_renewal_investment_type === 'decreased') {
+            renewalText = 'Decreased Amount'
+            if (receipt.fd_renewal_additional_amount) {
+              const withdrawalAmt = new Intl.NumberFormat('en-IN', {
+                style: 'currency',
+                currency: 'INR',
+                maximumFractionDigits: 2
+              }).format(receipt.fd_renewal_additional_amount)
+              renewalText += ` (Withdrawal: ${withdrawalAmt})`
+            }
+          }
+          yPos = addField('Renewal Investment', renewalText, 50, yPos)
+        }
+        
         yPos += 10
-        const additionalDetails = []
-        if (receipt.scheme_option || receipt.schemeOption) additionalDetails.push(['Scheme Option', receipt.scheme_option || receipt.schemeOption])
-        if (receipt.roi_percent || receipt.roi) additionalDetails.push(['ROI', `${receipt.roi_percent || receipt.roi}%`])
-        if (receipt.deposit_period_ym || receipt.depositPeriodYM) additionalDetails.push(['Period', receipt.deposit_period_ym || receipt.depositPeriodYM])
-        if (receipt.fd_type || receipt.fdType) additionalDetails.push(['FD Type', receipt.fd_type || receipt.fdType])
-        
-        // Display in two columns with better alignment
-        const leftCol = 60
-        const rightCol = 320
-        additionalDetails.forEach((detail, index) => {
-          const col = (index % 2 === 0) ? leftCol : rightCol
-          const row = Math.floor(index / 2)
-          addKeyValue(detail[0], detail[1], col, yPos + (row * 20), 250)
-        })
-        
-        yPos += (Math.ceil(additionalDetails.length / 2) * 20)
       }
       
-      // Footer
-      if (yPos > 700) {
-        doc.addPage()
-        yPos = 50
-      }
+      // Ensure we don't exceed page height (A4 is ~842pt, with margins ~742pt usable)
+      // If we're getting close, compress remaining sections
+      const maxY = 750
+      const remainingSpace = maxY - yPos
       
-      yPos += 30
-      doc.moveTo(60, yPos).lineTo(530, yPos).strokeColor('#ddd').lineWidth(1).stroke()
-      yPos += 25
+      // Divider line
+      doc.moveTo(50, yPos).lineTo(545, yPos).strokeColor('#000').lineWidth(1).stroke()
+      yPos += 10
       
-      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text('Notes:', 60, yPos)
-      yPos += 15
-      doc.fontSize(8).font('Helvetica').fillColor('#666')
-      doc.text('• This is a system generated receipt.', 70, yPos)
+      // Terms and Conditions (compact)
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text('Terms and Conditions:', 50, yPos)
       yPos += 12
-      doc.text('• For any queries, please contact your relationship manager.', 70, yPos)
-      yPos += 12
-      doc.text('• Thank you for your business with ECS Financial.', 70, yPos)
+      
+      doc.fontSize(8).font('Helvetica').fillColor('#000')
+      const terms = [
+        '• This receipt is proof of payment towards the specified investment and does not guarantee returns.',
+        '• Investments are subject to market risks; please read the scheme details carefully before investing.',
+        '• For queries, contact your branch manager or visit our website.'
+      ]
+      
+      terms.forEach((term) => {
+        doc.text(term, 60, yPos, { width: 485 })
+        yPos += 12
+      })
+      
+      yPos += 8
+      
+      // Thank you message
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000').text('Thank you for Your Trust', 50, yPos, { align: 'center', width: 495 })
       yPos += 20
       
-      // Signature line
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#000').text('Signature: _______________________', 60, yPos)
+      // Signature lines
+      doc.moveTo(50, yPos).lineTo(545, yPos).strokeColor('#000').lineWidth(0.5).stroke()
+      yPos += 12
+      
+      doc.fontSize(8).font('Helvetica').fillColor('#000').text('Authorized Signature', 50, yPos)
+      doc.fontSize(8).font('Helvetica').fillColor('#000').text('Company Stamp', 350, yPos)
       
       doc.end()
     } catch (error) {
@@ -305,12 +385,15 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     
     let pdfBuffer
     
+    // Check if we should force regeneration
+    const forceRegenerate = req.query.force === 'true' || req.query.regenerate === 'true'
+    
     // Check if PDF already exists in database
-    if (receipt.pdf_data) {
+    if (receipt.pdf_data && !forceRegenerate) {
       // PDF exists, convert from base64
       pdfBuffer = Buffer.from(receipt.pdf_data, 'base64')
     } else {
-      // PDF doesn't exist, generate it
+      // PDF doesn't exist or force regenerate, generate it
       pdfBuffer = await generateReceiptPDF(receipt)
       
       // Store PDF in database as base64
@@ -336,15 +419,15 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
   }
 })
 
-// Generate PDFs for all existing receipts (Admin only)
-router.post('/generate-pdfs', requireAuth, async (req, res) => {
+// Regenerate PDFs for all existing receipts (Admin only)
+router.post('/regenerate-pdfs', requireAuth, async (req, res) => {
   try {
     // Only admins can access this
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'admin_only' })
     }
     
-    const { limit = 100 } = req.body
+    const { limit = 1000, batchSize = 50 } = req.body
     
     // Get all receipts
     const receipts = await q(`
@@ -355,18 +438,54 @@ router.post('/generate-pdfs', requireAuth, async (req, res) => {
     `, { limit })
     
     if (!receipts.length) {
-      return res.json({ message: 'no_receipts_found', generated: 0 })
+      return res.json({ message: 'no_receipts_found', generated: 0, total: 0 })
     }
     
-    // Return success - PDFs will be generated on demand when accessed
+    const receiptsCollection = getCollection('receipts')
+    let generated = 0
+    let errors = 0
+    const errorDetails = []
+    
+    // Process in batches to avoid memory issues
+    for (let i = 0; i < receipts.length; i += batchSize) {
+      const batch = receipts.slice(i, i + batchSize)
+      
+      await Promise.all(batch.map(async (receipt) => {
+        try {
+          const pdfBuffer = await generateReceiptPDF(receipt)
+          const receiptId = receipt._key || receipt.id
+          
+          await receiptsCollection.update(receiptId, {
+            pdf_data: pdfBuffer.toString('base64'),
+            pdf_generated_at: new Date().toISOString()
+          })
+          
+          generated++
+        } catch (error) {
+          errors++
+          errorDetails.push({
+            receipt_id: receipt._key || receipt.id,
+            receipt_no: receipt.receipt_no || receipt.receiptNo,
+            error: error.message
+          })
+          console.error(`Error generating PDF for receipt ${receipt._key}:`, error)
+        }
+      }))
+      
+      // Log progress
+      console.log(`Regenerated PDFs: ${Math.min(i + batchSize, receipts.length)}/${receipts.length}`)
+    }
+    
     res.json({ 
-      message: 'pdf_generation_ready',
+      message: 'pdf_regeneration_complete',
       total_receipts: receipts.length,
-      info: 'PDFs will be generated on-demand when users download receipts'
+      generated,
+      errors,
+      error_details: errorDetails.length > 0 ? errorDetails : undefined
     })
     
   } catch (error) {
-    console.error('Error in PDF generation route:', error)
+    console.error('Error in PDF regeneration route:', error)
     res.status(500).json({ error: 'operation_failed', detail: error.message })
   }
 })
@@ -413,4 +532,3 @@ router.post('/:id/generate-pdf', requireAuth, async (req, res) => {
 })
 
 export default router
-
