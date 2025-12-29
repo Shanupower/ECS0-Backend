@@ -16,7 +16,11 @@
     "pm2:logs": "pm2 logs ecs-backend",
     "deploy": "npm run setup-db && npm run import-data && npm run pm2:start",
     "regenerate-pdfs": "node scripts/regenerate-pdfs.js",
-    "test": "echo \"No tests specified\" && exit 0"
+    "test": "node testing/test-runner.js",
+    "test:stress": "node -e \"import('./testing/stress/load-test.js').then(m => m.runAllLoadTests())\"",
+    "test:edge": "node -e \"import('./testing/edge-cases/boundary-test.js').then(m => m.runAllBoundaryTests())\"",
+    "test:blackbox": "node -e \"import('./testing/black-box/api-test.js').then(m => m.runAllBlackBoxTests())\"",
+    "test:whitebox": "node -e \"import('./testing/white-box/internal-test.js').then(m => m.runAllWhiteBoxTests())\""
   },
   "dependencies": {
     "arangojs": "^10.1.2",
@@ -24,6 +28,7 @@
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
+    "exceljs": "^4.4.0",
     "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
     "jsonwebtoken": "^9.0.2",

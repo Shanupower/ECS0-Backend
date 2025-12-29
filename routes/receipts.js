@@ -805,7 +805,8 @@ router.patch('/:id', requireAuth, async (req, res) => {
     'renewal_due_date','maturity_amount','renewal_amount','issuer_company','issuer_category','product_category',
     'collection_credit','cc','service_income','si', // Allow manual updates to CC/SI if needed
     'transaction_details','entry_mode','transaction_channel','transaction_reference_no','txn_date','account_last4','transaction_notes',
-    'fd_transaction_type' // Fresh or Renewal for FD receipts
+    'fd_transaction_type', // Fresh or Renewal for FD receipts
+    'rejection_remark','rejected_at','rejected_by' // Rejection fields for failed transactions
   ]
   const d = req.body || {}
   const updates = {}
@@ -851,7 +852,7 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     }
     
     // Validate status values
-    const validStatuses = ['Pending', 'Completed', 'Cancelled']
+    const validStatuses = ['Pending', 'Completed', 'Cancelled', 'Failed']
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'invalid_status', detail: `Status must be one of: ${validStatuses.join(', ')}` })
     }

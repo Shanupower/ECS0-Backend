@@ -1,6 +1,13 @@
 import express from 'express'
 import { q, getCollection } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
+import { uploadExcel, uploadsDir } from '../middleware/upload.js'
+import ExcelJS from 'exceljs'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
 const router = express.Router()
 
@@ -762,6 +769,378 @@ router.post('/check-nfo-validity', requireAuth, requireRole('admin'), async (req
   } catch (error) {
     console.error('Error checking NFO validity:', error)
     res.status(500).json({ error: 'Failed to check NFO validity' })
+  }
+})
+
+// ===================================
+// EXCEL IMPORT/EXPORT (Admin only)
+// ===================================
+
+// Export schemes to Excel
+router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { amc_code } = req.query // Optional: filter by AMC
+    
+    // Fetch schemes
+    let schemes = []
+    if (amc_code) {
+      schemes = await q(`
+        FOR scheme IN mf_schemes
+        FILTER scheme.amc_code == @amc_code
+        SORT scheme.scheme_name
+        RETURN scheme
+      `, { amc_code })
+    } else {
+      schemes = await q(`
+        FOR scheme IN mf_schemes
+        SORT scheme.amc_name, scheme.scheme_name
+        RETURN scheme
+      `)
+    }
+    
+    // Create workbook
+    const workbook = new ExcelJS.Workbook()
+    const worksheet = workbook.addWorksheet('Schemes')
+    
+    // Define columns with protection
+    worksheet.columns = [
+      { header: 'Scheme Code', key: 'scheme_code', width: 25, protection: { locked: true } },
+      { header: 'AMC Code', key: 'amc_code', width: 15, protection: { locked: true } },
+      { header: 'AMC Name', key: 'amc_name', width: 30, protection: { locked: true } },
+      { header: 'Scheme Name', key: 'scheme_name', width: 45, protection: { locked: true } },
+      { header: 'Base Name', key: 'base_name', width: 40, protection: { locked: true } },
+      { header: 'Plan', key: 'plan', width: 12, protection: { locked: true } },
+      { header: 'Option', key: 'option', width: 20, protection: { locked: true } },
+      { header: 'Category', key: 'category', width: 20, protection: { locked: false } },
+      { header: 'Sub Category', key: 'sub_category', width: 25, protection: { locked: false } },
+      { header: 'Type', key: 'type', width: 15, protection: { locked: false } },
+      { header: 'NAV Latest', key: 'nav_latest', width: 15, protection: { locked: false }, style: { numFmt: '#,##0.0000' } },
+      { header: 'NAV Date', key: 'nav_date', width: 15, protection: { locked: false } },
+      { header: 'CC %', key: 'cc', width: 12, protection: { locked: false }, style: { numFmt: '0.00000' } },
+      { header: 'SI %', key: 'si', width: 12, protection: { locked: false }, style: { numFmt: '0.00000' } },
+      { header: 'Is Active', key: 'is_active', width: 12, protection: { locked: false } },
+      { header: 'Is NFO', key: 'is_nfo', width: 12, protection: { locked: false } },
+      { header: 'NFO Validity', key: 'nfo_validity', width: 15, protection: { locked: false } }
+    ]
+    
+    // Style header row
+    worksheet.getRow(1).font = { bold: true, size: 12 }
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    }
+    worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' }
+    
+    // Add data rows
+    schemes.forEach((scheme, index) => {
+      const row = worksheet.addRow({
+        scheme_code: scheme.scheme_code || '',
+        amc_code: scheme.amc_code || '',
+        amc_name: scheme.amc_name || '',
+        scheme_name: scheme.scheme_name || '',
+        base_name: scheme.base_name || scheme.scheme_name || '',
+        plan: scheme.plan || 'REGULAR',
+        option: scheme.option || 'GROWTH',
+        category: scheme.category || '',
+        sub_category: scheme.sub_category || '',
+        type: scheme.type || 'OPEN_ENDED',
+        nav_latest: scheme.nav_latest || 0,
+        nav_date: scheme.nav_date ? new Date(scheme.nav_date).toLocaleDateString('en-IN') : '',
+        cc: scheme.cc || 0,
+        si: scheme.si || 0,
+        is_active: scheme.is_active !== false ? 'Yes' : 'No',
+        is_nfo: scheme.is_nfo ? 'Yes' : 'No',
+        nfo_validity: scheme.nfo_validity ? new Date(scheme.nfo_validity).toLocaleDateString('en-IN') : ''
+      })
+      
+      // Explicitly set protection for each cell
+      // Locked cells (protected)
+      row.getCell(1).protection = { locked: true } // scheme_code
+      row.getCell(2).protection = { locked: true } // amc_code
+      row.getCell(3).protection = { locked: true } // amc_name
+      row.getCell(4).protection = { locked: true } // scheme_name
+      row.getCell(5).protection = { locked: true } // base_name
+      row.getCell(6).protection = { locked: true } // plan
+      row.getCell(7).protection = { locked: true } // option
+      
+      // Unlocked cells (editable) - explicitly set
+      row.getCell(8).protection = { locked: false } // category
+      row.getCell(9).protection = { locked: false } // sub_category
+      row.getCell(10).protection = { locked: false } // type
+      row.getCell(11).protection = { locked: false } // nav_latest
+      row.getCell(12).protection = { locked: false } // nav_date
+      row.getCell(13).protection = { locked: false } // cc
+      row.getCell(13).numFmt = '0.00000' // CC with 5 decimal places
+      row.getCell(14).protection = { locked: false } // si
+      row.getCell(14).numFmt = '0.00000' // SI with 5 decimal places
+      row.getCell(15).protection = { locked: false } // is_active
+      row.getCell(16).protection = { locked: false } // is_nfo
+      row.getCell(17).protection = { locked: false } // nfo_validity
+      
+      // Add light gray background to locked cells
+      for (let col = 1; col <= 7; col++) {
+        row.getCell(col).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFF5F5F5' }
+        }
+      }
+    })
+    
+    // Protect worksheet but allow editing unlocked cells
+    worksheet.protect('', {
+      selectLockedCells: true,
+      selectUnlockedCells: true,
+      formatCells: true, // Allow formatting
+      formatColumns: false,
+      formatRows: false,
+      insertColumns: false,
+      insertRows: false,
+      insertHyperlinks: false,
+      deleteColumns: false,
+      deleteRows: false,
+      sort: true,
+      autoFilter: true,
+      pivotTables: false
+    })
+    
+    // Freeze header row
+    worksheet.views = [
+      { state: 'frozen', ySplit: 1 }
+    ]
+    
+    // Set response headers
+    const filename = `schemes-export-${amc_code || 'all'}-${new Date().toISOString().split('T')[0]}.xlsx`
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    
+    await workbook.xlsx.write(res)
+    res.end()
+  } catch (error) {
+    console.error('Error exporting schemes to Excel:', error)
+    res.status(500).json({ error: 'Failed to export schemes', detail: error.message })
+  }
+})
+
+// Import schemes from Excel
+router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Excel file is required' })
+    }
+    
+    const workbook = new ExcelJS.Workbook()
+    await workbook.xlsx.readFile(req.file.path)
+    
+    const worksheet = workbook.getWorksheet(1) // First sheet
+    if (!worksheet) {
+      const fs = await import('fs')
+      fs.unlinkSync(req.file.path)
+      return res.status(400).json({ error: 'Excel file is empty or invalid' })
+    }
+    
+    const updates = []
+    const errors = []
+    let rowNumber = 0
+    
+    // Process each row (skip header)
+    worksheet.eachRow((row, rowNum) => {
+      rowNumber = rowNum
+      if (rowNum === 1) return // Skip header row
+      
+      try {
+        const scheme_code = row.getCell(1).value?.toString()?.trim()
+        if (!scheme_code) {
+          errors.push({ row: rowNum, error: 'Missing scheme_code' })
+          return
+        }
+        
+        // Extract only updatable fields (columns 8-17)
+        const category = row.getCell(8).value?.toString()?.trim()
+        const sub_category = row.getCell(9).value?.toString()?.trim()
+        const type = row.getCell(10).value?.toString()?.trim()
+        
+        // Parse numeric values
+        let nav_latest = 0
+        const navLatestValue = row.getCell(11).value
+        if (typeof navLatestValue === 'number') {
+          nav_latest = navLatestValue
+        } else if (typeof navLatestValue === 'string') {
+          nav_latest = parseFloat(navLatestValue.replace(/,/g, '')) || 0
+        }
+        
+        // Parse NAV date
+        let nav_date = undefined
+        const navDateValue = row.getCell(12).value
+        if (navDateValue) {
+          if (navDateValue instanceof Date) {
+            nav_date = navDateValue.toISOString().split('T')[0]
+          } else if (typeof navDateValue === 'string') {
+            const parsed = new Date(navDateValue)
+            if (!isNaN(parsed.getTime())) {
+              nav_date = parsed.toISOString().split('T')[0]
+            }
+          } else if (typeof navDateValue === 'number') {
+            // Excel serial date (days since 1900-01-01)
+            const excelEpoch = new Date(1899, 11, 30) // Excel epoch
+            const date = new Date(excelEpoch.getTime() + navDateValue * 86400000)
+            nav_date = date.toISOString().split('T')[0]
+          }
+        }
+        
+        // Parse CC and SI
+        let cc = 0
+        const ccValue = row.getCell(13).value
+        if (typeof ccValue === 'number') {
+          cc = ccValue
+        } else if (typeof ccValue === 'string') {
+          cc = parseFloat(ccValue) || 0
+        }
+        
+        let si = 0
+        const siValue = row.getCell(14).value
+        if (typeof siValue === 'number') {
+          si = siValue
+        } else if (typeof siValue === 'string') {
+          si = parseFloat(siValue) || 0
+        }
+        
+        // Parse boolean values
+        const isActiveValue = row.getCell(15).value?.toString()?.toLowerCase()?.trim()
+        const is_active = isActiveValue === 'yes' || isActiveValue === 'true' || isActiveValue === '1'
+        
+        const isNfoValue = row.getCell(16).value?.toString()?.toLowerCase()?.trim()
+        const is_nfo = isNfoValue === 'yes' || isNfoValue === 'true' || isNfoValue === '1'
+        
+        // Parse NFO validity date
+        let nfo_validity = undefined
+        const nfoValidityValue = row.getCell(17).value
+        if (nfoValidityValue && is_nfo) {
+          if (nfoValidityValue instanceof Date) {
+            nfo_validity = nfoValidityValue.toISOString().split('T')[0]
+          } else if (typeof nfoValidityValue === 'string') {
+            const parsed = new Date(nfoValidityValue)
+            if (!isNaN(parsed.getTime())) {
+              nfo_validity = parsed.toISOString().split('T')[0]
+            }
+          } else if (typeof nfoValidityValue === 'number') {
+            // Excel serial date (days since 1900-01-01)
+            const excelEpoch = new Date(1899, 11, 30) // Excel epoch
+            const date = new Date(excelEpoch.getTime() + nfoValidityValue * 86400000)
+            nfo_validity = date.toISOString().split('T')[0]
+          }
+        } else if (is_nfo === false) {
+          nfo_validity = null
+        }
+        
+        // Build update object - only include defined values
+        const updateData = {
+          updated_at: new Date().toISOString()
+        }
+        
+        if (category !== undefined && category !== null && category !== '') {
+          updateData.category = category
+        }
+        if (sub_category !== undefined && sub_category !== null && sub_category !== '') {
+          updateData.sub_category = sub_category
+        }
+        if (type !== undefined && type !== null && type !== '') {
+          updateData.type = type
+        }
+        if (nav_latest !== undefined) {
+          updateData.nav_latest = nav_latest
+        }
+        if (nav_date !== undefined) {
+          updateData.nav_date = nav_date
+        }
+        if (cc !== undefined) {
+          updateData.cc = cc
+        }
+        if (si !== undefined) {
+          updateData.si = si
+        }
+        if (is_active !== undefined) {
+          updateData.is_active = is_active
+        }
+        if (is_nfo !== undefined) {
+          updateData.is_nfo = is_nfo
+          if (!is_nfo) {
+            updateData.nfo_validity = null
+          }
+        }
+        if (nfo_validity !== undefined) {
+          updateData.nfo_validity = nfo_validity
+        }
+        
+        updates.push({ scheme_code, updateData, row: rowNum })
+      } catch (err) {
+        errors.push({ row: rowNum, error: `Parsing error: ${err.message}` })
+      }
+    })
+    
+    // Batch update schemes
+    let updated = 0
+    let failed = 0
+    
+    for (const { scheme_code, updateData, row } of updates) {
+      try {
+        // Verify scheme exists
+        const existing = await q(`
+          FOR scheme IN mf_schemes
+          FILTER scheme.scheme_code == @scheme_code
+          LIMIT 1
+          RETURN scheme
+        `, { scheme_code })
+        
+        if (existing.length === 0) {
+          errors.push({ row, scheme_code, error: 'Scheme not found' })
+          failed++
+          continue
+        }
+        
+        // Perform update
+        await q(`
+          FOR scheme IN mf_schemes
+          FILTER scheme.scheme_code == @scheme_code
+          UPDATE scheme WITH @data IN mf_schemes
+        `, { scheme_code, data: updateData })
+        
+        updated++
+      } catch (err) {
+        errors.push({ row, scheme_code, error: err.message })
+        failed++
+      }
+    }
+    
+    // Cleanup uploaded file
+    const fs = await import('fs')
+    try {
+      fs.unlinkSync(req.file.path)
+    } catch (unlinkErr) {
+      console.error('Error deleting uploaded file:', unlinkErr)
+    }
+    
+    res.json({
+      total: updates.length,
+      updated,
+      failed,
+      errors: errors.slice(0, 100) // Limit error response
+    })
+  } catch (error) {
+    console.error('Error importing schemes from Excel:', error)
+    
+    // Cleanup uploaded file on error
+    if (req.file) {
+      try {
+        const fs = await import('fs')
+        fs.unlinkSync(req.file.path)
+      } catch (unlinkErr) {
+        console.error('Error deleting uploaded file:', unlinkErr)
+      }
+    }
+    
+    res.status(500).json({ error: 'Failed to import schemes', detail: error.message })
   }
 })
 

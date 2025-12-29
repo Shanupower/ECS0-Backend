@@ -76,6 +76,7 @@ app.get('/health', async (req, res) => {
   }
 })
 
-app.listen(PORT, () => {
-  console.log('API listening on', PORT)
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`API listening on http://0.0.0.0:${PORT}`)
+  console.log(`Server accessible from network at http://192.168.0.124:${PORT}`)
 })

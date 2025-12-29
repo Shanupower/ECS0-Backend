@@ -119,9 +119,22 @@ router.get('/my', requireAuth, async (req, res) => {
     const query = `
       FOR issue IN issues
       ${filterClause}
+      LET created_by_user = (
+        FOR user IN users
+        FILTER user._key == issue.created_by
+        LIMIT 1
+        RETURN {
+          id: user._key,
+          emp_code: user.emp_code,
+          name: user.name,
+          email: user.email,
+          branch: user.branch,
+          role: user.role
+        }
+      )[0]
       SORT issue.${orderBy} ${sortDir}
       LIMIT @offset, @limit
-      RETURN issue
+      RETURN MERGE(issue, { created_by_user })
     `
 
     const countQuery = `
@@ -185,9 +198,38 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
     const query = `
       FOR issue IN issues
       ${filterClause}
+      LET created_by_user = (
+        FOR user IN users
+        FILTER user._key == issue.created_by
+        LIMIT 1
+        RETURN {
+          id: user._key,
+          emp_code: user.emp_code,
+          name: user.name,
+          email: user.email,
+          branch: user.branch,
+          role: user.role
+        }
+      )[0]
+      LET updated_by_user = issue.updated_by ? (
+        FOR user IN users
+        FILTER user._key == issue.updated_by
+        LIMIT 1
+        RETURN {
+          id: user._key,
+          emp_code: user.emp_code,
+          name: user.name,
+          email: user.email,
+          branch: user.branch,
+          role: user.role
+        }
+      )[0] : null
       SORT issue.${orderBy} ${sortDir}
       LIMIT @offset, @limit
-      RETURN issue
+      RETURN MERGE(issue, { 
+        created_by_user,
+        updated_by_user
+      })
     `
 
     const countQuery = `
@@ -329,7 +371,54 @@ router.get('/:id', requireAuth, async (req, res) => {
       FOR issue IN issues
       FILTER issue.id == @id
       LIMIT 1
-      RETURN issue
+      LET created_by_user = (
+        FOR user IN users
+        FILTER user._key == issue.created_by
+        LIMIT 1
+        RETURN {
+          id: user._key,
+          emp_code: user.emp_code,
+          name: user.name,
+          email: user.email,
+          branch: user.branch,
+          role: user.role
+        }
+      )[0]
+      LET updated_by_user = issue.updated_by ? (
+        FOR user IN users
+        FILTER user._key == issue.updated_by
+        LIMIT 1
+        RETURN {
+          id: user._key,
+          emp_code: user.emp_code,
+          name: user.name,
+          email: user.email,
+          branch: user.branch,
+          role: user.role
+        }
+      )[0] : null
+      LET enriched_fixes = issue.fixes ? (
+        FOR fix IN issue.fixes
+        LET fix_user = fix.created_by ? (
+          FOR user IN users
+          FILTER user._key == fix.created_by
+          LIMIT 1
+          RETURN {
+            id: user._key,
+            emp_code: user.emp_code,
+            name: user.name,
+            email: user.email,
+            branch: user.branch,
+            role: user.role
+          }
+        )[0] : null
+        RETURN MERGE(fix, { created_by_user: fix_user })
+      ) : []
+      RETURN MERGE(issue, { 
+        created_by_user,
+        updated_by_user,
+        fixes: enriched_fixes
+      })
     `, { id: parseInt(id) })
     
     if (!issues.length) {

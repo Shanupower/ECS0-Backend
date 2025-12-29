@@ -3,6 +3,7 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+yarn.lock
 
 # Environment variables
 .env
@@ -10,6 +11,7 @@ yarn-error.log*
 .env.development.local
 .env.test.local
 .env.production.local
+.env.*.local
 
 # Logs
 logs/
@@ -18,6 +20,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
+pm2-*.log
 
 # Runtime data
 pids/
@@ -28,12 +31,9 @@ pids/
 # Coverage directory used by tools like istanbul
 coverage/
 *.lcov
-
-# nyc test coverage
 .nyc_output
 
 # Dependency directories
-node_modules/
 jspm_packages/
 
 # Optional npm cache directory
@@ -57,28 +57,9 @@ jspm_packages/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variables file
-.env
-.env.test
-
-# parcel-bundler cache (https://parceljs.org/)
+# Parcel-bundler cache
 .cache
 .parcel-cache
-
-# Next.js build output
-.next
-
-# Nuxt.js build / generate output
-.nuxt
-dist
-
-# Gatsby files
-.cache/
-public
-
-# Storybook build outputs
-.out
-.storybook-out
 
 # Temporary folders
 tmp/
@@ -90,6 +71,9 @@ temp/
 *.swp
 *.swo
 *~
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
 
 # OS generated files
 .DS_Store
@@ -99,19 +83,46 @@ temp/
 .Trashes
 ehthumbs.db
 Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 
-# PM2 logs
+# PM2
 .pm2/
+ecosystem.config.js.bak
 
-# Data dumps (optional - remove if you want to include data in git)
-# data/
+# Uploads directory (user-uploaded files)
+uploads/**/*
+!uploads/.gitkeep
+!uploads/receipts/.gitkeep
 
-# Uploads directory
-uploads/*
+# Sample/Test files
+sample-*.json
+*-sample.*
+*Sample*.xlsx
+*Details*.xlsx
+*Details*.xls
+WhatsApp Image*.jpg
+WhatsApp Image*.jpeg
+WhatsApp Image*.png
+sample*.pdf
+*Reciepts*.pdf
+*Receipts*.pdf
+
+# Documentation files (markdown)
+*.md
+!README.md
 
 # Backup files
 *.backup
 *.bak
+*~
 
+# Data dumps (uncomment if you don't want to track data files)
+# data/*.json
 
+# Docker
+.dockerignore
 
+# Build outputs
+dist/
+build/
