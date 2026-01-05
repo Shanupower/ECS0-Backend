@@ -160,7 +160,255 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       }
     }
 
-    // Build nested MF / FD detail structures for cleaner schema (while keeping legacy top-level fields)
+    // ============================================
+    // BUILD STRUCTURED RECEIPT SCHEMA
+    // ============================================
+    
+    // Employee Information
+    const employee = {
+      code: d.empCode || d.emp_code || null,
+      name: d.employeeName || d.employee_name || null,
+      branch: d.branch || null
+    }
+    
+    // Investor Information
+    const investorAddress = d.investorAddress || d.investor_address || ''
+    const addressParts = investorAddress.split('\n').filter(Boolean)
+    const investor = {
+      id: d.investorId || d.investor_id || null,
+      name: d.investorName || d.investor_name || null,
+      address: {
+        line1: addressParts[0] || null,
+        line2: addressParts[1] || null,
+        line3: addressParts[2] || null,
+        city: d.city || null,
+        state: d.state || null,
+        pin_code: d.pinCode || d.pin_code || null,
+        country: d.country || 'India'
+      },
+      pan: d.pan || null,
+      email: d.email || null,
+      mobile: d.mobile || null
+    }
+    
+    // Product Information
+    const product = {
+      category: productCategory || null,
+      name: d.schemeName || d.scheme_name || d.fd_scheme_name || null,
+      option: d.schemeOption || d.scheme_option || null,
+      folio_number: d.folio_number || d.folioNumber || null,
+      has_existing_folio: d.has_existing_folio !== undefined ? d.has_existing_folio : (d.hasExistingFolio !== undefined ? d.hasExistingFolio : null)
+    }
+    
+    // Transaction Details
+    const transaction = {
+      type: d.txnType || d.txn_type || d.fd_transaction_type || d.transaction_type || 'Fresh',
+      mode: d.mode || null,
+      amount: investmentAmount || null,
+      units_or_amount: d.unitsOrAmount || d.units_or_amount || null,
+      date: date || null,
+      from_text: d.from || d.from_text || null,
+      to_text: d.to || d.to_text || null,
+      period_installments: d.period_installments || d.sip_stp_swp_period || null,
+      installments_count: d.noOfInstallments || d.installments_count || null
+    }
+    
+    // SIP Details
+    if (transaction.mode === 'SIP' || d.sip_frequency) {
+      transaction.sip = {
+        frequency: d.sip_frequency || null,
+        start_date: d.sip_start_date || null,
+        end_date: d.sip_end_date || null,
+        is_perpetual: d.sip_is_perpetual !== undefined ? d.sip_is_perpetual : false
+      }
+    }
+    
+    // SWP Details
+    if (transaction.mode === 'SWP' || d.swp_frequency) {
+      transaction.swp = {
+        frequency: d.swp_frequency || null,
+        start_date: d.swp_start_date || null,
+        amount: d.swp_amount || null
+      }
+    }
+    
+    // STP Details
+    if (transaction.mode === 'STP' || d.stp_frequency) {
+      transaction.stp = {
+        from_scheme_code: d.stp_target_scheme_code || null, // Note: STP uses target scheme
+        from_scheme_name: d.stp_target_scheme_name || null,
+        to_scheme_code: d.scheme_code || null,
+        to_scheme_name: d.schemeName || d.scheme_name || null,
+        frequency: d.stp_frequency || null,
+        start_date: d.stp_start_date || null,
+        amount: d.stp_amount || null,
+        original_amount: d.stp_original_amount || null
+      }
+    }
+    
+    // Switch Over Details
+    if (transaction.type === 'Switch Over' || d.switch_from_scheme_code) {
+      transaction.switch_over = {
+        from_scheme_code: d.switch_from_scheme_code || null,
+        from_scheme_name: d.switch_from_scheme_name || null,
+        to_scheme_code: d.switch_to_scheme_code || d.scheme_code || null,
+        to_scheme_name: d.switch_to_scheme_name || d.schemeName || d.scheme_name || null,
+        type: d.switch_type || null,
+        value: d.switch_value || null
+      }
+    }
+    
+    // Product-Specific Details
+    const productDetails = {}
+    
+    // MF Details
+    if (productCategory === 'MF') {
+      productDetails.mf = {
+        amc: {
+          code: d.amc_code || null,
+          name: d.amc_name || null
+        },
+        scheme: {
+          code: d.scheme_code || null,
+          name: d.schemeName || d.scheme_name || null,
+          category: d.scheme_category || null,
+          sub_category: d.scheme_sub_category || null,
+          plan: d.scheme_plan || null,
+          type: d.scheme_type || null,
+          is_nfo: d.scheme_is_nfo !== undefined ? d.scheme_is_nfo : false
+        }
+      }
+    }
+    
+    // FD Details
+    if (productCategory === 'FD') {
+      productDetails.fd = {
+        issuer: {
+          key: d.fd_issuer_key || null,
+          name: d.fd_issuer_name || null,
+          type: d.fd_issuer_type || null
+        },
+        scheme: {
+          id: d.fd_scheme_id || null,
+          name: d.fd_scheme_name || null,
+          is_cumulative: d.fd_is_cumulative !== undefined ? d.fd_is_cumulative : false
+        },
+        deposit: {
+          amount: d.fd_deposit_amount || null,
+          tenure_months: d.fd_tenure_months || null,
+          payout_frequency: d.fd_payout_frequency || null,
+          booking_date: d.fd_booking_date || null,
+          deposit_date: d.fd_deposit_date || null
+        },
+        rates: {
+          base_rate_pa: d.fd_base_rate_pa || null,
+          senior_citizen_bonus: d.fd_senior_citizen_bonus || null,
+          women_bonus: d.fd_women_bonus || null,
+          renewal_bonus: d.fd_renewal_bonus || null,
+          total_rate_pa: d.fd_total_rate_pa || null,
+          locked_interest_rate_pa: d.fd_locked_interest_rate_pa || null,
+          effective_yield_pa: d.fd_effective_yield_pa || null
+        },
+        maturity: {
+          amount: d.fd_maturity_amount || null,
+          date: d.fd_maturity_date || null,
+          periodic_payout: d.fd_periodic_payout || null,
+          total_interest: d.fd_total_interest || null
+        },
+        tax: {
+          tds_applicable: d.fd_tds_applicable !== undefined ? d.fd_tds_applicable : null,
+          form_15g_15h: d.fd_form_15g_15h !== undefined ? d.fd_form_15g_15h : null
+        },
+        application: {
+          number: d.fd_application_number || null,
+          transaction_type: d.fd_transaction_type || 'Fresh',
+          renewal: d.fd_transaction_type === 'Renewal' ? {
+            investment_type: d.fd_renewal_investment_type || null,
+            additional_amount: d.fd_renewal_additional_amount || null
+          } : null
+        }
+      }
+    }
+    
+    // Insurance Details
+    if (productCategory === 'INS') {
+      productDetails.insurance = {
+        issuer: {
+          name: d.issuerCompany || d.issuer_company || null,
+          type: d.issuerCategory || d.issuer_category || 'Insurance'
+        },
+        policy: {
+          number: d.folioPolicyNo || d.folio_policy_no || null,
+          type: d.fd_type || d.fdType || null,
+          premium_amount: investmentAmount || null,
+          premium_frequency: d.interest_frequency || d.interestFrequency || null
+        }
+      }
+    }
+    
+    // Bond/NCD Details
+    if (productCategory === 'BOND' || productCategory === 'NCD') {
+      productDetails.bond = {
+        issuer: {
+          key: d.bond_issuer_key || null,
+          name: d.bond_issuer_name || d.issuerCompany || d.issuer_company || null,
+          type: d.bond_issuer_type || d.issuerCategory || d.issuer_category || 'Corporate'
+        },
+        scheme: {
+          id: d.bond_scheme_id || null,
+          name: d.bond_scheme_name || d.scheme_name || null,
+          isin: d.bond_isin || null
+        },
+        instrument: {
+          coupon_rate: d.bond_coupon_rate || d.roi || d.roi_percent || null,
+          face_value: d.bond_face_value || null,
+          issue_date: d.bond_issue_date || null,
+          maturity_date: d.bond_maturity_date || d.renewalDueDate || d.renewal_due_date || null
+        },
+        transaction: {
+          type: d.bond_transaction_type || d.txn_type || null,
+          number_of_units: d.bond_number_of_units || null,
+          amount: d.bond_investment_amount || d.investment_amount || investmentAmount || null,
+          date: d.bond_transaction_date || null
+        },
+        application: {
+          number: d.bond_application_number || null
+        },
+        tax: {
+          form_15g_15h: d.bond_form_15g_15h || null
+        }
+      }
+    }
+    
+    // Payment Information
+    const payment = {
+      instrument: {
+        type: d.instrumentType || d.instrument_type || null,
+        number: d.instrumentNo || d.instrument_no || null,
+        date: d.instrumentDate || d.instrument_date || null,
+        bank: {
+          name: d.bankName || d.bank_name || null,
+          branch: d.bankBranch || d.bank_branch || null
+        }
+      },
+      entry_mode: d.transaction_details?.entry_mode || d.entry_mode || d.transactionType || null,
+      channel: d.transaction_details?.channel || d.transaction_channel || d.othersTransactionType || null,
+      reference_no: d.transaction_details?.reference_no || d.transaction_reference_no || d.transactionNumber || null,
+      transaction_date: d.transaction_details?.txn_date || d.txn_date || null,
+      account_last4: d.transaction_details?.account_last4 || d.account_last4 || null,
+      notes: d.transaction_details?.notes || d.transaction_notes || (d.transactionType === 'Others' ? d.othersTransactionType : null) || null
+    }
+    
+    // Calculations
+    const calculations = {
+      collection_credit: collectionCredit,
+      service_income: serviceIncome,
+      // Legacy aliases for backward compatibility
+      cc: collectionCredit,
+      si: serviceIncome
+    }
+    
+    // Legacy nested structures (for backward compatibility)
     const mfDetails = productCategory === 'MF' ? {
       amc_code: d.amc_code || null,
       amc_name: d.amc_name || null,
@@ -195,134 +443,168 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       deposit_date: d.fd_deposit_date || null,
       tds_applicable: d.fd_tds_applicable || null,
       form_15g_15h: d.fd_form_15g_15h || null,
-      transaction_type: d.fd_transaction_type || null, // Fresh or Renewal
-      renewal_investment_type: d.fd_renewal_investment_type || null, // same, increased, decreased
+      transaction_type: d.fd_transaction_type || null,
+      renewal_investment_type: d.fd_renewal_investment_type || null,
       renewal_additional_amount: d.fd_renewal_additional_amount || null
     } : null
 
+    // Build structured receipt document
     const receiptDoc = {
+      // ============================================
+      // CORE METADATA
+      // ============================================
       receipt_no: receiptNo,
       date: date,
+      status: 'Pending',
       branch: d.branch || null,
-      employee_name: d.employeeName || d.employee_name || null,
-      emp_code: d.empCode || d.emp_code || null,
       user_id: req.user.sub,
-      investor_id: d.investorId || d.investor_id || null,
-      investor_name: d.investorName || d.investor_name || null,
-      investor_address: d.investorAddress || d.investor_address || null,
-      pin_code: d.pinCode || d.pin_code || null,
-      pan: d.pan || null,
-      email: d.email || null,
-      scheme_name: d.schemeName || d.scheme_name || d.fd_scheme_name || null,
-      scheme_option: d.schemeOption || d.scheme_option || null,
-      product_category: d.product_category || d.productCategory || null,
-      investment_amount: d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || null,
-      folio_policy_no: d.folioPolicyNo || d.folio_policy_no || d.fd_application_number || null,
-      mode: d.mode || null,
-      period_installments: d.period_installments || d.sip_stp_swp_period || null,
-      installments_count: d.noOfInstallments || d.installments_count || null,
-      txn_type: d.txnType || d.txn_type || d.fd_transaction_type || null, // For FD, use fd_transaction_type
-      from_text: d.from || d.from_text || null,
-      to_text: d.to || d.to_text || null,
-      units_or_amount: d.unitsOrAmount || d.units_or_amount || null,
-      fd_type: d.fdType || d.fd_type || null,
+      created_at: new Date().toISOString(),
+      updated_at: null,
+      is_deleted: false,
+      deleted_at: null,
+      
+      // ============================================
+      // STRUCTURED SECTIONS (NEW)
+      // ============================================
+      employee: employee,
+      investor: investor,
+      product: product,
+      transaction: transaction,
+      product_details: Object.keys(productDetails).length > 0 ? productDetails : null,
+      payment: payment,
+      calculations: calculations,
+      
+      // ============================================
+      // LEGACY TOP-LEVEL FIELDS (for backward compatibility)
+      // ============================================
+      employee_name: employee.name,
+      emp_code: employee.code,
+      investor_id: investor.id,
+      investor_name: investor.name,
+      investor_address: investorAddress,
+      pin_code: investor.address.pin_code,
+      pan: investor.pan,
+      email: investor.email,
+      scheme_name: product.name,
+      scheme_option: product.option,
+      product_category: product.category,
+      investment_amount: transaction.amount,
+      folio_policy_no: product.folio_number || (productDetails.fd?.application?.number || null),
+      mode: transaction.mode,
+      period_installments: transaction.period_installments,
+      installments_count: transaction.installments_count,
+      txn_type: transaction.type,
+      from_text: transaction.from_text,
+      to_text: transaction.to_text,
+      units_or_amount: transaction.units_or_amount,
+      // Legacy MF fields
+      amc_code: productDetails.mf?.amc?.code || null,
+      amc_name: productDetails.mf?.amc?.name || null,
+      scheme_code: productDetails.mf?.scheme?.code || null,
+      scheme_category: productDetails.mf?.scheme?.category || null,
+      scheme_sub_category: productDetails.mf?.scheme?.sub_category || null,
+      scheme_plan: productDetails.mf?.scheme?.plan || null,
+      scheme_type: productDetails.mf?.scheme?.type || null,
+      scheme_is_nfo: productDetails.mf?.scheme?.is_nfo || null,
+      transaction_type: transaction.type,
+      has_existing_folio: product.has_existing_folio,
+      folio_number: product.folio_number,
+      // Legacy SIP/SWP/STP/Switch Over fields
+      sip_frequency: transaction.sip?.frequency || null,
+      sip_start_date: transaction.sip?.start_date || null,
+      sip_end_date: transaction.sip?.end_date || null,
+      sip_is_perpetual: transaction.sip?.is_perpetual || null,
+      swp_frequency: transaction.swp?.frequency || null,
+      swp_start_date: transaction.swp?.start_date || null,
+      swp_amount: transaction.swp?.amount || null,
+      stp_target_scheme_code: transaction.stp?.to_scheme_code || null,
+      stp_target_scheme_name: transaction.stp?.to_scheme_name || null,
+      stp_frequency: transaction.stp?.frequency || null,
+      stp_start_date: transaction.stp?.start_date || null,
+      stp_amount: transaction.stp?.amount || null,
+      stp_original_amount: transaction.stp?.original_amount || null,
+      switch_from_scheme_code: transaction.switch_over?.from_scheme_code || null,
+      switch_from_scheme_name: transaction.switch_over?.from_scheme_name || null,
+      switch_to_scheme_code: transaction.switch_over?.to_scheme_code || null,
+      switch_to_scheme_name: transaction.switch_over?.to_scheme_name || null,
+      switch_type: transaction.switch_over?.type || null,
+      switch_value: transaction.switch_over?.value || null,
+      // Legacy FD fields
+      fd_issuer_key: productDetails.fd?.issuer?.key || null,
+      fd_issuer_name: productDetails.fd?.issuer?.name || null,
+      fd_issuer_type: productDetails.fd?.issuer?.type || null,
+      fd_scheme_id: productDetails.fd?.scheme?.id || null,
+      fd_scheme_name: productDetails.fd?.scheme?.name || null,
+      fd_is_cumulative: productDetails.fd?.scheme?.is_cumulative || null,
+      fd_deposit_amount: productDetails.fd?.deposit?.amount || null,
+      fd_tenure_months: productDetails.fd?.deposit?.tenure_months || null,
+      fd_payout_frequency: productDetails.fd?.deposit?.payout_frequency || null,
+      fd_base_rate_pa: productDetails.fd?.rates?.base_rate_pa || null,
+      fd_senior_citizen_bonus: productDetails.fd?.rates?.senior_citizen_bonus || null,
+      fd_women_bonus: productDetails.fd?.rates?.women_bonus || null,
+      fd_renewal_bonus: productDetails.fd?.rates?.renewal_bonus || null,
+      fd_total_rate_pa: productDetails.fd?.rates?.total_rate_pa || null,
+      fd_maturity_amount: productDetails.fd?.maturity?.amount || null,
+      fd_maturity_date: productDetails.fd?.maturity?.date || null,
+      fd_application_number: productDetails.fd?.application?.number || null,
+      fd_deposit_date: productDetails.fd?.deposit?.deposit_date || null,
+      fd_tds_applicable: productDetails.fd?.tax?.tds_applicable || null,
+      fd_form_15g_15h: productDetails.fd?.tax?.form_15g_15h || null,
+      fd_transaction_type: productDetails.fd?.application?.transaction_type || null,
+      fd_renewal_investment_type: productDetails.fd?.application?.renewal?.investment_type || null,
+      fd_renewal_additional_amount: productDetails.fd?.application?.renewal?.additional_amount || null,
+      // BOND/NCD legacy top-level fields
+      bond_issuer_key: productDetails.bond?.issuer?.key || null,
+      bond_issuer_name: productDetails.bond?.issuer?.name || null,
+      bond_issuer_type: productDetails.bond?.issuer?.type || null,
+      bond_scheme_id: productDetails.bond?.scheme?.id || null,
+      bond_scheme_name: productDetails.bond?.scheme?.name || null,
+      bond_isin: productDetails.bond?.scheme?.isin || null,
+      bond_coupon_rate: productDetails.bond?.instrument?.coupon_rate || null,
+      bond_face_value: productDetails.bond?.instrument?.face_value || null,
+      bond_issue_date: productDetails.bond?.instrument?.issue_date || null,
+      bond_maturity_date: productDetails.bond?.instrument?.maturity_date || null,
+      bond_transaction_type: productDetails.bond?.transaction?.type || null,
+      bond_number_of_units: productDetails.bond?.transaction?.number_of_units || null,
+      bond_investment_amount: productDetails.bond?.transaction?.amount || null,
+      bond_transaction_date: productDetails.bond?.transaction?.date || null,
+      bond_application_number: productDetails.bond?.application?.number || null,
+      bond_form_15g_15h: productDetails.bond?.tax?.form_15g_15h || null,
+      // Legacy general fields
+      fd_type: productDetails.insurance?.policy?.type || null,
       client_type: d.clientType || d.client_type || null,
-      deposit_period_ym: d.depositPeriodYM || d.deposit_period_ym || (d.fd_tenure_months ? `${Math.floor(d.fd_tenure_months / 12)}Y ${d.fd_tenure_months % 12}M` : null),
-      roi_percent: d.roi || d.roi_percent || d.fd_total_rate_pa || d.fd_locked_interest_rate_pa || null,
+      deposit_period_ym: productDetails.fd?.deposit?.tenure_months ? `${Math.floor(productDetails.fd.deposit.tenure_months / 12)}Y ${productDetails.fd.deposit.tenure_months % 12}M` : null,
+      roi_percent: productDetails.fd?.rates?.total_rate_pa || productDetails.bond?.instrument?.coupon_rate || null,
       interest_payable: d.interestPayable || d.interest_payable || null,
-      interest_frequency: d.interestFrequency || d.interest_frequency || null,
-      instrument_type: d.instrumentType || d.instrument_type || null,
-      instrument_no: d.instrumentNo || d.instrument_no || null,
-      instrument_date: d.instrumentDate || d.instrument_date || null,
-      bank_name: d.bankName || d.bank_name || null,
-      bank_branch: d.bankBranch || d.bank_branch || null,
+      interest_frequency: productDetails.insurance?.policy?.premium_frequency || productDetails.fd?.deposit?.payout_frequency || null,
+      instrument_type: payment.instrument.type,
+      instrument_no: payment.instrument.number,
+      instrument_date: payment.instrument.date,
+      bank_name: payment.instrument.bank.name,
+      bank_branch: payment.instrument.bank.branch,
       fdr_demat_policy: d.fdr_demat_policy || null,
-      renewal_due_date: d.renewalDueDate || d.renewal_due_date || null,
-      maturity_amount: d.maturityAmount || d.maturity_amount || null,
+      renewal_due_date: productDetails.bond?.instrument?.maturity_date || null,
+      maturity_amount: productDetails.fd?.maturity?.amount || null,
       renewal_amount: d.renewalAmount || d.renewal_amount || null,
-      issuer_company: d.issuerCompany || d.issuer_company || d.fd_issuer_name || null,
-      issuer_category: d.issuerCategory || d.issuer_category || (d.fd_issuer_type ? 'Fixed Deposit' : null),
-      // New MF-specific fields (legacy top-level, kept for backwards compatibility)
-      amc_code: d.amc_code || null,
-      amc_name: d.amc_name || null,
-      scheme_code: d.scheme_code || null,
-      scheme_category: d.scheme_category || null,
-      scheme_sub_category: d.scheme_sub_category || null,
-      scheme_plan: d.scheme_plan || null,
-      scheme_type: d.scheme_type || null,
-      scheme_is_nfo: d.scheme_is_nfo || null,
-      // Transaction details
-      transaction_type: d.transaction_type || null,
-      has_existing_folio: d.has_existing_folio || null,
-      folio_number: d.folio_number || null,
-      // SIP fields
-      sip_frequency: d.sip_frequency || null,
-      sip_start_date: d.sip_start_date || null,
-      sip_end_date: d.sip_end_date || null,
-      sip_is_perpetual: d.sip_is_perpetual || null,
-      // SWP fields
-      swp_frequency: d.swp_frequency || null,
-      swp_start_date: d.swp_start_date || null,
-      swp_amount: d.swp_amount || null,
-      // STP fields
-      stp_target_scheme_code: d.stp_target_scheme_code || null,
-      stp_target_scheme_name: d.stp_target_scheme_name || null,
-      stp_frequency: d.stp_frequency || null,
-      stp_start_date: d.stp_start_date || null,
-      stp_amount: d.stp_amount || null,
-      stp_original_amount: d.stp_original_amount || null,
-      // Switch Over fields
-      switch_from_scheme_code: d.switch_from_scheme_code || null,
-      switch_from_scheme_name: d.switch_from_scheme_name || null,
-      switch_to_scheme_code: d.switch_to_scheme_code || null,
-      switch_to_scheme_name: d.switch_to_scheme_name || null,
-      switch_type: d.switch_type || null,
-      switch_value: d.switch_value || null,
-      // FD-specific fields
-      fd_issuer_key: d.fd_issuer_key || null,
-      fd_issuer_name: d.fd_issuer_name || null,
-      fd_issuer_type: d.fd_issuer_type || null,
-      fd_scheme_id: d.fd_scheme_id || null,
-      fd_scheme_name: d.fd_scheme_name || null,
-      fd_is_cumulative: d.fd_is_cumulative || null,
-      fd_deposit_amount: d.fd_deposit_amount || null,
-      fd_tenure_months: d.fd_tenure_months || null,
-      fd_payout_frequency: d.fd_payout_frequency || null,
-      fd_base_rate_pa: d.fd_base_rate_pa || null,
-      fd_senior_citizen_bonus: d.fd_senior_citizen_bonus || null,
-      fd_women_bonus: d.fd_women_bonus || null,
-      fd_renewal_bonus: d.fd_renewal_bonus || null,
-      fd_total_rate_pa: d.fd_total_rate_pa || null,
-      fd_maturity_amount: d.fd_maturity_amount || null,
-      fd_maturity_date: d.fd_maturity_date || null,
-      fd_application_number: d.fd_application_number || null,
-      fd_deposit_date: d.fd_deposit_date || null,
-      fd_tds_applicable: d.fd_tds_applicable || null,
-      fd_form_15g_15h: d.fd_form_15g_15h || null,
-      fd_transaction_type: d.fd_transaction_type || null, // Fresh or Renewal
-      fd_renewal_investment_type: d.fd_renewal_investment_type || null, // same, increased, decreased
-      fd_renewal_additional_amount: d.fd_renewal_additional_amount || null,
-      // Nested product-specific details for cleaner schema
+      issuer_company: productDetails.fd?.issuer?.name || productDetails.insurance?.issuer?.name || productDetails.bond?.issuer?.name || null,
+      issuer_category: productDetails.fd?.issuer?.type || productDetails.insurance?.issuer?.type || productDetails.bond?.issuer?.type || null,
+      // Legacy nested structures (for backward compatibility)
       mf_details: mfDetails,
       fd_details: fdDetails,
-      // Transaction details (for online/offline, RTGS, etc.)
       transaction_details: {
-        entry_mode: d.transaction_details?.entry_mode || d.entry_mode || d.transactionType || null, // Online / Offline / Others
-        channel: d.transaction_details?.channel || d.transaction_channel || d.othersTransactionType || null, // UPI / NEFT / RTGS / ...
-        reference_no: d.transaction_details?.reference_no || d.transaction_reference_no || d.transactionNumber || null,
-        txn_date: d.transaction_details?.txn_date || d.txn_date || null,
-        bank_name: d.transaction_details?.bank_name || d.bankName || d.bank_name || null,
-        account_last4: d.transaction_details?.account_last4 || d.account_last4 || null,
-        notes: d.transaction_details?.notes || d.transaction_notes || (d.transactionType === 'Others' ? d.othersTransactionType : null) || null
+        entry_mode: payment.entry_mode,
+        channel: payment.channel,
+        reference_no: payment.reference_no,
+        txn_date: payment.transaction_date,
+        bank_name: payment.instrument.bank.name,
+        account_last4: payment.account_last4,
+        notes: payment.notes
       },
-      // CC and SI calculated and stored at transaction time (for audit & dashboards)
+      // Legacy CC/SI aliases
       collection_credit: collectionCredit,
-      cc: collectionCredit, // Alias / legacy
+      cc: collectionCredit,
       service_income: serviceIncome,
-      si: serviceIncome, // Alias / legacy
-      status: 'Pending', // Default status for new receipts
-      is_deleted: false,
-      created_at: new Date().toISOString()
+      si: serviceIncome
     }
 
     const result = await getCollection('receipts').save(receiptDoc)
@@ -463,6 +745,7 @@ router.get('/', requireAuth, async (req, res) => {
       category,
       status,
       mode,
+      txn_type, // Transaction type filter (Fresh, Additional, Redemption, Switch Over, etc.)
       issuer,
       emp_code,
       branch_code,
@@ -514,8 +797,19 @@ router.get('/', requireAuth, async (req, res) => {
       bindVars.status = status
     }
     if (mode) {
-      filterConditions.push('receipt.mode == @mode')
-      bindVars.mode = mode
+      // Handle Switch Over specially - it's selected as a mode but stored as transaction type
+      if (mode === 'Switch Over' || mode === 'SwitchOver' || mode === 'SWITCH_OVER' || mode === 'switch_over') {
+        // For Switch Over, check transaction type fields instead of mode
+        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null)')
+        bindVars.switch_over_mode = 'Switch Over'
+        bindVars.switch_over_mode_alt1 = 'SwitchOver'
+        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
+        bindVars.switch_over_mode_alt3 = 'switch_over'
+      } else {
+        // For other modes (SIP, SWP, STP, Lump Sum), filter by mode field
+        filterConditions.push('receipt.mode == @mode')
+        bindVars.mode = mode
+      }
     }
     if (issuer) {
       filterConditions.push('receipt.issuer_company LIKE @issuer')
