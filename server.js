@@ -18,6 +18,8 @@ import exportRoutes from './routes/export.js'
 import issueRoutes from './routes/issues.js'
 import schemeRoutes from './routes/schemes.js'
 import fdSchemeRoutes from './routes/fd-schemes.js'
+import ncdBondSchemeRoutes from './routes/ncd-bonds-schemes.js'
+import insuranceSchemeRoutes from './routes/insurance-schemes.js'
 
 const app = express()
 
@@ -63,6 +65,8 @@ app.use('/api/export', exportRoutes)
 app.use('/api/issues', issueRoutes)
 app.use('/api/schemes', schemeRoutes) // MF Schemes routes
 app.use('/api/fd-schemes', fdSchemeRoutes) // FD Schemes routes
+app.use('/api/ncd-bonds-schemes', ncdBondSchemeRoutes) // NCD/Bond Schemes routes
+app.use('/api/insurance-schemes', insuranceSchemeRoutes) // Insurance Schemes routes
 
 // Health endpoint for database connection
 app.get('/health', async (req, res) => {
@@ -76,7 +80,6 @@ app.get('/health', async (req, res) => {
   }
 })
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`API listening on http://0.0.0.0:${PORT}`)
-  console.log(`Server accessible from network at http://192.168.0.124:${PORT}`)
+app.listen(PORT, () => {
+  console.log('API listening on', PORT)
 })

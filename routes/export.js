@@ -105,7 +105,9 @@ router.get('/transactions', requireAuth, async (req, res) => {
       branch_code,
       emp_code,
       status,
-      category
+      category,
+      mode,
+      txn_type
     } = req.query
 
     let query = `
@@ -141,6 +143,21 @@ router.get('/transactions', requireAuth, async (req, res) => {
     if (category) {
       query += ` AND receipt.product_category == @category`
       bindVars.category = category
+    }
+    if (mode) {
+      // Handle Switch Over specially - it's selected as a mode but stored as transaction type
+      if (mode === 'Switch Over' || mode === 'SwitchOver' || mode === 'SWITCH_OVER' || mode === 'switch_over') {
+        // For Switch Over, check transaction type fields instead of mode
+        query += ` AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null)`
+        bindVars.switch_over_mode = 'Switch Over'
+        bindVars.switch_over_mode_alt1 = 'SwitchOver'
+        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
+        bindVars.switch_over_mode_alt3 = 'switch_over'
+      } else {
+        // For other modes (SIP, SWP, STP, Lump Sum), filter by mode field
+        query += ` AND receipt.mode == @mode`
+        bindVars.mode = mode
+      }
     }
 
     query += `

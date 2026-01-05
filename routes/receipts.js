@@ -153,6 +153,25 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
               serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
             }
           }
+        } else if (productCategory === 'INS' && d.insurance_issuer_key && d.insurance_product_id) {
+          // Fetch insurance product to get CC and SI percentages
+          const insuranceIssuers = await q(`
+            FOR issuer IN insurance_issuers
+            FILTER issuer._key == @insurance_issuer_key
+            LIMIT 1
+            RETURN issuer
+          `, { insurance_issuer_key: d.insurance_issuer_key })
+          
+          if (insuranceIssuers.length > 0) {
+            const issuer = insuranceIssuers[0]
+            const product = issuer.products?.find(p => p.product_id === d.insurance_product_id)
+            if (product) {
+              const ccPercent = parseFloat(product.cc || 0)
+              const siPercent = parseFloat(product.si || 0)
+              collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+              serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+            }
+          }
         }
       } catch (error) {
         console.error('Error calculating CC/SI from scheme:', error)
@@ -334,15 +353,33 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     if (productCategory === 'INS') {
       productDetails.insurance = {
         issuer: {
+          key: d.insurance_issuer_key || null,
           name: d.issuerCompany || d.issuer_company || null,
           type: d.issuerCategory || d.issuer_category || 'Insurance'
         },
+        product: {
+          id: d.insurance_product_id || null,
+          name: d.insurance_product_name || d.scheme_name || null,
+          category: d.insurance_category || null,
+          sub_category: d.insurance_sub_category || null
+        },
         policy: {
-          number: d.folioPolicyNo || d.folio_policy_no || null,
-          type: d.fd_type || d.fdType || null,
-          premium_amount: investmentAmount || null,
-          premium_frequency: d.interest_frequency || d.interestFrequency || null
-        }
+          number: d.folioPolicyNo || d.folio_policy_no || d.insurance_policy_number || null,
+          type: d.fd_type || d.fdType || d.insurance_policy_type || null,
+          premium_amount: investmentAmount || d.insurance_premium_amount || null,
+          premium_frequency: d.interest_frequency || d.interestFrequency || d.insurance_premium_frequency || null,
+          premium_payment_term: d.insurance_premium_payment_term || null,
+          premium_payment_term_type: d.insurance_premium_payment_term_type || null
+        },
+        coverage: {
+          sum_assured: d.insurance_sum_assured || null,
+          policy_term_years: d.insurance_policy_term_years || null,
+          policy_start_date: d.insurance_policy_start_date || null,
+          maturity_date: d.insurance_maturity_date || null
+        },
+        riders: d.insurance_selected_riders ? (Array.isArray(d.insurance_selected_riders) ? d.insurance_selected_riders : [d.insurance_selected_riders]) : null,
+        beneficiaries: d.insurance_beneficiaries || null,
+        coverage_details: d.insurance_coverage_details || null
       }
     }
     

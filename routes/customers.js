@@ -2,7 +2,7 @@ import express from 'express'
 import { q, getCollection, getUserBranch, normalizeBranchName, canAccessCustomer } from '../config/database.js'
 import { requireAuth } from '../middleware/auth.js'
 import { uploadMultiple } from '../middleware/upload.js'
-import { validatePAN, validateEmail, validateMobile, validateAadhar, validatePIN, validateRequired } from '../utils/validators.js'
+import { validatePAN, validateEmail, validateMobile, validateAadhar, validatePIN, validateRequired, validateMinorsArray } from '../utils/validators.js'
 
 const router = express.Router()
 
@@ -100,12 +100,11 @@ router.get('/search', requireAuth, async (req, res) => {
       filterClause = searchFilter
     }
 
-    const query = `
+    // Search query for major customers (with minors included in response)
+    const customerQuery = `
       FOR customer IN customers
       ${filterClause}
-      SORT customer.${orderBy} ${sortDir}
-      LIMIT @offset, @limit
-      RETURN {
+      LET customerResult = {
         investor_id: customer.investor_id,
         name: customer.name,
         pan: customer.pan,
@@ -115,15 +114,92 @@ router.get('/search', requireAuth, async (req, res) => {
         city: customer.city,
         state: customer.state,
         relationship_manager: customer.relationship_manager,
-        created_at: customer.created_at
+        created_at: customer.created_at,
+        minors: customer.minors || []
+      }
+      RETURN customerResult
+    `
+    
+    // Search query for minors (flat format)
+    const minorSearchFilter = !isAdmin && normalizedUserBranch ? `
+      FILTER (
+        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+      ) AND (
+        customer.minors != null && LENGTH(customer.minors) > 0
+      ) AND (
+        FOR minor IN customer.minors
+        FILTER (
+          LOWER(minor.name) LIKE LOWER(@searchQuery)
+          OR minor.investor_id == @exactId
+          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+        )
+        RETURN true
+      )[0] == true
+    ` : `
+      FILTER (
+        customer.minors != null && LENGTH(customer.minors) > 0
+      ) AND (
+        FOR minor IN customer.minors
+        FILTER (
+          LOWER(minor.name) LIKE LOWER(@searchQuery)
+          OR minor.investor_id == @exactId
+          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+        )
+        RETURN true
+      )[0] == true
+    `
+    
+    const minorQuery = `
+      FOR customer IN customers
+      ${minorSearchFilter}
+      FOR minor IN customer.minors
+      FILTER (
+        LOWER(minor.name) LIKE LOWER(@searchQuery)
+        OR minor.investor_id == @exactId
+        OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+      )
+      RETURN {
+        investor_id: minor.investor_id,
+        name: minor.name,
+        pan: minor.pan,
+        mobile: null,
+        email: null,
+        address1: minor.address1,
+        city: minor.city,
+        state: minor.state,
+        relationship_manager: customer.relationship_manager,
+        created_at: minor.created_at,
+        is_minor: true,
+        parent_investor_id: customer.investor_id,
+        parent_name: customer.name,
+        use_same_address: minor.use_same_address || false,
+        relationship_type: minor.relationship_type
       }
     `
 
     const countQuery = `
-      FOR customer IN customers
-      ${filterClause}
-      COLLECT WITH COUNT INTO total
-      RETURN total
+      LET customerCount = (
+        FOR customer IN customers
+        ${filterClause}
+        COLLECT WITH COUNT INTO total
+        RETURN total
+      )[0] || 0
+      
+      LET minorCount = (
+        FOR customer IN customers
+        ${minorSearchFilter}
+        FOR minor IN customer.minors
+        FILTER (
+          LOWER(minor.name) LIKE LOWER(@searchQuery)
+          OR minor.investor_id == @exactId
+          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+        )
+        COLLECT WITH COUNT INTO total
+        RETURN total
+      )[0] || 0
+      
+      RETURN customerCount + minorCount
     `
     
     // Create separate bindVars for count query (without limit/offset)
@@ -131,16 +207,22 @@ router.get('/search', requireAuth, async (req, res) => {
     delete countBindVars.limit
     delete countBindVars.offset
 
-    const [customers, totalResult] = await Promise.all([
-      q(query, bindVars),
+    const [customersResult, minorsResult, totalResult] = await Promise.all([
+      q(customerQuery, bindVars),
+      q(minorQuery, bindVars),
       q(countQuery, countBindVars)
     ])
+    
+    // Combine results: customers with their minors, plus flat minor entries
+    const customers = customersResult
+    const minors = minorsResult
     
     const total = totalResult[0] || 0
     const totalPages = Math.ceil(total / searchLimit)
     
     res.json({
-      customers,
+      customers, // Major customers (with minors nested)
+      minors, // Minors as separate flat entries
       pagination: {
         page: searchPage,
         limit: searchLimit,
@@ -291,9 +373,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       query = `
         FOR customer IN customers
         ${filterClause}
-        SORT customer.${orderBy} ${sortDir}
-        LIMIT @offset, @limit
-        RETURN {
+        LET customerResult = {
           investor_id: customer.investor_id,
           name: customer.name,
           pan: customer.pan,
@@ -303,50 +383,167 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
           city: customer.city,
           state: customer.state,
           relationship_manager: customer.relationship_manager,
-          created_at: customer.created_at
+          created_at: customer.created_at,
+          minors: customer.minors || []
         }
+        RETURN customerResult
       `
+    }
+    
+    // Minor search query (same for both fulltext and regular)
+    const exactId = parseInt(searchQuery.trim())
+    const exactIdForMinors = !isNaN(exactId) ? exactId : -1
+    
+    const minorSearchFilter = !isAdmin && normalizedUserBranch ? `
+      FILTER (
+        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+      ) AND (
+        customer.minors != null && LENGTH(customer.minors) > 0
+      ) AND (
+        FOR minor IN customer.minors
+        FILTER (
+          LOWER(minor.name) LIKE LOWER(@searchQuery)
+          OR minor.investor_id == @exactId
+          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+        )
+        RETURN true
+      )[0] == true
+    ` : `
+      FILTER (
+        customer.minors != null && LENGTH(customer.minors) > 0
+      ) AND (
+        FOR minor IN customer.minors
+        FILTER (
+          LOWER(minor.name) LIKE LOWER(@searchQuery)
+          OR minor.investor_id == @exactId
+          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+        )
+        RETURN true
+      )[0] == true
+    `
+    
+    const minorQuery = `
+      FOR customer IN customers
+      ${minorSearchFilter}
+      FOR minor IN customer.minors
+      FILTER (
+        LOWER(minor.name) LIKE LOWER(@searchQuery)
+        OR minor.investor_id == @exactId
+        OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+      )
+      RETURN {
+        investor_id: minor.investor_id,
+        name: minor.name,
+        pan: minor.pan,
+        mobile: null,
+        email: null,
+        address1: minor.address1,
+        city: minor.city,
+        state: minor.state,
+        relationship_manager: customer.relationship_manager,
+        created_at: minor.created_at,
+        is_minor: true,
+        parent_investor_id: customer.investor_id,
+        parent_name: customer.name,
+        use_same_address: minor.use_same_address || false,
+        relationship_type: minor.relationship_type
+      }
+    `
+    
+    // Add exactId to bindVars for minor search
+    const minorBindVars = { ...bindVars }
+    if (!minorBindVars.exactId) {
+      minorBindVars.exactId = exactIdForMinors
+    }
+    if (typeof minorBindVars.searchQuery === 'string' && !minorBindVars.searchQuery.includes('%')) {
+      minorBindVars.searchQuery = `%${minorBindVars.searchQuery}%`
     }
 
     const countQuery = useFulltext === 'true' ? `
-      FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
-      ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
-      COLLECT WITH COUNT INTO total
-      RETURN total
+      LET customerCount = (
+        FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
+        ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
+        COLLECT WITH COUNT INTO total
+        RETURN total
+      )[0] || 0
+      
+      LET minorCount = (
+        FOR customer IN customers
+        ${minorSearchFilter}
+        FOR minor IN customer.minors
+        FILTER (
+          LOWER(minor.name) LIKE LOWER(@searchQuery)
+          OR minor.investor_id == @exactId
+          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+        )
+        COLLECT WITH COUNT INTO total
+        RETURN total
+      )[0] || 0
+      
+      RETURN customerCount + minorCount
     ` : `
-      FOR customer IN customers
-      ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
-      FILTER (
-        LOWER(customer.name) LIKE LOWER(@searchQuery) 
-        OR customer.investor_id == @exactId
-        OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
-        OR LOWER(customer.email) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.city) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.state) LIKE LOWER(@searchQuery)
-      )
-      COLLECT WITH COUNT INTO total
-      RETURN total
+      LET customerCount = (
+        FOR customer IN customers
+        ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
+        FILTER (
+          LOWER(customer.name) LIKE LOWER(@searchQuery) 
+          OR customer.investor_id == @exactId
+          OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
+          OR LOWER(customer.email) LIKE LOWER(@searchQuery) 
+          OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.city) LIKE LOWER(@searchQuery)
+          OR LOWER(customer.state) LIKE LOWER(@searchQuery)
+        )
+        COLLECT WITH COUNT INTO total
+        RETURN total
+      )[0] || 0
+      
+      LET minorCount = (
+        FOR customer IN customers
+        ${minorSearchFilter}
+        FOR minor IN customer.minors
+        FILTER (
+          LOWER(minor.name) LIKE LOWER(@searchQuery)
+          OR minor.investor_id == @exactId
+          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
+        )
+        COLLECT WITH COUNT INTO total
+        RETURN total
+      )[0] || 0
+      
+      RETURN customerCount + minorCount
     `
     
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
     delete countBindVars.limit
     delete countBindVars.offset
+    if (!countBindVars.exactId) {
+      countBindVars.exactId = exactIdForMinors
+    }
+    if (typeof countBindVars.searchQuery === 'string' && !countBindVars.searchQuery.includes('%')) {
+      countBindVars.searchQuery = `%${countBindVars.searchQuery}%`
+    }
 
-    const [customers, totalResult] = await Promise.all([
+    const [customersResult, minorsResult, totalResult] = await Promise.all([
       q(query, bindVars),
+      q(minorQuery, minorBindVars),
       q(countQuery, countBindVars)
     ])
+    
+    const customers = customersResult
+    const minors = minorsResult
     
     const total = totalResult[0] || 0
     const totalPages = Math.ceil(total / searchLimit)
     
     res.json({
-      customers,
+      customers, // Major customers (with minors nested)
+      minors, // Minors as separate flat entries
       pagination: {
         page: searchPage,
         limit: searchLimit,
@@ -683,13 +880,92 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       return res.status(400).json({ error: 'duplicate_pan', detail: 'PAN number already exists' })
     }
 
-    // Get the next investor_id
+    // Get the next investor_id (check both customers and minors)
     const maxIdResult = await q(`
-      FOR customer IN customers
-      COLLECT AGGREGATE maxId = MAX(customer.investor_id)
-      RETURN maxId
+      LET customerMax = (
+        FOR customer IN customers
+        COLLECT AGGREGATE maxId = MAX(customer.investor_id)
+        RETURN maxId
+      )[0] || 0
+      
+      LET minorMax = (
+        FOR customer IN customers
+        FILTER customer.minors != null && LENGTH(customer.minors) > 0
+        FOR minor IN customer.minors
+        COLLECT AGGREGATE maxMinorId = MAX(minor.investor_id)
+        RETURN maxMinorId
+      )[0] || 0
+      
+      RETURN MAX([customerMax, minorMax])
     `)
-    const nextId = (maxIdResult[0] || 0) + 1
+    let nextId = (maxIdResult[0] || 0) + 1
+
+    // Validate and process minors if provided
+    let minors = []
+    if (req.body.minors !== undefined) {
+      // Handle minors array (could be JSON string or array)
+      let minorsInput = req.body.minors
+      if (typeof minorsInput === 'string') {
+        try {
+          minorsInput = JSON.parse(minorsInput)
+        } catch (e) {
+          return res.status(400).json({ error: 'validation_error', detail: 'Invalid minors array format' })
+        }
+      }
+      
+      const minorsValidation = validateMinorsArray(minorsInput)
+      if (!minorsValidation.valid) {
+        return res.status(400).json({ 
+          error: 'validation_error', 
+          detail: Array.isArray(minorsValidation.errors) 
+            ? minorsValidation.errors.join('; ') 
+            : minorsValidation.error 
+        })
+      }
+      
+      minors = minorsValidation.value
+      
+      // Assign unique investor_id to each minor and check PAN uniqueness
+      for (let i = 0; i < minors.length; i++) {
+        minors[i].investor_id = nextId++
+        minors[i].created_at = new Date().toISOString()
+        
+        // Check PAN uniqueness for minors (if PAN provided)
+        if (minors[i].pan) {
+          // Check in major customers
+          const existingPanMajor = await q(`
+            FOR customer IN customers 
+            FILTER customer.pan == @pan
+            LIMIT 1
+            RETURN customer.investor_id
+          `, { pan: minors[i].pan })
+          
+          if (existingPanMajor.length) {
+            return res.status(400).json({ 
+              error: 'duplicate_pan', 
+              detail: `PAN ${minors[i].pan} already exists for customer ID ${existingPanMajor[0]}` 
+            })
+          }
+          
+          // Check in other minors
+          const existingPanMinor = await q(`
+            FOR customer IN customers
+            FILTER customer.minors != null && LENGTH(customer.minors) > 0
+            FOR minor IN customer.minors
+            FILTER minor.pan == @pan
+            LIMIT 1
+            RETURN minor.investor_id
+          `, { pan: minors[i].pan })
+          
+          if (existingPanMinor.length) {
+            return res.status(400).json({ 
+              error: 'duplicate_pan', 
+              detail: `PAN ${minors[i].pan} already exists for minor with ID ${existingPanMinor[0]}` 
+            })
+          }
+        }
+      }
+    }
 
     // Handle uploaded media files
     let mediaDocuments = []
@@ -728,6 +1004,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       aadhar_number: aadhar_number || null,
       media_documents: mediaDocuments,
       relationship_manager: relationshipManager, // Can be single branch (string) or multiple branches (array)
+      minors: minors, // Array of minors
       created_at: new Date().toISOString(),
       is_active: true,
       source_type: 'manual_entry'
@@ -739,6 +1016,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       relationship_manager: relationshipManager,
       branches: branches,
       media_files: mediaDocuments.length,
+      minors_count: minors.length,
       message: branches.length === 1 
         ? 'Customer created and assigned to your branch'
         : `Customer created and assigned to ${branches.length} branch(es)`
@@ -777,7 +1055,8 @@ router.patch('/:id', requireAuth, async (req, res) => {
       annual_income,
       aadhar_number,
       branches, // New: array of branches
-      relationship_manager // Backward compatibility: single branch
+      relationship_manager, // Backward compatibility: single branch
+      minors // Array of minors (for update)
     } = req.body || {}
 
     // Check if customer exists and get full customer data
@@ -836,7 +1115,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
         return res.status(400).json({ error: 'validation_error', detail: panValidation.error })
       }
 
-      // Check if PAN already exists for another customer
+      // Check if PAN already exists for another customer (including minors)
       try {
         const existingPan = await q(`
           FOR customer IN customers 
@@ -849,6 +1128,23 @@ router.patch('/:id', requireAuth, async (req, res) => {
           return res.status(400).json({ 
             error: 'duplicate_pan', 
             detail: `PAN number already exists for customer ID ${existingPan[0]}` 
+          })
+        }
+        
+        // Also check in minors
+        const existingPanMinor = await q(`
+          FOR customer IN customers
+          FILTER customer.minors != null && LENGTH(customer.minors) > 0
+          FOR minor IN customer.minors
+          FILTER minor.pan == @pan
+          LIMIT 1
+          RETURN minor.investor_id
+        `, { pan: panValidation.value })
+        
+        if (existingPanMinor.length) {
+          return res.status(400).json({ 
+            error: 'duplicate_pan', 
+            detail: `PAN number already exists for minor with ID ${existingPanMinor[0]}` 
           })
         }
       } catch (panError) {
@@ -930,6 +1226,135 @@ router.patch('/:id', requireAuth, async (req, res) => {
       
       // Store as array if multiple branches, or single string if one branch (for backward compatibility)
       updates.relationship_manager = newBranches.length === 1 ? newBranches[0] : newBranches
+    }
+
+    // Handle minors update
+    if (minors !== undefined) {
+      // Handle minors array (could be JSON string or array)
+      let minorsInput = minors
+      if (typeof minorsInput === 'string') {
+        try {
+          minorsInput = JSON.parse(minorsInput)
+        } catch (e) {
+          return res.status(400).json({ error: 'validation_error', detail: 'Invalid minors array format' })
+        }
+      }
+      
+      const minorsValidation = validateMinorsArray(minorsInput)
+      if (!minorsValidation.valid) {
+        return res.status(400).json({ 
+          error: 'validation_error', 
+          detail: Array.isArray(minorsValidation.errors) 
+            ? minorsValidation.errors.join('; ') 
+            : minorsValidation.error 
+        })
+      }
+      
+      // Get existing minors to preserve investor_ids for existing ones
+      const existingMinors = customer.minors || []
+      const existingMinorIds = new Set(existingMinors.map(m => m.investor_id))
+      
+      // Get max investor_id for new minors
+      const maxIdResult = await q(`
+        LET customerMax = (
+          FOR customer IN customers
+          COLLECT AGGREGATE maxId = MAX(customer.investor_id)
+          RETURN maxId
+        )[0] || 0
+        
+        LET minorMax = (
+          FOR customer IN customers
+          FILTER customer.minors != null && LENGTH(customer.minors) > 0
+          FOR minor IN customer.minors
+          COLLECT AGGREGATE maxMinorId = MAX(minor.investor_id)
+          RETURN maxMinorId
+        )[0] || 0
+        
+        RETURN MAX([customerMax, minorMax])
+      `)
+      let nextMinorId = (maxIdResult[0] || 0) + 1
+      
+      // Process minors: update existing ones or create new ones
+      const processedMinors = minorsValidation.value.map((minor, index) => {
+        // If minor has investor_id and it exists in current customer's minors, it's an update
+        if (minor.investor_id && existingMinorIds.has(minor.investor_id)) {
+          // Update existing minor - preserve investor_id and created_at
+          const existingMinor = existingMinors.find(m => m.investor_id === minor.investor_id)
+          return {
+            ...minor,
+            investor_id: minor.investor_id,
+            created_at: existingMinor?.created_at || new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }
+        } else {
+          // New minor - assign investor_id
+          return {
+            ...minor,
+            investor_id: nextMinorId++,
+            created_at: new Date().toISOString()
+          }
+        }
+      })
+      
+      // Check for receipts associated with minors that are being removed
+      const removedMinorIds = existingMinors
+        .filter(m => !processedMinors.some(pm => pm.investor_id === m.investor_id))
+        .map(m => m.investor_id)
+      
+      if (removedMinorIds.length > 0) {
+        const receiptsCheck = await q(`
+          FOR receipt IN receipts
+          FILTER receipt.investor_id IN @minorIds AND receipt.is_deleted == false
+          COLLECT WITH COUNT INTO count
+          RETURN count
+        `, { minorIds: removedMinorIds })
+        
+        if (receiptsCheck[0] > 0) {
+          return res.status(400).json({ 
+            error: 'cannot_remove_minor', 
+            detail: `Cannot remove minor(s) with associated receipts. ${receiptsCheck[0]} receipt(s) found.` 
+          })
+        }
+      }
+      
+      // Validate PAN uniqueness for all minors (including updates)
+      for (const minor of processedMinors) {
+        if (minor.pan) {
+          // Check in major customers
+          const existingPanMajor = await q(`
+            FOR customer IN customers 
+            FILTER customer.pan == @pan
+            LIMIT 1
+            RETURN customer.investor_id
+          `, { pan: minor.pan })
+          
+          if (existingPanMajor.length) {
+            return res.status(400).json({ 
+              error: 'duplicate_pan', 
+              detail: `PAN ${minor.pan} already exists for customer ID ${existingPanMajor[0]}` 
+            })
+          }
+          
+          // Check in other minors (excluding this minor's own ID)
+          const existingPanMinor = await q(`
+            FOR customer IN customers
+            FILTER customer.minors != null && LENGTH(customer.minors) > 0
+            FOR minor IN customer.minors
+            FILTER minor.pan == @pan AND minor.investor_id != @minorId
+            LIMIT 1
+            RETURN minor.investor_id
+          `, { pan: minor.pan, minorId: minor.investor_id })
+          
+          if (existingPanMinor.length) {
+            return res.status(400).json({ 
+              error: 'duplicate_pan', 
+              detail: `PAN ${minor.pan} already exists for minor with ID ${existingPanMinor[0]}` 
+            })
+          }
+        }
+      }
+      
+      updates.minors = processedMinors
     }
 
     // Add update timestamp

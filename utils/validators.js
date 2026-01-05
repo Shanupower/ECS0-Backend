@@ -312,3 +312,165 @@ export function validateLength(value, minLength, maxLength, fieldName) {
   return { valid: true, value: str }
 }
 
+/**
+ * Calculate age from date of birth
+ */
+export function calculateAge(dateOfBirth) {
+  if (!dateOfBirth) return null
+  
+  const dob = new Date(dateOfBirth)
+  const today = new Date()
+  let age = today.getFullYear() - dob.getFullYear()
+  const monthDiff = today.getMonth() - dob.getMonth()
+  
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
+    age--
+  }
+  
+  return age
+}
+
+/**
+ * Validate minor (child/ward) data
+ * @param {Object} minor - Minor data object
+ * @param {number} index - Index in array (for error messages)
+ * @returns {Object} Validation result
+ */
+export function validateMinor(minor, index = 0) {
+  const errors = []
+  const prefix = `Minor ${index + 1}`
+  
+  // Validate name (required)
+  const nameValidation = validateRequired(minor.name, `${prefix} name`)
+  if (!nameValidation.valid) {
+    errors.push(nameValidation.error)
+  }
+  
+  // Validate date of birth (required, must be in past, must be valid date)
+  const dobValidation = validateDate(minor.date_of_birth, `${prefix} date of birth`, true)
+  if (!dobValidation.valid) {
+    errors.push(dobValidation.error)
+  } else if (dobValidation.value) {
+    const dob = new Date(dobValidation.value)
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    
+    if (dob >= today) {
+      errors.push(`${prefix} date of birth must be in the past`)
+    }
+    
+    // Check if age is reasonable (not more than 18 years for minor)
+    const age = calculateAge(dobValidation.value)
+    if (age !== null && age >= 18) {
+      errors.push(`${prefix} must be under 18 years old (current age: ${age})`)
+    }
+  }
+  
+  // Validate PAN (optional, but if provided must be valid format)
+  if (minor.pan !== undefined && minor.pan !== null && minor.pan !== '') {
+    const panValidation = validatePAN(minor.pan, false)
+    if (!panValidation.valid) {
+      errors.push(`${prefix} ${panValidation.error}`)
+    }
+  }
+  
+  // Validate relationship type (required)
+  if (!minor.relationship_type || (minor.relationship_type !== 'child' && minor.relationship_type !== 'ward')) {
+    errors.push(`${prefix} relationship type must be either 'child' or 'ward'`)
+  }
+  
+  // Validate address fields if use_same_address is false
+  // Note: Frontend handles copying address, backend just validates what's sent
+  if (minor.use_same_address === false) {
+    // Address fields are optional but if provided should be validated
+    if (minor.pin && minor.pin !== '') {
+      const pinValidation = validatePIN(minor.pin, false)
+      if (!pinValidation.valid) {
+        errors.push(`${prefix} ${pinValidation.error}`)
+      }
+    }
+  }
+  
+  // Validate father_name and mother_name (optional)
+  if (minor.father_name !== undefined && minor.father_name !== null && minor.father_name !== '') {
+    const fatherNameValidation = validateLength(minor.father_name, 1, 200, `${prefix} father name`)
+    if (!fatherNameValidation.valid) {
+      errors.push(fatherNameValidation.error)
+    }
+  }
+  
+  if (minor.mother_name !== undefined && minor.mother_name !== null && minor.mother_name !== '') {
+    const motherNameValidation = validateLength(minor.mother_name, 1, 200, `${prefix} mother name`)
+    if (!motherNameValidation.valid) {
+      errors.push(motherNameValidation.error)
+    }
+  }
+  
+  if (errors.length > 0) {
+    return {
+      valid: false,
+      errors: errors
+    }
+  }
+  
+  // Return validated and cleaned minor object
+  return {
+    valid: true,
+    value: {
+      name: nameValidation.value,
+      date_of_birth: dobValidation.value,
+      pan: minor.pan ? (minor.pan.trim().toUpperCase() || null) : null,
+      relationship_type: minor.relationship_type,
+      use_same_address: minor.use_same_address === true || minor.use_same_address === 'true',
+      address1: minor.address1 || null,
+      address2: minor.address2 || null,
+      address3: minor.address3 || null,
+      city: minor.city || null,
+      state: minor.state || null,
+      pin: minor.pin || null,
+      father_name: minor.father_name ? minor.father_name.trim() : null,
+      mother_name: minor.mother_name ? minor.mother_name.trim() : null
+    }
+  }
+}
+
+/**
+ * Validate array of minors (max 10)
+ */
+export function validateMinorsArray(minors) {
+  if (!minors || !Array.isArray(minors)) {
+    return { valid: true, value: [] }
+  }
+  
+  if (minors.length > 10) {
+    return {
+      valid: false,
+      error: 'Maximum 10 minors can be attached to a customer'
+    }
+  }
+  
+  const validatedMinors = []
+  const errors = []
+  
+  for (let i = 0; i < minors.length; i++) {
+    const minorValidation = validateMinor(minors[i], i)
+    if (!minorValidation.valid) {
+      errors.push(...minorValidation.errors)
+    } else {
+      validatedMinors.push(minorValidation.value)
+    }
+  }
+  
+  if (errors.length > 0) {
+    return {
+      valid: false,
+      errors: errors
+    }
+  }
+  
+  return {
+    valid: true,
+    value: validatedMinors
+  }
+}
+
