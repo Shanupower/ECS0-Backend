@@ -1,0 +1,51 @@
+[
+  {
+    "issuer_key": "lic_of_india",
+    "legal_name": "Life Insurance Corporation of India",
+    "short_name": "LIC",
+    "type": "Life",
+    "license_number": "LIC001",
+    "product_name": "New Jeevan Amar",
+    "category": "Life",
+    "sub_category": "Term Plan",
+    "description": "Term insurance plan with high sum assured at affordable premiums",
+    "policy_type": "Term",
+    "min_sum_assured": 2500000,
+    "min_premium": 5000,
+    "min_entry_age": 18,
+    "max_entry_age": 65,
+    "min_term": 10,
+    "max_term": 40,
+    "money_back": false
+  },
+  {
+    "issuer_key": "lic_of_india",
+    "legal_name": "Life Insurance Corporation of India",
+    "short_name": "LIC",
+    "type": "Life",
+    "product_name": "Jeevan Anand",
+    "category": "Life",
+    "sub_category": "Endowment Plan",
+    "description": "Endowment plan with life cover and maturity benefit",
+    "policy_type": "Endowment",
+    "min_sum_assured": 100000,
+    "min_premium": 3000,
+    "money_back": false
+  },
+  {
+    "issuer_key": "hdfc_life",
+    "legal_name": "HDFC Life Insurance Company Limited",
+    "short_name": "HDFC Life",
+    "type": "Life",
+    "product_name": "Click 2 Protect Life",
+    "category": "Life",
+    "sub_category": "Term Plan",
+    "description": "Pure term insurance plan",
+    "policy_type": "Term",
+    "min_sum_assured": 2500000,
+    "min_premium": 4000,
+    "money_back": false
+  }
+]
+
+

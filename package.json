@@ -8,6 +8,8 @@
     "setup-db": "node setup-arangodb.js",
     "dump-data": "node scripts/dump-data.js",
     "import-data": "node scripts/import-data.js",
+    "import-insurance-json": "node scripts/import-insurance-from-json.js",
+    "batch-import-insurance": "node scripts/batch-import-insurance.js",
     "pm2:start": "pm2 start ecosystem.config.js",
     "pm2:stop": "pm2 stop ecs-backend",
     "pm2:restart": "pm2 restart ecs-backend",

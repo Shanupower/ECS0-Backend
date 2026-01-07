@@ -3067,6 +3067,499 @@ const insuranceIssuers = [
         withdrawal_date: null
       }
     ]
+  },
+  {
+    _key: 'digit_insurance',
+    legal_name: 'Go Digit General Insurance Limited',
+    short_name: 'Digit Insurance',
+    type: 'General',
+    license_number: 'DI001',
+    is_active: true,
+    products: [
+      {
+        product_id: 'digit_motor',
+        product_name: 'Motor Insurance',
+        category: 'General',
+        sub_category: 'Vehicle Plans',
+        description: 'Digital-first comprehensive motor insurance with easy claims',
+        policy_types: ['Vehicle'],
+        min_sum_assured: null,
+        max_sum_assured: null,
+        min_premium: 2100,
+        max_premium: null,
+        min_entry_age: 18,
+        max_entry_age: null,
+        policy_term_years_min: 1,
+        policy_term_years_max: 1,
+        premium_payment_frequency: ['Yearly'],
+        premium_payment_term_min: 1,
+        premium_payment_term_max: 1,
+        premium_payment_term_type: 'Years',
+        coverage_details: {
+          base_coverage: 'Third Party Liability, Own Damage',
+          additional_coverage: 'Personal Accident, Zero Depreciation',
+          exclusions: ['Wear and tear', 'Mechanical breakdown'],
+          waiting_period_days: 0,
+          renewability: 'Renewable',
+          claim_settlement_ratio: 95.2
+        },
+        riders: [
+          {
+            rider_id: 'digit_motor_zero_dep',
+            rider_name: 'Zero Depreciation',
+            description: 'Zero depreciation cover',
+            rider_type: 'Zero Depreciation',
+            min_sum_assured: null,
+            max_sum_assured: null,
+            rider_premium_percentage: 15,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for vehicles up to 5 years',
+            is_active: true
+          },
+          {
+            rider_id: 'digit_motor_engine_protect',
+            rider_name: 'Engine Protect',
+            description: 'Coverage for engine and gearbox damage',
+            rider_type: 'Engine Protect',
+            min_sum_assured: null,
+            max_sum_assured: null,
+            rider_premium_percentage: 10,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for all vehicles',
+            is_active: true
+          }
+        ],
+        beneficiary_required: false,
+        nomination_allowed: false,
+        tax_benefits: [],
+        cc: 5.8,
+        si: 4.8,
+        is_active: true,
+        launch_date: '2017-11-01',
+        withdrawal_date: null
+      },
+      {
+        product_id: 'digit_health',
+        product_name: 'Health Insurance',
+        category: 'Health',
+        sub_category: 'Health Plans',
+        description: 'Comprehensive health insurance with cashless facility',
+        policy_types: ['Health'],
+        min_sum_assured: 300000,
+        max_sum_assured: 10000000,
+        min_premium: 8000,
+        max_premium: null,
+        min_entry_age: 18,
+        max_entry_age: 65,
+        policy_term_years_min: 1,
+        policy_term_years_max: 1,
+        premium_payment_frequency: ['Yearly'],
+        premium_payment_term_min: 1,
+        premium_payment_term_max: 1,
+        premium_payment_term_type: 'Years',
+        coverage_details: {
+          base_coverage: 'Hospitalization Expenses',
+          additional_coverage: 'Day Care, Pre and Post Hospitalization',
+          exclusions: ['Pre-existing conditions (waiting period)'],
+          waiting_period_days: 48,
+          renewability: 'Renewable',
+          claim_settlement_ratio: 93.8
+        },
+        riders: [],
+        beneficiary_required: false,
+        nomination_allowed: false,
+        tax_benefits: ['Section 80D'],
+        cc: 6.2,
+        si: 5.2,
+        is_active: true,
+        launch_date: '2019-05-01',
+        withdrawal_date: null
+      }
+    ]
+  },
+  {
+    _key: 'acko_general',
+    legal_name: 'Acko General Insurance Limited',
+    short_name: 'Acko General',
+    type: 'General',
+    license_number: 'AG001',
+    is_active: true,
+    products: [
+      {
+        product_id: 'acko_motor',
+        product_name: 'Motor Insurance',
+        category: 'General',
+        sub_category: 'Vehicle Plans',
+        description: 'Digital-first motor insurance with instant claims',
+        policy_types: ['Vehicle'],
+        min_sum_assured: null,
+        max_sum_assured: null,
+        min_premium: 2000,
+        max_premium: null,
+        min_entry_age: 18,
+        max_entry_age: null,
+        policy_term_years_min: 1,
+        policy_term_years_max: 1,
+        premium_payment_frequency: ['Yearly'],
+        premium_payment_term_min: 1,
+        premium_payment_term_max: 1,
+        premium_payment_term_type: 'Years',
+        coverage_details: {
+          base_coverage: 'Third Party Liability, Own Damage',
+          additional_coverage: 'Personal Accident, Zero Depreciation',
+          exclusions: ['Wear and tear', 'Mechanical breakdown'],
+          waiting_period_days: 0,
+          renewability: 'Renewable',
+          claim_settlement_ratio: 94.5
+        },
+        riders: [
+          {
+            rider_id: 'acko_motor_zero_dep',
+            rider_name: 'Zero Depreciation',
+            description: 'Zero depreciation cover',
+            rider_type: 'Zero Depreciation',
+            min_sum_assured: null,
+            max_sum_assured: null,
+            rider_premium_percentage: 14,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for vehicles up to 5 years',
+            is_active: true
+          }
+        ],
+        beneficiary_required: false,
+        nomination_allowed: false,
+        tax_benefits: [],
+        cc: 5.6,
+        si: 4.6,
+        is_active: true,
+        launch_date: '2016-11-01',
+        withdrawal_date: null
+      }
+    ]
+  },
+  {
+    _key: 'indiafirst_life',
+    legal_name: 'IndiaFirst Life Insurance Company Limited',
+    short_name: 'IndiaFirst Life',
+    type: 'Life',
+    license_number: 'IFL001',
+    is_active: true,
+    products: [
+      {
+        product_id: 'indiafirst_term_plan',
+        product_name: 'IndiaFirst Term Plan',
+        category: 'Life',
+        sub_category: 'Protection Plan',
+        description: 'Term insurance with comprehensive coverage',
+        policy_types: ['Term'],
+        min_sum_assured: 2500000,
+        max_sum_assured: null,
+        min_premium: 5500,
+        max_premium: null,
+        min_entry_age: 18,
+        max_entry_age: 65,
+        policy_term_years_min: 10,
+        policy_term_years_max: 40,
+        premium_payment_frequency: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'],
+        premium_payment_term_min: 5,
+        premium_payment_term_max: 35,
+        premium_payment_term_type: 'Years',
+        coverage_details: {
+          base_coverage: 'Death Benefit',
+          additional_coverage: null,
+          exclusions: ['Suicide within first year'],
+          waiting_period_days: 0,
+          renewability: 'Term',
+          claim_settlement_ratio: 97.1
+        },
+        riders: [
+          {
+            rider_id: 'indiafirst_tp_accidental_death',
+            rider_name: 'Accidental Death Benefit',
+            description: 'Additional coverage for accidental death',
+            rider_type: 'Accidental Death',
+            min_sum_assured: 500000,
+            max_sum_assured: 9000000,
+            rider_premium_percentage: 0.48,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for all ages',
+            is_active: true
+          },
+          {
+            rider_id: 'indiafirst_tp_waiver_premium',
+            rider_name: 'Waiver of Premium',
+            description: 'Waives future premiums in case of disability',
+            rider_type: 'Waiver of Premium',
+            min_sum_assured: null,
+            max_sum_assured: null,
+            rider_premium_percentage: 0.32,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for all ages',
+            is_active: true
+          }
+        ],
+        beneficiary_required: true,
+        nomination_allowed: true,
+        tax_benefits: ['Section 80C'],
+        cc: 2.3,
+        si: 1.4,
+        is_active: true,
+        launch_date: '2020-08-01',
+        withdrawal_date: null
+      }
+    ]
+  },
+  {
+    _key: 'idbi_federal_life',
+    legal_name: 'IDBI Federal Life Insurance Company Limited',
+    short_name: 'IDBI Federal Life',
+    type: 'Life',
+    license_number: 'IDF001',
+    is_active: true,
+    products: [
+      {
+        product_id: 'idbi_federal_term_plan',
+        product_name: 'IDBI Federal Term Plan',
+        category: 'Life',
+        sub_category: 'Protection Plan',
+        description: 'Term insurance with flexible options',
+        policy_types: ['Term'],
+        min_sum_assured: 2000000,
+        max_sum_assured: null,
+        min_premium: 5700,
+        max_premium: null,
+        min_entry_age: 18,
+        max_entry_age: 65,
+        policy_term_years_min: 10,
+        policy_term_years_max: 40,
+        premium_payment_frequency: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'],
+        premium_payment_term_min: 5,
+        premium_payment_term_max: 35,
+        premium_payment_term_type: 'Years',
+        coverage_details: {
+          base_coverage: 'Death Benefit',
+          additional_coverage: null,
+          exclusions: ['Suicide within first year'],
+          waiting_period_days: 0,
+          renewability: 'Term',
+          claim_settlement_ratio: 96.9
+        },
+        riders: [
+          {
+            rider_id: 'idbi_federal_tp_accidental_death',
+            rider_name: 'Accidental Death Benefit',
+            description: 'Additional coverage for accidental death',
+            rider_type: 'Accidental Death',
+            min_sum_assured: 500000,
+            max_sum_assured: 8500000,
+            rider_premium_percentage: 0.46,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for all ages',
+            is_active: true
+          }
+        ],
+        beneficiary_required: true,
+        nomination_allowed: true,
+        tax_benefits: ['Section 80C'],
+        cc: 2.4,
+        si: 1.5,
+        is_active: true,
+        launch_date: '2021-02-01',
+        withdrawal_date: null
+      }
+    ]
+  },
+  {
+    _key: 'shriram_life',
+    legal_name: 'Shriram Life Insurance Company Limited',
+    short_name: 'Shriram Life',
+    type: 'Life',
+    license_number: 'SL001',
+    is_active: true,
+    products: [
+      {
+        product_id: 'shriram_term_plan',
+        product_name: 'Shriram Term Plan',
+        category: 'Life',
+        sub_category: 'Protection Plan',
+        description: 'Affordable term insurance plan',
+        policy_types: ['Term'],
+        min_sum_assured: 2000000,
+        max_sum_assured: null,
+        min_premium: 5200,
+        max_premium: null,
+        min_entry_age: 18,
+        max_entry_age: 65,
+        policy_term_years_min: 10,
+        policy_term_years_max: 40,
+        premium_payment_frequency: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'],
+        premium_payment_term_min: 5,
+        premium_payment_term_max: 35,
+        premium_payment_term_type: 'Years',
+        coverage_details: {
+          base_coverage: 'Death Benefit',
+          additional_coverage: null,
+          exclusions: ['Suicide within first year'],
+          waiting_period_days: 0,
+          renewability: 'Term',
+          claim_settlement_ratio: 96.5
+        },
+        riders: [
+          {
+            rider_id: 'shriram_tp_accidental_death',
+            rider_name: 'Accidental Death Benefit',
+            description: 'Additional coverage for accidental death',
+            rider_type: 'Accidental Death',
+            min_sum_assured: 500000,
+            max_sum_assured: 8000000,
+            rider_premium_percentage: 0.49,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for all ages',
+            is_active: true
+          }
+        ],
+        beneficiary_required: true,
+        nomination_allowed: true,
+        tax_benefits: ['Section 80C'],
+        cc: 2.2,
+        si: 1.3,
+        is_active: true,
+        launch_date: '2020-12-01',
+        withdrawal_date: null
+      }
+    ]
+  },
+  {
+    _key: 'edelweiss_tokio_life',
+    legal_name: 'Edelweiss Tokio Life Insurance Company Limited',
+    short_name: 'Edelweiss Tokio Life',
+    type: 'Life',
+    license_number: 'ETL001',
+    is_active: true,
+    products: [
+      {
+        product_id: 'edelweiss_tokio_term_plan',
+        product_name: 'Edelweiss Tokio Term Plan',
+        category: 'Life',
+        sub_category: 'Protection Plan',
+        description: 'Term insurance with comprehensive coverage',
+        policy_types: ['Term'],
+        min_sum_assured: 2500000,
+        max_sum_assured: null,
+        min_premium: 5900,
+        max_premium: null,
+        min_entry_age: 18,
+        max_entry_age: 65,
+        policy_term_years_min: 10,
+        policy_term_years_max: 40,
+        premium_payment_frequency: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'],
+        premium_payment_term_min: 5,
+        premium_payment_term_max: 35,
+        premium_payment_term_type: 'Years',
+        coverage_details: {
+          base_coverage: 'Death Benefit',
+          additional_coverage: null,
+          exclusions: ['Suicide within first year'],
+          waiting_period_days: 0,
+          renewability: 'Term',
+          claim_settlement_ratio: 96.8
+        },
+        riders: [
+          {
+            rider_id: 'edelweiss_tokio_tp_accidental_death',
+            rider_name: 'Accidental Death Benefit',
+            description: 'Additional coverage for accidental death',
+            rider_type: 'Accidental Death',
+            min_sum_assured: 500000,
+            max_sum_assured: 9500000,
+            rider_premium_percentage: 0.47,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for all ages',
+            is_active: true
+          },
+          {
+            rider_id: 'edelweiss_tokio_tp_critical_illness',
+            rider_name: 'Critical Illness Rider',
+            description: 'Coverage for specified critical illnesses',
+            rider_type: 'Critical Illness',
+            min_sum_assured: 500000,
+            max_sum_assured: 5000000,
+            rider_premium_percentage: 1.1,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available up to age 55',
+            is_active: true
+          }
+        ],
+        beneficiary_required: true,
+        nomination_allowed: true,
+        tax_benefits: ['Section 80C'],
+        cc: 2.5,
+        si: 1.5,
+        is_active: true,
+        launch_date: '2021-03-01',
+        withdrawal_date: null
+      }
+    ]
+  },
+  {
+    _key: 'cholamandalam_ms_general',
+    legal_name: 'Cholamandalam MS General Insurance Company Limited',
+    short_name: 'Cholamandalam MS',
+    type: 'General',
+    license_number: 'CMS001',
+    is_active: true,
+    products: [
+      {
+        product_id: 'cholamandalam_motor',
+        product_name: 'Motor Insurance',
+        category: 'General',
+        sub_category: 'Vehicle Plans',
+        description: 'Comprehensive motor insurance',
+        policy_types: ['Vehicle'],
+        min_sum_assured: null,
+        max_sum_assured: null,
+        min_premium: 2250,
+        max_premium: null,
+        min_entry_age: 18,
+        max_entry_age: null,
+        policy_term_years_min: 1,
+        policy_term_years_max: 1,
+        premium_payment_frequency: ['Yearly'],
+        premium_payment_term_min: 1,
+        premium_payment_term_max: 1,
+        premium_payment_term_type: 'Years',
+        coverage_details: {
+          base_coverage: 'Third Party Liability, Own Damage',
+          additional_coverage: 'Personal Accident',
+          exclusions: ['Wear and tear', 'Mechanical breakdown'],
+          waiting_period_days: 0,
+          renewability: 'Renewable',
+          claim_settlement_ratio: 91.2
+        },
+        riders: [
+          {
+            rider_id: 'cholamandalam_motor_zero_dep',
+            rider_name: 'Zero Depreciation',
+            description: 'Zero depreciation cover',
+            rider_type: 'Zero Depreciation',
+            min_sum_assured: null,
+            max_sum_assured: null,
+            rider_premium_percentage: 17,
+            rider_premium_fixed: null,
+            eligibility_criteria: 'Available for vehicles up to 5 years',
+            is_active: true
+          }
+        ],
+        beneficiary_required: false,
+        nomination_allowed: false,
+        tax_benefits: [],
+        cc: 5.1,
+        si: 4.1,
+        is_active: true,
+        launch_date: '2018-07-01',
+        withdrawal_date: null
+      }
+    ]
   }
 ]
 
@@ -3080,8 +3573,17 @@ async function populateInsuranceSchemes() {
       console.log('✅ Collection exists')
     } catch (err) {
       console.log('📦 Creating insurance_issuers collection...')
-      await collection.create()
-      console.log('✅ Collection created')
+      try {
+        await collection.create()
+        console.log('✅ Collection created')
+      } catch (createErr) {
+        // Collection might already exist, ignore duplicate error
+        if (createErr.errorNum === 1207 || createErr.code === 409) {
+          console.log('✅ Collection already exists')
+        } else {
+          throw createErr
+        }
+      }
     }
     
     // Truncate existing data
