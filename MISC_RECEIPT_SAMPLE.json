@@ -1,0 +1,118 @@
+{
+  "sample_misc_receipt_json": {
+    "description": "Sample JSON payload for creating a MISC receipt with service name 'pan creation' and price 100",
+    "payload": {
+      "empCode": "ECS497",
+      "employeeName": "John Doe",
+      "branch": "HO",
+      "investorId": "INV12345",
+      "investorName": "Jane Smith",
+      "investorAddress": "123 Main Street\nCity, State",
+      "pinCode": "560001",
+      "pan": "ABCDE1234F",
+      "email": "jane@example.com",
+      "mobile": "9876543210",
+      "product_category": "MISC",
+      "service_name": "pan creation",
+      "service_price": 100,
+      "investment_amount": 100,
+      "date": "2026-02-04",
+      "receiptNo": "ECS-HO-ECS497-20260204-1234",
+      "transactionType": "Online",
+      "transactionNumber": "TXN123456789",
+      "transaction_details": {
+        "entry_mode": "Online",
+        "channel": "UPI",
+        "reference_no": "TXN123456789",
+        "txn_date": "2026-02-04"
+      }
+    },
+    "expected_backend_response": {
+      "id": "receipt_key_123",
+      "files": []
+    },
+    "expected_receipt_structure_in_database": {
+      "receipt_no": "ECS-HO-ECS497-20260204-1234",
+      "date": "2026-02-04",
+      "status": "Pending",
+      "branch": "HO",
+      "employee": {
+        "code": "ECS497",
+        "name": "John Doe",
+        "branch": "HO"
+      },
+      "investor": {
+        "id": "INV12345",
+        "name": "Jane Smith",
+        "address": {
+          "line1": "123 Main Street",
+          "line2": "City, State",
+          "line3": null,
+          "city": null,
+          "state": null,
+          "pin_code": "560001",
+          "country": "India"
+        },
+        "pan": "ABCDE1234F",
+        "email": "jane@example.com",
+        "mobile": "9876543210"
+      },
+      "product": {
+        "category": "MISC",
+        "name": "pan creation",
+        "option": null,
+        "folio_number": null,
+        "has_existing_folio": null
+      },
+      "transaction": {
+        "type": "Fresh",
+        "mode": null,
+        "amount": 100,
+        "units_or_amount": null,
+        "date": "2026-02-04",
+        "from_text": null,
+        "to_text": null,
+        "period_installments": null,
+        "installments_count": null
+      },
+      "product_details": {
+        "misc": {
+          "service_name": "pan creation",
+          "service_price": 100
+        }
+      },
+      "payment": {
+        "instrument": {
+          "type": null,
+          "number": null,
+          "date": null,
+          "bank": {
+            "name": null,
+            "branch": null
+          }
+        },
+        "entry_mode": "Online",
+        "channel": "UPI",
+        "reference_no": "TXN123456789",
+        "transaction_date": "2026-02-04",
+        "account_last4": null,
+        "notes": null
+      },
+      "calculations": {
+        "collection_credit": 0,
+        "service_income": 0,
+        "cc": 0,
+        "si": 0
+      }
+    },
+    "notes": [
+      "CC and SI are calculated automatically based on price ranges configured in misc_services_schemes collection",
+      "If price 100 falls within a configured range (e.g., 0-10000 with CC 2.5% and SI 1.0%), then:",
+      "  - cc = (2.5 / 100) * 100 = 2.5",
+      "  - si = (1.0 / 100) * 100 = 1.0",
+      "If no matching range is found, both CC and SI will be 0",
+      "The service_name and service_price are stored in product_details.misc",
+      "The product.name field also contains the service_name for display purposes"
+    ]
+  }
+}

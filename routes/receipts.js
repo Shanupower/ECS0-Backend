@@ -1,7 +1,7 @@
 import express from 'express'
 import fs from 'fs'
 import path from 'path'
-import { q, getCollection } from '../config/database.js'
+import { q, getCollection, getUserBranch, normalizeBranchName } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
 import { validateRequired, validatePositiveNumber, validateDate } from '../utils/validators.js'
@@ -11,7 +11,11 @@ const router = express.Router()
 // Create new receipt
 router.post('/', requireAuth, uploadMultiple, async (req, res) => {
   try {
-    const d = req.body || {}
+    // When FormData is used (file upload), payload is sent as JSON string; otherwise req.body is the receipt
+    const rawBody = req.body || {}
+    const d = (typeof rawBody.payload === 'string')
+      ? (() => { try { return JSON.parse(rawBody.payload) } catch { return {} } })()
+      : rawBody
     const today = new Date().toISOString().slice(0,10)
 
     // Validate required fields
@@ -95,17 +99,29 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       if (!d.investmentAmount && !d.investment_amount && !d.amount) {
         return res.status(400).json({ error: 'validation_error', detail: 'Investment amount is required for Bonds' })
       }
+    } else if (productCategory === 'MISC') {
+      // Misc Services validations
+      if (!d.service_name && !d.serviceName) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Service name is required for Misc Services' })
+      }
+      const servicePrice = parseFloat(d.service_price || d.servicePrice || d.investmentAmount || d.investment_amount || d.amount || 0)
+      if (!servicePrice || servicePrice <= 0) {
+        return res.status(400).json({ error: 'validation_error', detail: 'Service price is required and must be greater than 0 for Misc Services' })
+      }
     }
 
     // Replace placeholders if needed
-    const receiptNo = (d.receiptNo || '').replace('{{today}}', today)
+    const receiptNo = (d.receiptNo || d.receipt_no || '').replace('{{today}}', today)
     const date = d.date === '{{today}}' ? today : d.date || null
 
     // Calculate CC and SI from scheme percentages at transaction time
     // This ensures we store the CC/SI amount at the moment of transaction creation
     let collectionCredit = 0
     let serviceIncome = 0
-    const investmentAmount = parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || 0)
+    // For MISC, use service_price; for others, use investment_amount or fd_deposit_amount
+    const investmentAmount = productCategory === 'MISC' 
+      ? parseFloat(d.service_price || d.servicePrice || d.investmentAmount || d.investment_amount || d.amount || 0)
+      : parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || 0)
     
     // Check if CC/SI are already provided (from frontend calculation)
     if (d.collection_credit !== undefined || d.cc !== undefined) {
@@ -172,6 +188,33 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
               serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
             }
           }
+        } else if (productCategory === 'MISC') {
+          // Fetch misc services scheme to get CC and SI percentages based on price range
+          const miscSchemes = await q(`
+            FOR scheme IN misc_services_schemes
+            FILTER scheme.is_active == true
+            LIMIT 1
+            RETURN scheme
+          `)
+          
+          if (miscSchemes.length > 0 && miscSchemes[0].price_ranges && miscSchemes[0].price_ranges.length > 0) {
+            const scheme = miscSchemes[0]
+            const servicePrice = parseFloat(d.service_price || d.servicePrice || investmentAmount)
+            
+            // Find matching price range
+            const matchingRange = scheme.price_ranges.find(range => {
+              const minPrice = parseFloat(range.min_price)
+              const maxPrice = parseFloat(range.max_price)
+              return servicePrice >= minPrice && servicePrice <= maxPrice
+            })
+            
+            if (matchingRange) {
+              const ccPercent = parseFloat(matchingRange.cc || 0)
+              const siPercent = parseFloat(matchingRange.si || 0)
+              collectionCredit = Math.round(((ccPercent / 100) * servicePrice) * 100) / 100 // Round to 2 decimal places
+              serviceIncome = Math.round(((siPercent / 100) * servicePrice) * 100) / 100 // Round to 2 decimal places
+            }
+          }
         }
       } catch (error) {
         console.error('Error calculating CC/SI from scheme:', error)
@@ -213,16 +256,18 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     // Product Information
     const product = {
       category: productCategory || null,
-      name: d.schemeName || d.scheme_name || d.fd_scheme_name || null,
+      name: productCategory === 'MISC' 
+        ? (d.service_name || d.serviceName || null)
+        : (d.schemeName || d.scheme_name || d.fd_scheme_name || null),
       option: d.schemeOption || d.scheme_option || null,
       folio_number: d.folio_number || d.folioNumber || null,
       has_existing_folio: d.has_existing_folio !== undefined ? d.has_existing_folio : (d.hasExistingFolio !== undefined ? d.hasExistingFolio : null)
     }
     
-    // Transaction Details
+    // Transaction Details (mode is MF-only; FD/INS/BOND do not use mode)
     const transaction = {
       type: d.txnType || d.txn_type || d.fd_transaction_type || d.transaction_type || 'Fresh',
-      mode: d.mode || null,
+      mode: productCategory === 'MF' ? (d.mode || null) : null,
       amount: investmentAmount || null,
       units_or_amount: d.unitsOrAmount || d.units_or_amount || null,
       date: date || null,
@@ -383,6 +428,15 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       }
     }
     
+    // Misc Services Details
+    if (productCategory === 'MISC') {
+      const servicePrice = parseFloat(d.service_price || d.servicePrice || investmentAmount)
+      productDetails.misc = {
+        service_name: d.service_name || d.serviceName || null,
+        service_price: servicePrice || null
+      }
+    }
+    
     // Bond/NCD Details
     if (productCategory === 'BOND' || productCategory === 'NCD') {
       productDetails.bond = {
@@ -418,22 +472,65 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     }
     
     // Payment Information
+    // Extract entry_mode: prioritize transaction_details, then entry_mode, then transactionType
+    let entryMode = d.transaction_details?.entry_mode || d.entry_mode || d.transactionType || null
+    
+    // Extract channel: prioritize transaction_details.channel, then transaction_channel, then based on transaction type
+    let channel = d.transaction_details?.channel || d.transaction_channel || null
+    
+    // If channel is not set and we have transaction type, set it appropriately
+    if (!channel && d.transactionType) {
+      if (d.transactionType === 'Online') {
+        channel = d.transactionNumber || d.transaction_details?.reference_no || null
+      } else if (d.transactionType === 'Offline') {
+        channel = 'Cheque'
+      } else if (d.transactionType === 'Others') {
+        channel = d.othersTransactionType || d.transaction_details?.notes || null
+      }
+    }
+    
+    // Extract reference_no: prioritize transaction_details, then specific fields, then transactionNumber
+    let referenceNo = d.transaction_details?.reference_no || null
+    if (!referenceNo) {
+      if (d.transactionType === 'Online') {
+        referenceNo = d.transactionNumber || null
+      } else if (d.transactionType === 'Offline') {
+        referenceNo = d.transaction_details?.reference_no || d.chequeNumber || null
+      }
+    }
+    if (!referenceNo) {
+      referenceNo = d.transaction_reference_no || d.transactionNumber || null
+    }
+    
+    // Extract bank details from transaction_details or offline details
+    let bankName = d.transaction_details?.bank_name || d.bankName || d.bank_name || null
+    let bankBranch = d.transaction_details?.bank_branch || d.bankBranch || d.bank_branch || null
+    
+    // Extract transaction date
+    const transactionDate = d.transaction_details?.txn_date || d.txn_date || d.chequeDate || d.instrumentDate || d.instrument_date || null
+    
+    // Extract notes: prioritize transaction_details, then othersTransactionType for Others type
+    let notes = d.transaction_details?.notes || d.transaction_notes || null
+    if (!notes && d.transactionType === 'Others') {
+      notes = d.othersTransactionType || null
+    }
+    
     const payment = {
       instrument: {
         type: d.instrumentType || d.instrument_type || null,
         number: d.instrumentNo || d.instrument_no || null,
         date: d.instrumentDate || d.instrument_date || null,
         bank: {
-          name: d.bankName || d.bank_name || null,
-          branch: d.bankBranch || d.bank_branch || null
+          name: bankName,
+          branch: bankBranch
         }
       },
-      entry_mode: d.transaction_details?.entry_mode || d.entry_mode || d.transactionType || null,
-      channel: d.transaction_details?.channel || d.transaction_channel || d.othersTransactionType || null,
-      reference_no: d.transaction_details?.reference_no || d.transaction_reference_no || d.transactionNumber || null,
-      transaction_date: d.transaction_details?.txn_date || d.txn_date || null,
+      entry_mode: entryMode,
+      channel: channel,
+      reference_no: referenceNo,
+      transaction_date: transactionDate,
       account_last4: d.transaction_details?.account_last4 || d.account_last4 || null,
-      notes: d.transaction_details?.notes || d.transaction_notes || (d.transactionType === 'Others' ? d.othersTransactionType : null) || null
+      notes: notes
     }
     
     // Calculations
@@ -501,7 +598,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       deleted_at: null,
       
       // ============================================
-      // STRUCTURED SECTIONS (NEW)
+      // STRUCTURED SECTIONS (Clean structure only)
       // ============================================
       employee: employee,
       investor: investor,
@@ -509,139 +606,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       transaction: transaction,
       product_details: Object.keys(productDetails).length > 0 ? productDetails : null,
       payment: payment,
-      calculations: calculations,
-      
-      // ============================================
-      // LEGACY TOP-LEVEL FIELDS (for backward compatibility)
-      // ============================================
-      employee_name: employee.name,
-      emp_code: employee.code,
-      investor_id: investor.id,
-      investor_name: investor.name,
-      investor_address: investorAddress,
-      pin_code: investor.address.pin_code,
-      pan: investor.pan,
-      email: investor.email,
-      scheme_name: product.name,
-      scheme_option: product.option,
-      product_category: product.category,
-      investment_amount: transaction.amount,
-      folio_policy_no: product.folio_number || (productDetails.fd?.application?.number || null),
-      mode: transaction.mode,
-      period_installments: transaction.period_installments,
-      installments_count: transaction.installments_count,
-      txn_type: transaction.type,
-      from_text: transaction.from_text,
-      to_text: transaction.to_text,
-      units_or_amount: transaction.units_or_amount,
-      // Legacy MF fields
-      amc_code: productDetails.mf?.amc?.code || null,
-      amc_name: productDetails.mf?.amc?.name || null,
-      scheme_code: productDetails.mf?.scheme?.code || null,
-      scheme_category: productDetails.mf?.scheme?.category || null,
-      scheme_sub_category: productDetails.mf?.scheme?.sub_category || null,
-      scheme_plan: productDetails.mf?.scheme?.plan || null,
-      scheme_type: productDetails.mf?.scheme?.type || null,
-      scheme_is_nfo: productDetails.mf?.scheme?.is_nfo || null,
-      transaction_type: transaction.type,
-      has_existing_folio: product.has_existing_folio,
-      folio_number: product.folio_number,
-      // Legacy SIP/SWP/STP/Switch Over fields
-      sip_frequency: transaction.sip?.frequency || null,
-      sip_start_date: transaction.sip?.start_date || null,
-      sip_end_date: transaction.sip?.end_date || null,
-      sip_is_perpetual: transaction.sip?.is_perpetual || null,
-      swp_frequency: transaction.swp?.frequency || null,
-      swp_start_date: transaction.swp?.start_date || null,
-      swp_amount: transaction.swp?.amount || null,
-      stp_target_scheme_code: transaction.stp?.to_scheme_code || null,
-      stp_target_scheme_name: transaction.stp?.to_scheme_name || null,
-      stp_frequency: transaction.stp?.frequency || null,
-      stp_start_date: transaction.stp?.start_date || null,
-      stp_amount: transaction.stp?.amount || null,
-      stp_original_amount: transaction.stp?.original_amount || null,
-      switch_from_scheme_code: transaction.switch_over?.from_scheme_code || null,
-      switch_from_scheme_name: transaction.switch_over?.from_scheme_name || null,
-      switch_to_scheme_code: transaction.switch_over?.to_scheme_code || null,
-      switch_to_scheme_name: transaction.switch_over?.to_scheme_name || null,
-      switch_type: transaction.switch_over?.type || null,
-      switch_value: transaction.switch_over?.value || null,
-      // Legacy FD fields
-      fd_issuer_key: productDetails.fd?.issuer?.key || null,
-      fd_issuer_name: productDetails.fd?.issuer?.name || null,
-      fd_issuer_type: productDetails.fd?.issuer?.type || null,
-      fd_scheme_id: productDetails.fd?.scheme?.id || null,
-      fd_scheme_name: productDetails.fd?.scheme?.name || null,
-      fd_is_cumulative: productDetails.fd?.scheme?.is_cumulative || null,
-      fd_deposit_amount: productDetails.fd?.deposit?.amount || null,
-      fd_tenure_months: productDetails.fd?.deposit?.tenure_months || null,
-      fd_payout_frequency: productDetails.fd?.deposit?.payout_frequency || null,
-      fd_base_rate_pa: productDetails.fd?.rates?.base_rate_pa || null,
-      fd_senior_citizen_bonus: productDetails.fd?.rates?.senior_citizen_bonus || null,
-      fd_women_bonus: productDetails.fd?.rates?.women_bonus || null,
-      fd_renewal_bonus: productDetails.fd?.rates?.renewal_bonus || null,
-      fd_total_rate_pa: productDetails.fd?.rates?.total_rate_pa || null,
-      fd_maturity_amount: productDetails.fd?.maturity?.amount || null,
-      fd_maturity_date: productDetails.fd?.maturity?.date || null,
-      fd_application_number: productDetails.fd?.application?.number || null,
-      fd_deposit_date: productDetails.fd?.deposit?.deposit_date || null,
-      fd_tds_applicable: productDetails.fd?.tax?.tds_applicable || null,
-      fd_form_15g_15h: productDetails.fd?.tax?.form_15g_15h || null,
-      fd_transaction_type: productDetails.fd?.application?.transaction_type || null,
-      fd_renewal_investment_type: productDetails.fd?.application?.renewal?.investment_type || null,
-      fd_renewal_additional_amount: productDetails.fd?.application?.renewal?.additional_amount || null,
-      // BOND/NCD legacy top-level fields
-      bond_issuer_key: productDetails.bond?.issuer?.key || null,
-      bond_issuer_name: productDetails.bond?.issuer?.name || null,
-      bond_issuer_type: productDetails.bond?.issuer?.type || null,
-      bond_scheme_id: productDetails.bond?.scheme?.id || null,
-      bond_scheme_name: productDetails.bond?.scheme?.name || null,
-      bond_isin: productDetails.bond?.scheme?.isin || null,
-      bond_coupon_rate: productDetails.bond?.instrument?.coupon_rate || null,
-      bond_face_value: productDetails.bond?.instrument?.face_value || null,
-      bond_issue_date: productDetails.bond?.instrument?.issue_date || null,
-      bond_maturity_date: productDetails.bond?.instrument?.maturity_date || null,
-      bond_transaction_type: productDetails.bond?.transaction?.type || null,
-      bond_number_of_units: productDetails.bond?.transaction?.number_of_units || null,
-      bond_investment_amount: productDetails.bond?.transaction?.amount || null,
-      bond_transaction_date: productDetails.bond?.transaction?.date || null,
-      bond_application_number: productDetails.bond?.application?.number || null,
-      bond_form_15g_15h: productDetails.bond?.tax?.form_15g_15h || null,
-      // Legacy general fields
-      fd_type: productDetails.insurance?.policy?.type || null,
-      client_type: d.clientType || d.client_type || null,
-      deposit_period_ym: productDetails.fd?.deposit?.tenure_months ? `${Math.floor(productDetails.fd.deposit.tenure_months / 12)}Y ${productDetails.fd.deposit.tenure_months % 12}M` : null,
-      roi_percent: productDetails.fd?.rates?.total_rate_pa || productDetails.bond?.instrument?.coupon_rate || null,
-      interest_payable: d.interestPayable || d.interest_payable || null,
-      interest_frequency: productDetails.insurance?.policy?.premium_frequency || productDetails.fd?.deposit?.payout_frequency || null,
-      instrument_type: payment.instrument.type,
-      instrument_no: payment.instrument.number,
-      instrument_date: payment.instrument.date,
-      bank_name: payment.instrument.bank.name,
-      bank_branch: payment.instrument.bank.branch,
-      fdr_demat_policy: d.fdr_demat_policy || null,
-      renewal_due_date: productDetails.bond?.instrument?.maturity_date || null,
-      maturity_amount: productDetails.fd?.maturity?.amount || null,
-      renewal_amount: d.renewalAmount || d.renewal_amount || null,
-      issuer_company: productDetails.fd?.issuer?.name || productDetails.insurance?.issuer?.name || productDetails.bond?.issuer?.name || null,
-      issuer_category: productDetails.fd?.issuer?.type || productDetails.insurance?.issuer?.type || productDetails.bond?.issuer?.type || null,
-      // Legacy nested structures (for backward compatibility)
-      mf_details: mfDetails,
-      fd_details: fdDetails,
-      transaction_details: {
-        entry_mode: payment.entry_mode,
-        channel: payment.channel,
-        reference_no: payment.reference_no,
-        txn_date: payment.transaction_date,
-        bank_name: payment.instrument.bank.name,
-        account_last4: payment.account_last4,
-        notes: payment.notes
-      },
-      // Legacy CC/SI aliases
-      collection_credit: collectionCredit,
-      cc: collectionCredit,
-      service_income: serviceIncome,
-      si: serviceIncome
+      calculations: calculations
     }
 
     const result = await getCollection('receipts').save(receiptDoc)
@@ -769,6 +734,290 @@ function stripSIForNonAdmin(user, receipt) {
   const { service_income, si, ...rest } = receipt
   return rest
 }
+
+// Get recent receipts for quick picks
+router.get('/recent', requireAuth, async (req, res) => {
+  try {
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '10', 10)))
+    let filterConditions = ['receipt.is_deleted == false']
+    const bindVars = { limit }
+
+    if (req.user.role === 'employee') {
+      filterConditions.push('receipt.user_id == @user_id')
+      bindVars.user_id = String(req.user.sub)
+    } else if (req.user.role === 'manager') {
+      const userBranch = await getUserBranch(req.user.sub)
+      const normalizedBranch = normalizeBranchName(userBranch)
+      if (normalizedBranch) {
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedBranch
+      }
+    }
+
+    const filterClause = filterConditions.length ? `FILTER ${filterConditions.join(' AND ')}` : ''
+
+    const rows = await q(`
+      FOR receipt IN receipts
+      ${filterClause}
+      SORT receipt.created_at DESC
+      LIMIT @limit
+      RETURN receipt
+    `, bindVars)
+
+    res.json({ items: rows })
+  } catch (error) {
+    console.error('Error fetching recent receipts:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to fetch recent receipts' })
+  }
+})
+
+// Duplicate check for receipt creation
+router.get('/check-duplicate', requireAuth, async (req, res) => {
+  try {
+    const {
+      investor_id,
+      product_category,
+      investment_amount,
+      date,
+      scheme_code,
+      scheme_name,
+      issuer_company,
+      fd_issuer_key,
+      fd_scheme_id,
+      bond_issuer_key,
+      bond_scheme_id,
+      insurance_issuer_key,
+      insurance_product_id
+    } = req.query
+
+    if (!investor_id || !product_category || !investment_amount) {
+      return res.status(400).json({ error: 'validation_error', detail: 'investor_id, product_category, and investment_amount are required' })
+    }
+
+    const checkDate = date || new Date().toISOString().slice(0, 10)
+    const bindVars = {
+      investor_id: String(investor_id),
+      product_category,
+      investment_amount: Number(investment_amount),
+      date: checkDate
+    }
+
+    const filterConditions = [
+      'receipt.is_deleted == false',
+      'receipt.investor_id == @investor_id',
+      'receipt.product_category == @product_category',
+      'receipt.date == @date',
+      'ABS(TO_NUMBER(receipt.investment_amount) - @investment_amount) <= 1'
+    ]
+
+    if (scheme_code) {
+      filterConditions.push('receipt.scheme_code == @scheme_code')
+      bindVars.scheme_code = scheme_code
+    }
+    if (scheme_name) {
+      filterConditions.push('receipt.scheme_name == @scheme_name')
+      bindVars.scheme_name = scheme_name
+    }
+    if (issuer_company) {
+      filterConditions.push('receipt.issuer_company == @issuer_company')
+      bindVars.issuer_company = issuer_company
+    }
+    if (fd_issuer_key) {
+      filterConditions.push('receipt.fd_issuer_key == @fd_issuer_key')
+      bindVars.fd_issuer_key = fd_issuer_key
+    }
+    if (fd_scheme_id) {
+      filterConditions.push('receipt.fd_scheme_id == @fd_scheme_id')
+      bindVars.fd_scheme_id = fd_scheme_id
+    }
+    if (bond_issuer_key) {
+      filterConditions.push('receipt.bond_issuer_key == @bond_issuer_key')
+      bindVars.bond_issuer_key = bond_issuer_key
+    }
+    if (bond_scheme_id) {
+      filterConditions.push('receipt.bond_scheme_id == @bond_scheme_id')
+      bindVars.bond_scheme_id = bond_scheme_id
+    }
+    if (insurance_issuer_key) {
+      filterConditions.push('receipt.insurance_issuer_key == @insurance_issuer_key')
+      bindVars.insurance_issuer_key = insurance_issuer_key
+    }
+    if (insurance_product_id) {
+      filterConditions.push('receipt.insurance_product_id == @insurance_product_id')
+      bindVars.insurance_product_id = insurance_product_id
+    }
+
+    const filterClause = `FILTER ${filterConditions.join(' AND ')}`
+
+    const rows = await q(`
+      FOR receipt IN receipts
+      ${filterClause}
+      SORT receipt.created_at DESC
+      LIMIT 5
+      RETURN receipt
+    `, bindVars)
+
+    res.json({ duplicate: rows.length > 0, items: rows })
+  } catch (error) {
+    console.error('Error checking duplicate receipt:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to check duplicates' })
+  }
+})
+
+// Get transaction summary statistics
+router.get('/summary', requireAuth, async (req, res) => {
+  try {
+    const {
+      from,
+      to,
+      category,
+      status,
+      mode,
+      emp_code,
+      branch_code,
+      search,
+      includeDeleted = '0'
+    } = req.query
+
+    const bindVars = {}
+    const filterConditions = ['receipt.is_deleted == false']
+
+    // Date filters
+    if (from) {
+      filterConditions.push('receipt.date >= @from')
+      bindVars.from = from
+    }
+    if (to) {
+      filterConditions.push('receipt.date <= @to')
+      bindVars.to = to
+    }
+
+    // Category filter
+    if (category) {
+      filterConditions.push('receipt.product_category == @category')
+      bindVars.category = category
+    }
+
+    // Status filter
+    if (status) {
+      filterConditions.push('receipt.status == @status')
+      bindVars.status = status
+    }
+
+    // Mode filter (for MF)
+    if (mode) {
+      filterConditions.push('receipt.mode == @mode')
+      bindVars.mode = mode
+    }
+
+    // Employee code filter
+    if (emp_code) {
+      filterConditions.push('receipt.emp_code == @emp_code')
+      bindVars.emp_code = emp_code
+    }
+
+    // Branch code filter
+    if (branch_code) {
+      filterConditions.push('receipt.branch == @branch_code')
+      bindVars.branch_code = branch_code
+    }
+
+    // Search filter (investor name, investor ID, or receipt number)
+    if (search) {
+      filterConditions.push('(LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true) || LIKE(receipt.investor_id, CONCAT("%", @search, "%"), true) || LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true))')
+      bindVars.search = search
+    }
+
+    // User access control
+    if (req.user.role === 'employee' && req.user.emp_code) {
+      filterConditions.push('receipt.emp_code == @user_emp_code')
+      bindVars.user_emp_code = req.user.emp_code
+    } else if (req.user.role === 'branch' && req.user.branch_code) {
+      filterConditions.push('receipt.branch == @user_branch_code')
+      bindVars.user_branch_code = req.user.branch_code
+    }
+
+    const filterClause = filterConditions.length > 0 ? `FILTER ${filterConditions.join(' AND ')}` : ''
+
+    // Calculate summary statistics
+    const summary = await q(`
+      FOR receipt IN receipts
+      ${filterClause}
+      LET status_val = receipt.status != null ? receipt.status : "Pending"
+      LET category_val = receipt.product_category
+      LET inv_amount = TO_NUMBER(receipt.investment_amount) != null ? TO_NUMBER(receipt.investment_amount) : (TO_NUMBER(receipt.fd_deposit_amount) != null ? TO_NUMBER(receipt.fd_deposit_amount) : 0)
+      COLLECT status = status_val, category = category_val
+      AGGREGATE 
+        total_count = LENGTH(1),
+        total_investment = SUM(inv_amount),
+        avg_investment = AVG(inv_amount)
+      RETURN {
+        status,
+        category,
+        count: total_count,
+        total_investment,
+        avg_investment
+      }
+    `, bindVars)
+
+    // Calculate overall totals
+    const totals = await q(`
+      FOR receipt IN receipts
+      ${filterClause}
+      LET inv_amount = TO_NUMBER(receipt.investment_amount) != null ? TO_NUMBER(receipt.investment_amount) : (TO_NUMBER(receipt.fd_deposit_amount) != null ? TO_NUMBER(receipt.fd_deposit_amount) : 0)
+      COLLECT WITH COUNT INTO total_count
+      AGGREGATE 
+        total_investment = SUM(inv_amount),
+        avg_investment = AVG(inv_amount)
+      RETURN {
+        total_count,
+        total_investment,
+        avg_investment
+      }
+    `, bindVars)
+
+    // Organize by status
+    const statusCounts = {
+      Pending: 0,
+      Completed: 0,
+      Failed: 0
+    }
+
+    // Organize by category
+    const categoryCounts = {}
+    const categoryTotals = {}
+
+    summary.forEach(item => {
+      // Status counts
+      if (statusCounts.hasOwnProperty(item.status)) {
+        statusCounts[item.status] += item.count
+      }
+
+      // Category counts and totals
+      if (!categoryCounts[item.category]) {
+        categoryCounts[item.category] = 0
+        categoryTotals[item.category] = 0
+      }
+      categoryCounts[item.category] += item.count
+      categoryTotals[item.category] += item.total_investment
+    })
+
+    const result = totals[0] || { total_count: 0, total_investment: 0, avg_investment: 0 }
+
+    res.json({
+      total_receipts: result.total_count,
+      total_investment: result.total_investment || 0,
+      avg_investment: result.avg_investment || 0,
+      status_counts: statusCounts,
+      category_counts: categoryCounts,
+      category_totals: categoryTotals
+    })
+
+  } catch (error) {
+    console.error('Error fetching transaction summary:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to fetch summary statistics' })
+  }
+})
 
 // Get all receipts with filtering
 router.get('/', requireAuth, async (req, res) => {

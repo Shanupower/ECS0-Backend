@@ -8,7 +8,7 @@ const router = express.Router()
 // Create new issue report
 router.post('/', requireAuth, uploadSingle, async (req, res) => {
   try {
-    const { title, description, priority = 'medium' } = req.body || {}
+    const { title, description, priority = 'medium', receipt_draft_id = null } = req.body || {}
     
     if (!title || !description) {
       return res.status(400).json({ error: 'missing_fields', detail: 'Issue title and description are required' })
@@ -45,6 +45,7 @@ router.post('/', requireAuth, uploadSingle, async (req, res) => {
       title,
       description,
       priority: issuePriority,
+      receipt_draft_id,
       photo: photoFile,
       created_by: req.user.sub,
       created_at: new Date().toISOString(),
@@ -64,6 +65,7 @@ router.post('/', requireAuth, uploadSingle, async (req, res) => {
         title,
         description,
         priority: issuePriority,
+        receipt_draft_id,
         photo: photoFile,
         created_by: req.user.sub,
         created_at: issueDoc.created_at,

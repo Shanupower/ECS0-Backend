@@ -87,6 +87,12 @@ async function setupDatabase() {
         options: {
           keyOptions: { type: 'autoincrement' }
         }
+      },
+      {
+        name: 'misc_services_schemes',
+        options: {
+          keyOptions: { type: 'traditional' }
+        }
       }
     ]
     

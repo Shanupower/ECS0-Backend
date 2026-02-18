@@ -644,4 +644,63 @@ router.get('/branches', requireAuth, async (req, res) => {
   }
 })
 
+// Get employee performance rankings
+router.get('/employees/performance', requireAuth, async (req, res) => {
+  try {
+    const { from, to, branch_code, includePending = '0' } = req.query
+    
+    let filterConditions = []
+    let bindVars = {}
+    
+    if (from && to) {
+      filterConditions.push('receipt.date >= @from AND receipt.date <= @to')
+      bindVars.from = from
+      bindVars.to = to
+    }
+    
+    if (branch_code) {
+      filterConditions.push('receipt.branch == @branch_code')
+      bindVars.branch_code = branch_code
+    }
+    
+    if (includePending !== '1') {
+      filterConditions.push('receipt.status == "Completed"')
+    }
+    
+    filterConditions.push('receipt.is_deleted == false')
+    filterConditions.push('receipt.emp_code != null AND receipt.emp_code != ""')
+    
+    const filterClause = filterConditions.length > 0 ? `FILTER ${filterConditions.join(' AND ')}` : ''
+    
+    const employeeStats = await q(`
+      FOR receipt IN receipts
+      ${filterClause}
+      COLLECT 
+        emp_code = receipt.emp_code,
+        employee_name = receipt.employee_name
+      AGGREGATE 
+        receipt_count = LENGTH(1),
+        total_investment = SUM(TO_NUMBER(receipt.investment_amount || receipt.fd_deposit_amount || 0)),
+        total_cc = SUM(TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0),
+        total_si = SUM(TO_NUMBER(receipt.service_income || receipt.si || 0) || 0),
+        avg_investment = AVG(TO_NUMBER(receipt.investment_amount || receipt.fd_deposit_amount || 0))
+      SORT total_investment DESC
+      RETURN {
+        emp_code,
+        employee_name,
+        receipt_count,
+        total_investment,
+        total_cc,
+        total_si,
+        avg_investment
+      }
+    `, bindVars)
+    
+    res.json(employeeStats)
+  } catch (error) {
+    console.error('Error fetching employee performance:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
 export default router

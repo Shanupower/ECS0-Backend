@@ -12,6 +12,7 @@ import customerRoutes from './routes/customers.js'
 import receiptRoutes from './routes/receipts.js'
 import receiptMediaRoutes from './routes/receipt-media.js'
 import receiptPdfRoutes from './routes/receipt-pdf.js'
+import receiptDraftRoutes from './routes/receipt-drafts.js'
 import branchRoutes from './routes/branches.js'
 import statsRoutes from './routes/stats.js'
 import exportRoutes from './routes/export.js'
@@ -20,6 +21,7 @@ import schemeRoutes from './routes/schemes.js'
 import fdSchemeRoutes from './routes/fd-schemes.js'
 import ncdBondSchemeRoutes from './routes/ncd-bonds-schemes.js'
 import insuranceSchemeRoutes from './routes/insurance-schemes.js'
+import miscServicesSchemeRoutes from './routes/misc-services-schemes.js'
 
 const app = express()
 
@@ -59,6 +61,7 @@ app.use('/api/customers', customerRoutes)
 app.use('/api/receipts', receiptRoutes)
 app.use('/api/receipts', receiptMediaRoutes) // Receipt media routes
 app.use('/api/receipts', receiptPdfRoutes) // Receipt PDF routes
+app.use('/api/receipt-drafts', receiptDraftRoutes) // Receipt drafts
 app.use('/api/branches', branchRoutes)
 app.use('/api/stats', statsRoutes)
 app.use('/api/export', exportRoutes)
@@ -67,6 +70,7 @@ app.use('/api/schemes', schemeRoutes) // MF Schemes routes
 app.use('/api/fd-schemes', fdSchemeRoutes) // FD Schemes routes
 app.use('/api/ncd-bonds-schemes', ncdBondSchemeRoutes) // NCD/Bond Schemes routes
 app.use('/api/insurance-schemes', insuranceSchemeRoutes) // Insurance Schemes routes
+app.use('/api/misc-services-schemes', miscServicesSchemeRoutes) // Misc Services Schemes routes
 
 // Health endpoint for database connection
 app.get('/health', async (req, res) => {
