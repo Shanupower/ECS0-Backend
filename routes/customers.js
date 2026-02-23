@@ -117,10 +117,11 @@ router.get('/search', requireAuth, async (req, res) => {
         created_at: customer.created_at,
         minors: customer.minors || []
       }
+      LIMIT @offset, @limit
       RETURN customerResult
     `
     
-    // Search query for minors (flat format)
+    // Search query for minors (flat format); use (customer.minors || []) so FOR never iterates over null
     const minorSearchFilter = !isAdmin && normalizedUserBranch ? `
       FILTER (
         (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
@@ -128,7 +129,7 @@ router.get('/search', requireAuth, async (req, res) => {
       ) AND (
         customer.minors != null && LENGTH(customer.minors) > 0
       ) AND (
-        FOR minor IN customer.minors
+        FOR minor IN (customer.minors != null ? customer.minors : [])
         FILTER (
           LOWER(minor.name) LIKE LOWER(@searchQuery)
           OR minor.investor_id == @exactId
@@ -140,7 +141,7 @@ router.get('/search', requireAuth, async (req, res) => {
       FILTER (
         customer.minors != null && LENGTH(customer.minors) > 0
       ) AND (
-        FOR minor IN customer.minors
+        FOR minor IN (customer.minors != null ? customer.minors : [])
         FILTER (
           LOWER(minor.name) LIKE LOWER(@searchQuery)
           OR minor.investor_id == @exactId
@@ -153,12 +154,13 @@ router.get('/search', requireAuth, async (req, res) => {
     const minorQuery = `
       FOR customer IN customers
       ${minorSearchFilter}
-      FOR minor IN customer.minors
+      FOR minor IN (customer.minors != null ? customer.minors : [])
       FILTER (
         LOWER(minor.name) LIKE LOWER(@searchQuery)
         OR minor.investor_id == @exactId
         OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
       )
+      LIMIT @offset, @limit
       RETURN {
         investor_id: minor.investor_id,
         name: minor.name,
@@ -189,7 +191,7 @@ router.get('/search', requireAuth, async (req, res) => {
       LET minorCount = (
         FOR customer IN customers
         ${minorSearchFilter}
-        FOR minor IN customer.minors
+        FOR minor IN (customer.minors != null ? customer.minors : [])
         FILTER (
           LOWER(minor.name) LIKE LOWER(@searchQuery)
           OR minor.investor_id == @exactId
@@ -902,16 +904,22 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
 
     // Validate and process minors if provided
     let minors = []
-    if (req.body.minors !== undefined) {
+    if (req.body.minors !== undefined && req.body.minors !== null && req.body.minors !== '') {
       // Handle minors array (could be JSON string or array)
       let minorsInput = req.body.minors
       if (typeof minorsInput === 'string') {
-        try {
-          minorsInput = JSON.parse(minorsInput)
-        } catch (e) {
-          return res.status(400).json({ error: 'validation_error', detail: 'Invalid minors array format' })
+        const trimmed = minorsInput.trim()
+        if (trimmed === '') {
+          minorsInput = []
+        } else {
+          try {
+            minorsInput = JSON.parse(minorsInput)
+          } catch (e) {
+            return res.status(400).json({ error: 'validation_error', detail: 'Invalid minors array format' })
+          }
         }
       }
+      if (minorsInput === null) minorsInput = []
       
       const minorsValidation = validateMinorsArray(minorsInput)
       if (!minorsValidation.valid) {
