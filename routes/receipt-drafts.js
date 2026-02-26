@@ -39,6 +39,24 @@ router.post('/', requireAuth, async (req, res) => {
   }
 })
 
+// List receipt drafts for the current user (employee sees own drafts; admin sees own by default)
+router.get('/', requireAuth, async (req, res) => {
+  try {
+    await ensureDraftsCollection()
+    const createdBy = req.user.sub
+    const drafts = await q(`
+      FOR draft IN receipt_drafts
+      FILTER draft.created_by == @createdBy
+      SORT draft.created_at DESC
+      RETURN draft
+    `, { createdBy })
+    res.json(drafts || [])
+  } catch (error) {
+    console.error('Error listing receipt drafts:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to list receipt drafts' })
+  }
+})
+
 // Get a receipt draft by id (admin or owner)
 router.get('/:id', requireAuth, async (req, res) => {
   try {

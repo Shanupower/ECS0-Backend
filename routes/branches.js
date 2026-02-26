@@ -220,9 +220,9 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     const numLimit = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
     const numPage = Math.max(1, parseInt(page, 10) || 1)
     const numOffset = (numPage - 1) * numLimit
-    
+
     let filterClause = 'FILTER receipt.branch == @branchName'
-    let bindVars = { branchName: branch.branch_name, limit: numLimit, offset: numOffset }
+    let bindVars = { branchName: branch.branch_name }
     
     // Date filter
     if (from && to && !isNaN(Date.parse(from)) && !isNaN(Date.parse(to))) {
@@ -252,7 +252,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       FOR receipt IN receipts
       ${filterClause}
       SORT receipt.${orderBy} ${sortDir}
-      LIMIT @offset, @limit
+      LIMIT ${numOffset}, ${numLimit}
       RETURN MERGE(receipt, {
         media_count: LENGTH(receipt.files || [])
       })
@@ -266,11 +266,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     `
     
     // Create separate bindVars for count query (without limit/offset)
-    const countBindVars = { ...bindVars }
-    delete countBindVars.limit
-    delete countBindVars.offset
-    
-    const [rows, totalResult] = await Promise.all([
+    const countBindVars = { ...bindVars } = await Promise.all([
       q(query, bindVars),
       q(countQuery, countBindVars)
     ])

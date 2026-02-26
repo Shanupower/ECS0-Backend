@@ -45,9 +45,7 @@ router.get('/search', requireAuth, async (req, res) => {
 
     let filterClause = ''
     let bindVars = { 
-      searchQuery: `%${searchQuery}%`, 
-      limit: searchLimit, 
-      offset: searchOffset 
+      searchQuery: `%${searchQuery}%`
     }
 
     // Branch-based filtering (unless admin)
@@ -117,7 +115,7 @@ router.get('/search', requireAuth, async (req, res) => {
         created_at: customer.created_at,
         minors: customer.minors || []
       }
-      LIMIT @offset, @limit
+      LIMIT ${searchOffset}, ${searchLimit}
       RETURN customerResult
     `
     
@@ -160,7 +158,7 @@ router.get('/search', requireAuth, async (req, res) => {
         OR minor.investor_id == @exactId
         OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
       )
-      LIMIT @offset, @limit
+      LIMIT ${searchOffset}, ${searchLimit}
       RETURN {
         investor_id: minor.investor_id,
         name: minor.name,
@@ -207,7 +205,7 @@ router.get('/search', requireAuth, async (req, res) => {
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
     delete countBindVars.limit
-    delete countBindVars.offset
+    delete countBindVars.pageSkip
 
     const [customersResult, minorsResult, totalResult] = await Promise.all([
       q(customerQuery, bindVars),
@@ -288,7 +286,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
         FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
         ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
         SORT customer.${orderBy} ${sortDir}
-        LIMIT @offset, @limit
+        LIMIT ${searchOffset}, ${searchLimit}
         RETURN {
           investor_id: customer.investor_id,
           name: customer.name,
@@ -304,9 +302,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       `
 
       bindVars = {
-        searchQuery: searchQuery.trim(),
-        limit: searchLimit,
-        offset: searchOffset
+        searchQuery: searchQuery.trim()
       }
 
       if (!isAdmin && normalizedUserBranch) {
@@ -316,9 +312,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       // Fallback to regular search
       let filterClause = ''
       bindVars = { 
-        searchQuery: `%${searchQuery}%`, 
-        limit: searchLimit, 
-        offset: searchOffset 
+        searchQuery: `%${searchQuery}%`
       }
 
       // Branch-based filtering (unless admin)
@@ -523,7 +517,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
     delete countBindVars.limit
-    delete countBindVars.offset
+    delete countBindVars.pageSkip
     if (!countBindVars.exactId) {
       countBindVars.exactId = exactIdForMinors
     }
@@ -602,7 +596,7 @@ router.get('/', requireAuth, async (req, res) => {
     const numOffset = (numPage - 1) * numLimit
 
     let filterClause = ''
-    let bindVars = { limit: numLimit, offset: numOffset }
+    let bindVars = { }
 
     // Branch-based filtering (unless admin)
     if (!isAdmin && normalizedUserBranch) {
@@ -639,7 +633,7 @@ router.get('/', requireAuth, async (req, res) => {
       FOR customer IN customers
       ${filterClause}
       SORT customer.${orderBy} ${sortDir}
-      LIMIT @offset, @limit
+      LIMIT ${numOffset}, ${numLimit}
       RETURN customer
     `
 
@@ -653,7 +647,7 @@ router.get('/', requireAuth, async (req, res) => {
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
     delete countBindVars.limit
-    delete countBindVars.offset
+    delete countBindVars.pageSkip
 
     const [rows, totalResult] = await Promise.all([
       q(query, bindVars),
@@ -672,6 +666,83 @@ router.get('/', requireAuth, async (req, res) => {
     })
   } catch (error) {
     console.error('Error fetching customers:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// Portfolio review: list customers with last_reviewed_at / next_review_due and optional filter
+router.get('/portfolio-review', requireAuth, async (req, res) => {
+  try {
+    const { review_filter = 'all', page = '1', size = '50' } = req.query
+    const userBranch = await getUserBranch(req.user.sub)
+    const normalizedUserBranch = normalizeBranchName(userBranch)
+    const userRole = await q(`
+      FOR user IN users FILTER user._key == @id LIMIT 1 RETURN user.role
+    `, { id: req.user.sub })
+    const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
+
+    let filterClause = ''
+    const bindVars = {}
+    if (!isAdmin && normalizedUserBranch) {
+      filterClause = `FILTER (
+        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+      )`
+      bindVars.userBranch = normalizedUserBranch
+    }
+
+    const today = new Date().toISOString().slice(0, 10)
+    if (review_filter === 'overdue') {
+      bindVars.today = today
+      filterClause += (filterClause ? ' AND ' : 'FILTER ') + 'customer.next_review_due != null && customer.next_review_due < @today'
+    } else if (review_filter === 'due_today') {
+      bindVars.today = today
+      filterClause += (filterClause ? ' AND ' : 'FILTER ') + 'customer.next_review_due == @today'
+    } else if (review_filter === 'due_this_week') {
+      const d = new Date()
+      const endOfWeek = new Date(d)
+      endOfWeek.setDate(d.getDate() + (7 - d.getDay()))
+      bindVars.today = today
+      bindVars.endWeek = endOfWeek.toISOString().slice(0, 10)
+      filterClause += (filterClause ? ' AND ' : 'FILTER ') + 'customer.next_review_due != null && customer.next_review_due >= @today && customer.next_review_due <= @endWeek'
+    }
+
+    const p = Math.max(1, parseInt(page, 10) || 1)
+    const s = Math.min(200, Math.max(1, parseInt(size, 10) || 50))
+    const skipNum = (p - 1) * s
+
+    const query = `
+      FOR customer IN customers
+      ${filterClause}
+      SORT (customer.next_review_due == null ? 1 : 0), customer.next_review_due ASC, customer.name ASC
+      LIMIT ${skipNum}, ${s}
+      RETURN {
+        _key: customer._key,
+        investor_id: customer.investor_id,
+        name: customer.name,
+        mobile: customer.mobile,
+        email: customer.email,
+        relationship_manager: customer.relationship_manager,
+        last_reviewed_at: customer.last_reviewed_at || null,
+        next_review_due: customer.next_review_due || null
+      }
+    `
+    const countQuery = `
+      FOR customer IN customers
+      ${filterClause}
+      COLLECT WITH COUNT INTO total
+      RETURN total
+    `
+    const countBindVars = { ...bindVars }
+
+    const [items, totalResult] = await Promise.all([
+      q(query, bindVars),
+      q(countQuery, countBindVars)
+    ])
+    const total = totalResult[0] || 0
+    res.json({ items, total, page: p, size: s })
+  } catch (error) {
+    console.error('Error fetching portfolio review:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })
@@ -1064,7 +1135,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
       aadhar_number,
       branches, // New: array of branches
       relationship_manager, // Backward compatibility: single branch
-      minors // Array of minors (for update)
+      minors, // Array of minors (for update)
+      last_reviewed_at,
+      next_review_due
     } = req.body || {}
 
     // Check if customer exists and get full customer data
@@ -1212,7 +1285,10 @@ router.patch('/:id', requireAuth, async (req, res) => {
     if (occupation !== undefined) updates.occupation = occupation
     if (annual_income !== undefined) updates.annual_income = annual_income ? Number(annual_income) : null
     if (aadhar_number !== undefined) updates.aadhar_number = aadhar_number
-    
+
+    if (last_reviewed_at !== undefined) updates.last_reviewed_at = last_reviewed_at || null
+    if (next_review_due !== undefined) updates.next_review_due = next_review_due || null
+
     // Handle branch updates - support both 'branches' array and 'relationship_manager' for backward compatibility
     if (branches !== undefined || relationship_manager !== undefined) {
       let newBranches = []
@@ -1424,7 +1500,11 @@ router.patch('/:id', requireAuth, async (req, res) => {
 // Delete customer
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
-    const id = req.params.id
+    const idParam = req.params.id
+    const id = parseInt(idParam, 10)
+    if (isNaN(id)) {
+      return res.status(400).json({ error: 'invalid_id', detail: 'Invalid customer ID' })
+    }
 
     // Check if customer exists and get full customer data
     const existing = await q(`

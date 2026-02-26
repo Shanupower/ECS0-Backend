@@ -50,6 +50,54 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
   res.json(users)
 })
 
+// Get users that the current user can assign tasks to (admin: all; manager: same branch; employee: self only)
+router.get('/assignable', requireAuth, async (req, res) => {
+  try {
+    const role = req.user.role
+    const sub = req.user.sub
+
+    if (role === 'admin') {
+      const users = await q(`
+        FOR user IN users
+        FILTER user.is_active == true
+        SORT user.name
+        RETURN { id: user._key, emp_code: user.emp_code, name: user.name, branch: user.branch, role: user.role }
+      `)
+      return res.json(users)
+    }
+
+    if (role === 'manager') {
+      const me = await q(`
+        FOR user IN users
+        FILTER user._key == @id
+        LIMIT 1
+        RETURN user.branch
+      `, { id: sub })
+      const myBranch = me[0] ? String(me[0]).trim().toUpperCase() : null
+      if (!myBranch) return res.json([])
+      const users = await q(`
+        FOR user IN users
+        FILTER user.is_active == true
+        FILTER user.branch != null && UPPER(TRIM(user.branch)) == @myBranch
+        SORT user.name
+        RETURN { id: user._key, emp_code: user.emp_code, name: user.name, branch: user.branch, role: user.role }
+      `, { myBranch })
+      return res.json(users)
+    }
+
+    const self = await q(`
+      FOR user IN users
+      FILTER user._key == @id && user.is_active == true
+      LIMIT 1
+      RETURN { id: user._key, emp_code: user.emp_code, name: user.name, branch: user.branch, role: user.role }
+    `, { id: sub })
+    res.json(self || [])
+  } catch (error) {
+    console.error('Error listing assignable users:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
 // Create new user (admin only)
 router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   const { emp_code, name, email, branch, role = 'employee', password } = req.body || {}

@@ -71,6 +71,18 @@ async function setupDatabase() {
         }
       },
       {
+        name: 'tasks',
+        options: {
+          keyOptions: { type: 'traditional' }
+        }
+      },
+      {
+        name: 'leads',
+        options: {
+          keyOptions: { type: 'traditional' }
+        }
+      },
+      {
         name: 'fd_issuers',
         options: {
           keyOptions: { type: 'traditional' }

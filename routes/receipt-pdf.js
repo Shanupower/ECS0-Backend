@@ -641,9 +641,9 @@ router.post('/regenerate-pdfs', requireAuth, async (req, res) => {
     const receipts = await q(`
       FOR receipt IN receipts
       FILTER receipt.is_deleted == false
-      LIMIT @limit
+      LIMIT ${Number(limit) || 1000}
       RETURN receipt
-    `, { limit })
+    `, {})
     
     if (!receipts.length) {
       return res.json({ message: 'no_receipts_found', generated: 0, total: 0 })

@@ -740,7 +740,7 @@ router.get('/recent', requireAuth, async (req, res) => {
   try {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '10', 10)))
     let filterConditions = ['receipt.is_deleted == false']
-    const bindVars = { limit }
+    const bindVars = { }
 
     if (req.user.role === 'employee') {
       filterConditions.push('receipt.user_id == @user_id')
@@ -760,7 +760,7 @@ router.get('/recent', requireAuth, async (req, res) => {
       FOR receipt IN receipts
       ${filterClause}
       SORT receipt.created_at DESC
-      LIMIT @limit
+      LIMIT ${limit}
       RETURN receipt
     `, bindVars)
 
@@ -1054,7 +1054,7 @@ router.get('/', requireAuth, async (req, res) => {
     const numOffset = (numPage - 1) * numLimit
 
     let filterClause = ''
-    let bindVars = { limit: numLimit, offset: numOffset }
+    let bindVars = { }
     let filterConditions = []
 
     // safe date filter (only if both provided and valid)
@@ -1136,7 +1136,7 @@ router.get('/', requireAuth, async (req, res) => {
       FOR receipt IN receipts
       ${filterClause}
       SORT receipt.${orderBy} ${sortDir}
-      LIMIT @offset, @limit
+      LIMIT ${numOffset}, ${numLimit}
       RETURN MERGE(receipt, {
         media_count: LENGTH(receipt.files || [])
       })
@@ -1151,8 +1151,6 @@ router.get('/', requireAuth, async (req, res) => {
     
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
-    delete countBindVars.limit
-    delete countBindVars.offset
 
     const [rows, totalResult] = await Promise.all([
       q(query, bindVars),
@@ -1209,7 +1207,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
     const numOffset = (numPage - 1) * numLimit
 
     let filterClause = ''
-    let bindVars = { emp_code: requestedEmpCode, limit: numLimit, offset: numOffset }
+    let bindVars = { emp_code: requestedEmpCode }
     let filterConditions = ['receipt.emp_code == @emp_code']
 
     // Safe date filter only if both are valid
@@ -1265,7 +1263,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
       FOR receipt IN receipts
       ${filterClause}
       SORT receipt.${orderBy} ${sortDir}
-      LIMIT @offset, @limit
+      LIMIT ${numOffset}, ${numLimit}
       RETURN MERGE(receipt, {
         media_count: LENGTH(receipt.files || [])
       })
@@ -1280,8 +1278,6 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
     
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
-    delete countBindVars.limit
-    delete countBindVars.offset
 
     const [rows, totalResult] = await Promise.all([
       q(query, bindVars),

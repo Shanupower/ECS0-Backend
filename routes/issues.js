@@ -111,7 +111,7 @@ router.get('/my', requireAuth, async (req, res) => {
     const orderBy = allowedSort.has(sortCol) ? sortCol : 'created_at'
 
     let filterClause = 'FILTER issue.created_by == @user_id'
-    let bindVars = { limit: numLimit, offset: numOffset, user_id: req.user.sub }
+    let bindVars = { user_id: req.user.sub }
 
     if (status !== 'all') {
       filterClause += ' && issue.status == @status'
@@ -135,7 +135,7 @@ router.get('/my', requireAuth, async (req, res) => {
         }
       )[0]
       SORT issue.${orderBy} ${sortDir}
-      LIMIT @offset, @limit
+      LIMIT ${numOffset}, ${numLimit}
       RETURN MERGE(issue, { created_by_user })
     `
 
@@ -148,7 +148,7 @@ router.get('/my', requireAuth, async (req, res) => {
 
     const countBindVars = { ...bindVars }
     delete countBindVars.limit
-    delete countBindVars.offset
+    delete countBindVars.pageSkip
 
     const [rows, totalResult] = await Promise.all([
       q(query, bindVars),
@@ -190,7 +190,7 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
     const orderBy = allowedSort.has(sortCol) ? sortCol : 'created_at'
 
     let filterClause = ''
-    let bindVars = { limit: numLimit, offset: numOffset }
+    let bindVars = {}
 
     if (status !== 'all') {
       filterClause = 'FILTER issue.status == @status'
@@ -227,7 +227,7 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
         }
       )[0] : null
       SORT issue.${orderBy} ${sortDir}
-      LIMIT @offset, @limit
+      LIMIT ${numOffset}, ${numLimit}
       RETURN MERGE(issue, { 
         created_by_user,
         updated_by_user
@@ -243,7 +243,7 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
 
     const countBindVars = { ...bindVars }
     delete countBindVars.limit
-    delete countBindVars.offset
+    delete countBindVars.pageSkip
 
     const [rows, totalResult] = await Promise.all([
       q(query, bindVars),
