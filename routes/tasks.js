@@ -85,7 +85,7 @@ async function buildListFilter(req) {
 
   // employee, branch, or any other: own tasks only (assignee_id = sub or emp_code)
   return {
-    filterAql: 'FILTER task.assignee_id == @sub || task.assignee_emp_code == @empCode',
+    filterAql: 'FILTER task.assignee_id == @sub || task.assignee_emp_code == @emp_code',
     bindVars: { sub, emp_code: empCode || '' }
   }
 }

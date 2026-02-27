@@ -11,10 +11,29 @@ const __dirname = path.dirname(__filename)
 
 const router = express.Router()
 
-// Generate professional receipt PDF matching traditional receipt format
+// Format INR for PDF using "Rs." (Helvetica has no Rupee symbol)
+function fmtINR(num, maxFractionDigits = 2) {
+  if (num == null || num === '') return ''
+  const n = Number(num)
+  if (isNaN(n)) return String(num)
+  const formatted = new Intl.NumberFormat('en-IN', {
+    maximumFractionDigits: maxFractionDigits,
+    minimumFractionDigits: maxFractionDigits === 0 ? 0 : 2
+  }).format(n)
+  return 'Rs. ' + formatted
+}
+
+// Generate professional receipt PDF — single page, presentable layout
 export function generateReceiptPDF(receipt) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 40, size: 'A4' })
+    const margin = 36
+    const pageWidth = 595
+    const pageHeight = 842
+    const contentRight = pageWidth - margin
+    const contentWidth = contentRight - margin
+    const maxY = pageHeight - margin
+
+    const doc = new PDFDocument({ margin, size: 'A4' })
     const buffers = []
     
     doc.on('data', buffers.push.bind(buffers))
@@ -25,72 +44,65 @@ export function generateReceiptPDF(receipt) {
     doc.on('error', reject)
     
     try {
-      // Helper to add key-value pair with improved spacing and typography
-      // Returns the new y position after adding the field
-      const addField = (label, value, x, y, labelWidth = 200, valueWidth = 320, lineSpacing = 18) => {
+      // Compact line spacing so receipt fits on one page (maxY ~806)
+      const addField = (label, value, x, y, labelWidth = 180, valueWidth = 300, lineSpacing = 10) => {
         if (!value || value === 'N/A' || value === '—') {
-          doc.fontSize(10).font('Helvetica-Bold').fillColor('#374151').text(label + ':', x, y, { width: labelWidth })
-          doc.fontSize(10).font('Helvetica').fillColor('#6B7280').text('N/A', x + labelWidth, y, { width: valueWidth })
+          doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text(label + ':', x, y, { width: labelWidth })
+          doc.fontSize(8).font('Helvetica').fillColor('#6B7280').text('N/A', x + labelWidth, y, { width: valueWidth })
           return y + lineSpacing
         }
-        doc.fontSize(10).font('Helvetica-Bold').fillColor('#374151').text(label + ':', x, y, { width: labelWidth })
-        
-        // Calculate text height for multi-line values (scheme names, etc.)
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text(label + ':', x, y, { width: labelWidth })
         const textHeight = doc.heightOfString(String(value), { width: valueWidth })
-        const lines = Math.ceil(textHeight / 12) // Approximate line height
-        const actualHeight = Math.max(lineSpacing, (lines * 12) + 4) // Add extra spacing for multi-line
-        
-        doc.fontSize(10).font('Helvetica').fillColor('#111827').text(String(value), x + labelWidth, y, { width: valueWidth, lineGap: 2 })
+        const lines = Math.ceil(textHeight / 9)
+        const actualHeight = Math.max(lineSpacing, (lines * 9) + 2)
+        doc.fontSize(8).font('Helvetica').fillColor('#111827').text(String(value), x + labelWidth, y, { width: valueWidth, lineGap: 1 })
         return y + actualHeight
       }
       
-      let yPos = 30
+      let yPos = margin
       
-      // Professional Header with Larger Logo (no text needed as logo contains company name)
+      // Header: logo only at true aspect ratio; Date & Receipt No box on right
       const logoPath = path.join(__dirname, '../assets/ecs-logo.png')
+      const logoWidth = 80  // desired width in pt; height follows from image aspect ratio
+      const boxWidth = 158
+      const boxX = contentRight - boxWidth
+      const boxHeight = 48
+      let logoDisplayHeight = logoWidth
+
       try {
         if (fs.existsSync(logoPath)) {
-          // Larger logo size
-          doc.image(logoPath, 40, yPos, { width: 120, height: 120 })
+          const img = doc.openImage(logoPath)
+          logoDisplayHeight = logoWidth * (img.height / img.width)
+          doc.image(logoPath, margin, yPos, { width: logoWidth })
         }
       } catch (error) {
         console.warn('Could not load logo:', error.message)
       }
       
-      // AMFI registration text below logo (smaller, right-aligned)
-      doc.fontSize(9).font('Helvetica').fillColor('#6B7280').text('AMFI Registered Mutual Fund Distributor', 40, yPos + 125, { width: 520, align: 'right' })
-      
-      // Receipt info in top right with better styling
       const dateStr = receipt.date ? new Date(receipt.date).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN')
-      const receiptNo = receipt.receipt_no || receipt.receiptNo || 'N/A'
-      const receiptId = `ECS-${dateStr.replace(/\//g, '')}-${receiptNo}`
+      const receiptNo = (receipt.receipt_no || receipt.receiptNo || 'N/A').toString()
       
-      // Background box for receipt info (aligned with logo area)
-      const receiptInfoY = yPos + 10
-      doc.rect(380, receiptInfoY, 180, 50).fillColor('#FEF2F2').fill()
-      doc.rect(380, receiptInfoY, 180, 50).strokeColor('#DC2626').lineWidth(1.5).stroke()
+      doc.rect(boxX, yPos, boxWidth, boxHeight).fillColor('#FEF2F2').fill()
+      doc.rect(boxX, yPos, boxWidth, boxHeight).strokeColor('#DC2626').lineWidth(1).stroke()
+      doc.fontSize(7).font('Helvetica').fillColor('#6B7280').text('Date', boxX + 6, yPos + 6)
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#111827').text(dateStr, boxX + 6, yPos + 14)
+      doc.fontSize(7).font('Helvetica').fillColor('#6B7280').text('Receipt No', boxX + 6, yPos + 28)
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#DC2626').text(receiptNo, boxX + 6, yPos + 34, { width: boxWidth - 12 })
       
-      doc.fontSize(9).font('Helvetica').fillColor('#6B7280').text('Date:', 390, receiptInfoY + 8)
-      doc.fontSize(11).font('Helvetica-Bold').fillColor('#111827').text(dateStr, 390, receiptInfoY + 20)
-      doc.fontSize(9).font('Helvetica').fillColor('#6B7280').text('Receipt No:', 390, receiptInfoY + 35)
-      doc.fontSize(10).font('Helvetica-Bold').fillColor('#DC2626').text(receiptNo, 390, receiptInfoY + 47, { width: 160 })
+      yPos += Math.max(logoDisplayHeight, boxHeight) + 10
       
-      // Move yPos down to account for larger logo
-      yPos += 145
+      doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#DC2626').lineWidth(2).stroke()
+      yPos += 10
       
-      // Professional divider line
-      doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#DC2626').lineWidth(2).stroke()
-      yPos += 20
+      // ACKNOWLEDGEMENT RECEIPT
+      doc.rect(margin, yPos, contentWidth, 18).fillColor('#FEF2F2').fill()
+      doc.rect(margin, yPos, contentWidth, 18).strokeColor('#DC2626').lineWidth(1.5).stroke()
+      doc.fontSize(12).font('Helvetica-Bold').fillColor('#DC2626').text('ACKNOWLEDGEMENT RECEIPT', margin + 10, yPos + 3, { align: 'center', width: contentWidth - 20 })
+      yPos += 24
       
-      // ACKNOWLEDGEMENT RECEIPT Section Header with background
-      doc.rect(40, yPos, 520, 28).fillColor('#FEF2F2').fill()
-      doc.rect(40, yPos, 520, 28).strokeColor('#DC2626').lineWidth(1.5).stroke()
-      doc.fontSize(16).font('Helvetica-Bold').fillColor('#DC2626').text('ACKNOWLEDGEMENT RECEIPT', 50, yPos + 7, { align: 'center', width: 500 })
-      yPos += 35
-      
-      // Branch / Place and Relationship Manager Section
-      doc.fontSize(12).font('Helvetica-Bold').fillColor('#111827').text('Branch & Relationship Manager', 40, yPos)
-      yPos += 20
+      // Branch / Place and Relationship Manager
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text('Branch & Relationship Manager', margin, yPos)
+      yPos += 10
       
       // Resolve employee/investor from nested (employee: { name, code, branch }) or flat keys
       const branch = receipt.employee?.branch ?? receipt.branch ?? 'N/A'
@@ -103,72 +115,62 @@ export function generateReceiptPDF(receipt) {
       const investorPan = receipt.investor?.pan ?? receipt.pan ?? 'N/A'
       const investorEmail = receipt.investor?.email ?? receipt.email ?? 'N/A'
 
-      yPos = addField('Branch / Place', branch, 40, yPos)
-      yPos = addField('Relationship Manager', employeeName, 40, yPos)
-      yPos = addField('Manager Code', receipt.employee?.code ?? receipt.emp_code ?? receipt.empCode ?? 'N/A', 40, yPos)
-      yPos = addField('Manager Mobile', employeeMobile, 40, yPos)
-      yPos = addField('Email ID (Manager)', employeeEmail, 40, yPos)
+      yPos = addField('Branch / Place', branch, margin, yPos)
+      yPos = addField('Relationship Manager', employeeName, margin, yPos)
+      yPos = addField('Manager Code', receipt.employee?.code ?? receipt.emp_code ?? receipt.empCode ?? 'N/A', margin, yPos)
+      yPos = addField('Manager Mobile', employeeMobile, margin, yPos)
+      yPos = addField('Email ID (Manager)', employeeEmail, margin, yPos)
       
-      yPos += 15
+      yPos += 6
+      doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
+      yPos += 6
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text('Investor Details', margin, yPos)
+      yPos += 10
       
-      // Divider line
-      doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
-      yPos += 15
-      
-      // Investor Details Section
-      doc.fontSize(12).font('Helvetica-Bold').fillColor('#111827').text('Investor Details', 40, yPos)
-      yPos += 20
-      
-      yPos = addField('Investor Name', investorName, 40, yPos)
-      yPos = addField('Investor ID', investorId, 40, yPos)
-      yPos = addField('Mobile Number (Investor)', investorMobile, 40, yPos)
-      yPos = addField('PAN', investorPan, 40, yPos)
-      yPos = addField('Email ID (Investor)', investorEmail, 40, yPos)
+      yPos = addField('Investor Name', investorName, margin, yPos)
+      yPos = addField('Investor ID', investorId, margin, yPos)
+      yPos = addField('Mobile Number (Investor)', investorMobile, margin, yPos)
+      yPos = addField('PAN', investorPan, margin, yPos)
+      yPos = addField('Email ID (Investor)', investorEmail, margin, yPos)
       const investorAddress = receipt.investor?.address
       const addressStr = typeof investorAddress === 'object' && investorAddress
         ? [investorAddress.line1, investorAddress.line2, investorAddress.line3].filter(Boolean).join('\n') || null
         : (receipt.investor_address ?? receipt.investorAddress ?? null)
-      if (addressStr) yPos = addField('Address', addressStr, 40, yPos)
+      if (addressStr) yPos = addField('Address', addressStr, margin, yPos)
       const pinCode = (typeof investorAddress === 'object' && investorAddress?.pin_code) ?? receipt.pin_code ?? receipt.pinCode
-      if (pinCode) yPos = addField('PIN Code', pinCode, 40, yPos)
+      if (pinCode) yPos = addField('PIN Code', pinCode, margin, yPos)
       
-      yPos += 15
+      yPos += 6
+      doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
+      yPos += 6
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text('Investment Details', margin, yPos)
+      yPos += 10
       
-      // Divider line
-      doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
-      yPos += 15
-      
-      // Investment Details Section
-      doc.fontSize(12).font('Helvetica-Bold').fillColor('#111827').text('Investment Details', 40, yPos)
-      yPos += 20
-      
-      // Product category box with improved styling
-      const productCategory = receipt.product_category || receipt.productCategory || 'Mutual Funds'
-      const boxHeight = 28
-      // Professional red shade background
-      doc.rect(40, yPos, 520, boxHeight).fillColor('#FEF2F2').fill()
-      doc.rect(40, yPos, 520, boxHeight).strokeColor('#DC2626').lineWidth(1.5).stroke()
-      doc.fontSize(12).font('Helvetica-Bold').fillColor('#DC2626').text(productCategory, 50, yPos + 8)
-      yPos += boxHeight + 15
+      const productCategory = receipt.product_category || receipt.productCategory || receipt.product?.category || 'Mutual Funds'
+      const productCategoryUpper = String(productCategory || '').toUpperCase()
+      const categoryBoxHeight = 18
+      doc.rect(margin, yPos, contentWidth, categoryBoxHeight).fillColor('#FEF2F2').fill()
+      doc.rect(margin, yPos, contentWidth, categoryBoxHeight).strokeColor('#DC2626').lineWidth(1.5).stroke()
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#DC2626').text(productCategory, margin + 10, yPos + 4)
+      yPos += categoryBoxHeight + 8
       
       // Investment fields
       if (receipt.amc_name || receipt.amc_code) {
-        yPos = addField('AMC Name', receipt.amc_name || receipt.amc_code, 40, yPos)
+        yPos = addField('AMC Name', receipt.amc_name || receipt.amc_code, margin, yPos)
       }
       
       if (receipt.scheme_name || receipt.schemeName || receipt.product?.name) {
         const schemeName = receipt.scheme_name || receipt.schemeName || receipt.product?.name
         const nfoTag = receipt.scheme_is_nfo || receipt.product_details?.mf?.scheme?.is_nfo ? ' [NFO]' : ''
-        // Use larger line spacing for scheme names (they can be long/multi-line)
-        yPos = addField('Target Scheme', schemeName + nfoTag, 40, yPos, 200, 320, 22)
+        yPos = addField('Target Scheme', schemeName + nfoTag, margin, yPos, 180, 300, 10)
       }
       
       if (receipt.switch_from_scheme_name || receipt.from_scheme_name) {
-        yPos = addField('Existing Scheme', receipt.switch_from_scheme_name || receipt.from_scheme_name, 40, yPos)
+        yPos = addField('Existing Scheme', receipt.switch_from_scheme_name || receipt.from_scheme_name, margin, yPos)
       }
       
       if (receipt.scheme_plan || receipt.plan) {
-        yPos = addField('Plan', receipt.scheme_plan || receipt.plan, 40, yPos)
+        yPos = addField('Plan', receipt.scheme_plan || receipt.plan, margin, yPos)
       }
       
       if (receipt.scheme_option || receipt.schemeOption) {
@@ -177,153 +179,127 @@ export function generateReceiptPDF(receipt) {
         if (option === 'GROWTH') optionText = 'GROWTH'
         else if (option === 'IDCW_PAYOUT') optionText = 'IDCW - Payout'
         else if (option === 'IDCW_REINVEST') optionText = 'IDCW - Reinvestment'
-        yPos = addField('Option', optionText, 40, yPos)
+        yPos = addField('Option', optionText, margin, yPos)
       }
       
       if (receipt.transaction_type || receipt.txn_type || receipt.txnType) {
         const txnType = receipt.transaction_type || receipt.txn_type || receipt.txnType
-        yPos = addField('Transaction Type', txnType, 40, yPos)
+        yPos = addField('Transaction Type', txnType, margin, yPos)
       }
       
       if (receipt.folio_number || receipt.folio_policy_no || receipt.folioPolicyNo) {
         const folioNo = receipt.folio_number || receipt.folio_policy_no || receipt.folioPolicyNo
-        yPos = addField('Folio Status', 'Existing Folio', 40, yPos)
-        yPos = addField('Number (Folio Number)', folioNo, 40, yPos)
+        yPos = addField('Folio Status', 'Existing Folio', margin, yPos)
+        yPos = addField('Number (Folio Number)', folioNo, margin, yPos)
       }
       
       if (receipt.investment_amount || receipt.investmentAmount) {
-        const amount = new Intl.NumberFormat('en-IN', {
-          style: 'currency',
-          currency: 'INR',
-          maximumFractionDigits: 2
-        }).format(receipt.investment_amount || receipt.investmentAmount)
+        const amount = fmtINR(receipt.investment_amount || receipt.investmentAmount)
         // Highlight amount with larger font
-        doc.fontSize(10).font('Helvetica-Bold').fillColor('#374151').text('Investment Amount:', 40, yPos, { width: 200 })
-        doc.fontSize(14).font('Helvetica-Bold').fillColor('#DC2626').text(amount, 240, yPos - 2, { width: 320 })
-        yPos += 22
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text('Investment Amount:', margin, yPos, { width: 180 })
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#DC2626').text(amount, margin + 180, yPos - 2, { width: contentWidth - (margin + 180) })
+        yPos += 18
       }
       
       // Switch Over details
       if (receipt.transaction_type === 'Switch Over' || receipt.txn_type === 'Switch Over') {
         if (receipt.switch_type && receipt.switch_value) {
           const switchValue = receipt.switch_type === 'Amount' 
-            ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(receipt.switch_value)
+            ? fmtINR(receipt.switch_value, 2)
             : `${receipt.switch_value} units`
-          yPos = addField('Switch Type', receipt.switch_type, 40, yPos)
-          yPos = addField('Switch Value', switchValue, 40, yPos)
+          yPos = addField('Switch Type', receipt.switch_type, margin, yPos)
+          yPos = addField('Switch Value', switchValue, margin, yPos)
         }
       }
       
       // SIP details
       if (receipt.transaction_type === 'SIP' || receipt.txn_type === 'SIP') {
-        if (receipt.sip_frequency) yPos = addField('SIP Frequency', receipt.sip_frequency, 40, yPos)
+        if (receipt.sip_frequency) yPos = addField('SIP Frequency', receipt.sip_frequency, margin, yPos)
         if (receipt.sip_start_date) {
-          yPos = addField('Start Date', new Date(receipt.sip_start_date).toLocaleDateString('en-IN'), 40, yPos)
+          yPos = addField('Start Date', new Date(receipt.sip_start_date).toLocaleDateString('en-IN'), margin, yPos)
         }
         if (receipt.sip_end_date) {
-          yPos = addField('End Date', new Date(receipt.sip_end_date).toLocaleDateString('en-IN'), 40, yPos)
+          yPos = addField('End Date', new Date(receipt.sip_end_date).toLocaleDateString('en-IN'), margin, yPos)
         } else if (receipt.sip_is_perpetual) {
-          yPos = addField('Type', 'Perpetual (40 years)', 40, yPos)
+          yPos = addField('Type', 'Perpetual (40 years)', margin, yPos)
         }
       }
       
       // STP details
       if (receipt.transaction_type === 'STP' || receipt.txn_type === 'STP') {
         if (receipt.stp_target_scheme_name) {
-          yPos = addField('Target Scheme', receipt.stp_target_scheme_name, 40, yPos)
+          yPos = addField('Target Scheme', receipt.stp_target_scheme_name, margin, yPos)
         }
         if (receipt.stp_original_amount) {
-          const originalAmt = new Intl.NumberFormat('en-IN', {
-            style: 'currency',
-            currency: 'INR',
-            maximumFractionDigits: 2
-          }).format(receipt.stp_original_amount)
-          yPos = addField('Total Original Scheme Amount', originalAmt, 40, yPos)
+          const originalAmt = fmtINR(receipt.stp_original_amount)
+          yPos = addField('Total Original Scheme Amount', originalAmt, margin, yPos)
         }
-        if (receipt.stp_frequency) yPos = addField('STP Frequency', receipt.stp_frequency, 40, yPos)
+        if (receipt.stp_frequency) yPos = addField('STP Frequency', receipt.stp_frequency, margin, yPos)
         if (receipt.stp_start_date) {
-          yPos = addField('STP Start Date', new Date(receipt.stp_start_date).toLocaleDateString('en-IN'), 40, yPos)
+          yPos = addField('STP Start Date', new Date(receipt.stp_start_date).toLocaleDateString('en-IN'), margin, yPos)
         }
         if (receipt.stp_amount) {
-          const stpAmt = new Intl.NumberFormat('en-IN', {
-            style: 'currency',
-            currency: 'INR',
-            maximumFractionDigits: 2
-          }).format(receipt.stp_amount)
-          yPos = addField('Transfer Amount', stpAmt, 40, yPos)
+          const stpAmt = fmtINR(receipt.stp_amount)
+          yPos = addField('Transfer Amount', stpAmt, margin, yPos)
         }
       }
       
       // SWP details
       if (receipt.transaction_type === 'SWP' || receipt.txn_type === 'SWP') {
-        if (receipt.swp_frequency) yPos = addField('SWP Frequency', receipt.swp_frequency, 40, yPos)
+        if (receipt.swp_frequency) yPos = addField('SWP Frequency', receipt.swp_frequency, margin, yPos)
         if (receipt.swp_start_date) {
-          yPos = addField('SWP Start Date', new Date(receipt.swp_start_date).toLocaleDateString('en-IN'), 40, yPos)
+          yPos = addField('SWP Start Date', new Date(receipt.swp_start_date).toLocaleDateString('en-IN'), margin, yPos)
         }
         if (receipt.swp_amount) {
-          const swpAmt = new Intl.NumberFormat('en-IN', {
-            style: 'currency',
-            currency: 'INR',
-            maximumFractionDigits: 2
-          }).format(receipt.swp_amount)
-          yPos = addField('Withdrawal Amount', swpAmt, 40, yPos)
+          const swpAmt = fmtINR(receipt.swp_amount)
+          yPos = addField('Withdrawal Amount', swpAmt, margin, yPos)
         }
       }
       
-      yPos += 15
+      yPos += 10
       
       // FD Details (if applicable)
       if (receipt.fd_issuer_name) {
-        doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
-        yPos += 15
+        doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
+        yPos += 8
         
-        doc.fontSize(12).font('Helvetica-Bold').fillColor('#111827').text('Fixed Deposit Details', 40, yPos)
-        yPos += 20
+        doc.fontSize(11).font('Helvetica-Bold').fillColor('#111827').text('Fixed Deposit Details', margin, yPos)
+        yPos += 14
         
-        // FD category box with improved styling
-        doc.rect(40, yPos, 520, 28).fillColor('#FEF2F2').fill()
-        doc.rect(40, yPos, 520, 28).strokeColor('#DC2626').lineWidth(1.5).stroke()
-        doc.fontSize(12).font('Helvetica-Bold').fillColor('#DC2626').text('Fixed Deposit', 50, yPos + 8)
-        yPos += 35
+        doc.rect(margin, yPos, contentWidth, 22).fillColor('#FEF2F2').fill()
+        doc.rect(margin, yPos, contentWidth, 22).strokeColor('#DC2626').lineWidth(1.5).stroke()
+        doc.fontSize(11).font('Helvetica-Bold').fillColor('#DC2626').text('Fixed Deposit', margin + 10, yPos + 6)
+        yPos += 28
         
-        yPos = addField('Issuer', receipt.fd_issuer_name + (receipt.fd_issuer_type ? ` (${receipt.fd_issuer_type})` : ''), 40, yPos)
-        if (receipt.fd_scheme_name) yPos = addField('Scheme', receipt.fd_scheme_name, 40, yPos)
+        yPos = addField('Issuer', receipt.fd_issuer_name + (receipt.fd_issuer_type ? ` (${receipt.fd_issuer_type})` : ''), margin, yPos)
+        if (receipt.fd_scheme_name) yPos = addField('Scheme', receipt.fd_scheme_name, margin, yPos)
         if (receipt.fd_deposit_amount) {
-          const amount = new Intl.NumberFormat('en-IN', {
-            style: 'currency',
-            currency: 'INR',
-            maximumFractionDigits: 2
-          }).format(receipt.fd_deposit_amount)
-          // Highlight deposit amount
-          doc.fontSize(10).font('Helvetica-Bold').fillColor('#374151').text('Deposit Amount:', 40, yPos, { width: 200 })
-          doc.fontSize(14).font('Helvetica-Bold').fillColor('#DC2626').text(amount, 240, yPos - 2, { width: 320 })
-          yPos += 22
+          const amount = fmtINR(receipt.fd_deposit_amount)
+          doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text('Deposit Amount:', margin, yPos, { width: 180 })
+          doc.fontSize(10).font('Helvetica-Bold').fillColor('#DC2626').text(amount, margin + 180, yPos - 2, { width: contentWidth - (margin + 180) })
+          yPos += 18
         }
         if (receipt.fd_tenure_months) {
-          yPos = addField('Tenure', `${receipt.fd_tenure_months} months (${Math.floor(receipt.fd_tenure_months/12)} years)`, 40, yPos)
+          yPos = addField('Tenure', `${receipt.fd_tenure_months} months (${Math.floor(receipt.fd_tenure_months/12)} years)`, margin, yPos)
         }
         if (receipt.fd_payout_frequency) {
-          yPos = addField('Payout Frequency', receipt.fd_payout_frequency, 40, yPos)
+          yPos = addField('Payout Frequency', receipt.fd_payout_frequency, margin, yPos)
         }
         if (receipt.fd_locked_interest_rate_pa) {
-          yPos = addField('Interest Rate', `${receipt.fd_locked_interest_rate_pa.toFixed(2)}% p.a.`, 40, yPos)
+          yPos = addField('Interest Rate', `${receipt.fd_locked_interest_rate_pa.toFixed(2)}% p.a.`, margin, yPos)
         }
         if (receipt.fd_maturity_amount) {
-          const maturityAmt = new Intl.NumberFormat('en-IN', {
-            style: 'currency',
-            currency: 'INR',
-            maximumFractionDigits: 2
-          }).format(receipt.fd_maturity_amount)
-          yPos = addField('Maturity Amount', maturityAmt, 40, yPos)
+          const maturityAmt = fmtINR(receipt.fd_maturity_amount)
+          yPos = addField('Maturity Amount', maturityAmt, margin, yPos)
         }
         if (receipt.fd_maturity_date) {
-          yPos = addField('Maturity Date', new Date(receipt.fd_maturity_date).toLocaleDateString('en-IN'), 40, yPos)
+          yPos = addField('Maturity Date', new Date(receipt.fd_maturity_date).toLocaleDateString('en-IN'), margin, yPos)
         }
         if (receipt.fd_application_number) {
-          yPos = addField('Application/FD Number', receipt.fd_application_number, 40, yPos)
+          yPos = addField('Application/FD Number', receipt.fd_application_number, margin, yPos)
         }
         if (receipt.fd_transaction_type || receipt.txn_type) {
-          yPos = addField('Transaction Type', receipt.fd_transaction_type || receipt.txn_type || 'Fresh', 40, yPos)
+          yPos = addField('Transaction Type', receipt.fd_transaction_type || receipt.txn_type || 'Fresh', margin, yPos)
         }
         if (receipt.fd_transaction_type === 'Renewal' && receipt.fd_renewal_investment_type) {
           let renewalText = ''
@@ -332,123 +308,122 @@ export function generateReceiptPDF(receipt) {
           } else if (receipt.fd_renewal_investment_type === 'increased') {
             renewalText = 'Increased Amount'
             if (receipt.fd_renewal_additional_amount) {
-              const additionalAmt = new Intl.NumberFormat('en-IN', {
-                style: 'currency',
-                currency: 'INR',
-                maximumFractionDigits: 2
-              }).format(receipt.fd_renewal_additional_amount)
+              const additionalAmt = fmtINR(receipt.fd_renewal_additional_amount)
               renewalText += ` (Additional: ${additionalAmt})`
             }
           } else if (receipt.fd_renewal_investment_type === 'decreased') {
             renewalText = 'Decreased Amount'
             if (receipt.fd_renewal_additional_amount) {
-              const withdrawalAmt = new Intl.NumberFormat('en-IN', {
-                style: 'currency',
-                currency: 'INR',
-                maximumFractionDigits: 2
-              }).format(receipt.fd_renewal_additional_amount)
+              const withdrawalAmt = fmtINR(receipt.fd_renewal_additional_amount)
               renewalText += ` (Withdrawal: ${withdrawalAmt})`
             }
           }
-          yPos = addField('Renewal Investment', renewalText, 40, yPos)
+          yPos = addField('Renewal Investment', renewalText, margin, yPos)
         }
         
-        yPos += 15
+        yPos += 10
       }
       
-      // Bond/NCD Details (if applicable) — productCategory already declared above
-      if ((productCategory === 'BOND' || productCategory === 'NCD') && (receipt.bond_issuer_name || receipt.bond_scheme_name || receipt.product_details?.bond?.issuer?.name)) {
-        doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
-        yPos += 15
+      // Bond/NCD Details
+      const bondDetails = receipt.product_details && receipt.product_details.bond ? receipt.product_details.bond : null
+      const hasBondSection = (productCategoryUpper === 'BOND' || productCategoryUpper === 'NCD') &&
+        (receipt.bond_issuer_name || receipt.bond_scheme_name || receipt.scheme_name || receipt.schemeName || receipt.product?.name || (bondDetails && (bondDetails.issuer?.name || bondDetails.scheme?.name)))
+      if (hasBondSection) {
+        doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
+        yPos += 8
         
-        doc.fontSize(12).font('Helvetica-Bold').fillColor('#111827').text('Bond / NCD Details', 40, yPos)
-        yPos += 20
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text('Bond / NCD Details', margin, yPos)
+        yPos += 10
         
-        const bondIssuer = receipt.bond_issuer_name || receipt.product_details?.bond?.issuer?.name || receipt.issuer_company || 'N/A'
-        const bondType = receipt.bond_issuer_type || receipt.product_details?.bond?.issuer?.type
-        yPos = addField('Issuer', bondType ? `${bondIssuer} (${bondType})` : bondIssuer, 40, yPos)
-        if (receipt.bond_scheme_name || receipt.product_details?.bond?.scheme?.name) {
-          yPos = addField('Scheme', receipt.bond_scheme_name || receipt.product_details?.bond?.scheme?.name, 40, yPos)
+        const bondIssuer = receipt.bond_issuer_name || bondDetails?.issuer?.name || receipt.issuer_company || 'N/A'
+        const bondType = receipt.bond_issuer_type || bondDetails?.issuer?.type
+        yPos = addField('Issuer', bondType ? `${bondIssuer} (${bondType})` : bondIssuer, margin, yPos)
+        const bondSchemeName = receipt.bond_scheme_name || receipt.scheme_name || receipt.schemeName || bondDetails?.scheme?.name || receipt.product?.name
+        if (bondSchemeName) {
+          yPos = addField('Scheme', bondSchemeName, margin, yPos)
         }
-        if (receipt.investment_amount || receipt.investmentAmount || receipt.product_details?.bond?.transaction?.amount) {
-          const amt = receipt.investment_amount || receipt.investmentAmount || receipt.product_details?.bond?.transaction?.amount
-          const amountStr = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amt)
-          doc.fontSize(10).font('Helvetica-Bold').fillColor('#374151').text('Amount:', 40, yPos, { width: 200 })
-          doc.fontSize(14).font('Helvetica-Bold').fillColor('#DC2626').text(amountStr, 240, yPos - 2, { width: 320 })
-          yPos += 22
+        const bondAmount = receipt.investment_amount || receipt.investmentAmount || bondDetails?.transaction?.amount || receipt.transaction?.amount
+        if (bondAmount != null && bondAmount !== '') {
+          const amountStr = fmtINR(bondAmount)
+          doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text('Amount:', margin, yPos, { width: 180 })
+          doc.fontSize(10).font('Helvetica-Bold').fillColor('#DC2626').text(amountStr, margin + 180, yPos - 2, { width: contentWidth - (margin + 180) })
+          yPos += 18
         }
-        if (receipt.bond_coupon_rate || receipt.product_details?.bond?.instrument?.coupon_rate) {
-          const rate = receipt.bond_coupon_rate ?? receipt.product_details?.bond?.instrument?.coupon_rate
-          yPos = addField('Coupon Rate', `${Number(rate).toFixed(2)}% p.a.`, 40, yPos)
+        const bondCouponRate = receipt.bond_coupon_rate ?? bondDetails?.instrument?.coupon_rate ?? receipt.roi ?? receipt.roi_percent
+        if (bondCouponRate != null && bondCouponRate !== '') {
+          yPos = addField('Coupon Rate', `${Number(bondCouponRate).toFixed(2)}% p.a.`, margin, yPos)
         }
-        if (receipt.bond_face_value || receipt.product_details?.bond?.instrument?.face_value) {
-          const fv = receipt.bond_face_value ?? receipt.product_details?.bond?.instrument?.face_value
-          yPos = addField('Face Value', new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(fv), 40, yPos)
+        const bondFaceValue = receipt.bond_face_value ?? bondDetails?.instrument?.face_value
+        if (bondFaceValue != null && bondFaceValue !== '') {
+          yPos = addField('Face Value', fmtINR(bondFaceValue, 0), margin, yPos)
         }
-        if (receipt.bond_issue_date || receipt.product_details?.bond?.instrument?.issue_date) {
-          const d = receipt.bond_issue_date || receipt.product_details?.bond?.instrument?.issue_date
-          yPos = addField('Issue Date', new Date(d).toLocaleDateString('en-IN'), 40, yPos)
+        const bondIssueDate = receipt.bond_issue_date ?? bondDetails?.instrument?.issue_date
+        if (bondIssueDate) {
+          yPos = addField('Issue Date', new Date(bondIssueDate).toLocaleDateString('en-IN'), margin, yPos)
         }
-        if (receipt.bond_maturity_date || receipt.renewal_due_date || receipt.product_details?.bond?.instrument?.maturity_date) {
-          const d = receipt.bond_maturity_date || receipt.renewal_due_date || receipt.product_details?.bond?.instrument?.maturity_date
-          yPos = addField('Maturity / Renewal Due', new Date(d).toLocaleDateString('en-IN'), 40, yPos)
+        const bondMaturityDate = receipt.bond_maturity_date ?? receipt.renewal_due_date ?? bondDetails?.instrument?.maturity_date
+        if (bondMaturityDate) {
+          yPos = addField('Maturity / Renewal Due', new Date(bondMaturityDate).toLocaleDateString('en-IN'), margin, yPos)
         }
-        if (receipt.bond_application_number || receipt.product_details?.bond?.application?.number) {
-          yPos = addField('Application Number', receipt.bond_application_number || receipt.product_details?.bond?.application?.number, 40, yPos)
+        const bondAppNumber = receipt.bond_application_number ?? bondDetails?.application?.number
+        if (bondAppNumber) {
+          yPos = addField('Application Number', bondAppNumber, margin, yPos)
         }
-        if (receipt.bond_transaction_type || receipt.txn_type || receipt.product_details?.bond?.transaction?.type) {
-          yPos = addField('Transaction Type', receipt.bond_transaction_type || receipt.txn_type || receipt.product_details?.bond?.transaction?.type || 'N/A', 40, yPos)
+        const bondTxnType = receipt.bond_transaction_type ?? receipt.txn_type ?? receipt.transaction_type ?? bondDetails?.transaction?.type
+        if (bondTxnType) {
+          yPos = addField('Transaction Type', bondTxnType, margin, yPos)
         }
-        if (receipt.bond_isin || receipt.product_details?.bond?.scheme?.isin) {
-          yPos = addField('ISIN', receipt.bond_isin || receipt.product_details?.bond?.scheme?.isin, 40, yPos)
+        const bondIsin = receipt.bond_isin ?? bondDetails?.scheme?.isin
+        if (bondIsin) {
+          yPos = addField('ISIN', bondIsin, margin, yPos)
         }
-        yPos += 15
+        yPos += 10
       }
       
-      // Insurance Details (if applicable)
+      // Insurance Details
       if (productCategory === 'INS' && (receipt.insurance_issuer_key || receipt.insurance_product_name || receipt.product_details?.insurance?.issuer?.name || (receipt.issuer_company && productCategory === 'INS'))) {
-        doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
-        yPos += 15
+        doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
+        yPos += 8
         
-        doc.fontSize(12).font('Helvetica-Bold').fillColor('#111827').text('Insurance Details', 40, yPos)
-        yPos += 20
+        doc.fontSize(11).font('Helvetica-Bold').fillColor('#111827').text('Insurance Details', margin, yPos)
+        yPos += 14
         
         const insIssuer = receipt.product_details?.insurance?.issuer?.name || receipt.issuer_company || receipt.fd_issuer_name || 'N/A'
-        yPos = addField('Issuer', insIssuer, 40, yPos)
+        yPos = addField('Issuer', insIssuer, margin, yPos)
         const insProduct = receipt.insurance_product_name || receipt.product_details?.insurance?.product?.name || receipt.scheme_name || receipt.schemeName
-        if (insProduct) yPos = addField('Product', insProduct, 40, yPos)
+        if (insProduct) yPos = addField('Product', insProduct, margin, yPos)
         if (receipt.investment_amount || receipt.investmentAmount || receipt.product_details?.insurance?.policy?.premium_amount) {
           const amt = receipt.investment_amount || receipt.investmentAmount || receipt.product_details?.insurance?.policy?.premium_amount
-          const amountStr = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amt)
-          doc.fontSize(10).font('Helvetica-Bold').fillColor('#374151').text('Premium Amount:', 40, yPos, { width: 200 })
-          doc.fontSize(14).font('Helvetica-Bold').fillColor('#DC2626').text(amountStr, 240, yPos - 2, { width: 320 })
-          yPos += 22
+          const amountStr = fmtINR(amt)
+          doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text('Premium Amount:', margin, yPos, { width: 180 })
+          doc.fontSize(10).font('Helvetica-Bold').fillColor('#DC2626').text(amountStr, margin + 180, yPos - 2, { width: contentWidth - (margin + 180) })
+          yPos += 18
         }
         const policyNo = receipt.insurance_policy_number || receipt.product_details?.insurance?.policy?.number || receipt.folio_policy_no || receipt.folioPolicyNo
-        if (policyNo) yPos = addField('Policy Number', policyNo, 40, yPos)
+        if (policyNo) yPos = addField('Policy Number', policyNo, margin, yPos)
         if (receipt.insurance_sum_assured || receipt.product_details?.insurance?.coverage?.sum_assured) {
           const sa = receipt.insurance_sum_assured ?? receipt.product_details?.insurance?.coverage?.sum_assured
-          yPos = addField('Sum Assured', new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(sa), 40, yPos)
+          yPos = addField('Sum Assured', fmtINR(sa, 0), margin, yPos)
         }
         if (receipt.insurance_policy_term_years || receipt.product_details?.insurance?.coverage?.policy_term_years) {
           const term = receipt.insurance_policy_term_years ?? receipt.product_details?.insurance?.coverage?.policy_term_years
-          yPos = addField('Policy Term', `${term} years`, 40, yPos)
+          yPos = addField('Policy Term', `${term} years`, margin, yPos)
         }
         if (receipt.insurance_premium_frequency || receipt.product_details?.insurance?.policy?.premium_frequency) {
-          yPos = addField('Premium Frequency', receipt.insurance_premium_frequency || receipt.product_details?.insurance?.policy?.premium_frequency, 40, yPos)
+          yPos = addField('Premium Frequency', receipt.insurance_premium_frequency || receipt.product_details?.insurance?.policy?.premium_frequency, margin, yPos)
         }
         if (receipt.insurance_date_of_issue || receipt.product_details?.insurance?.coverage?.policy_start_date) {
           const d = receipt.insurance_date_of_issue || receipt.product_details?.insurance?.coverage?.policy_start_date
-          yPos = addField('Date of Issue', new Date(d).toLocaleDateString('en-IN'), 40, yPos)
+          yPos = addField('Date of Issue', new Date(d).toLocaleDateString('en-IN'), margin, yPos)
         }
         if (receipt.insurance_maturity_date || receipt.product_details?.insurance?.coverage?.maturity_date) {
           const d = receipt.insurance_maturity_date || receipt.product_details?.insurance?.coverage?.maturity_date
-          yPos = addField('Maturity Date', new Date(d).toLocaleDateString('en-IN'), 40, yPos)
+          yPos = addField('Maturity Date', new Date(d).toLocaleDateString('en-IN'), margin, yPos)
         }
         if (receipt.fd_transaction_type || receipt.txn_type || receipt.product_details?.insurance?.policy?.type) {
-          yPos = addField('Transaction Type', receipt.fd_transaction_type || receipt.txn_type || receipt.product_details?.insurance?.policy?.type || 'Fresh', 40, yPos)
+          yPos = addField('Transaction Type', receipt.fd_transaction_type || receipt.txn_type || receipt.product_details?.insurance?.policy?.type || 'Fresh', margin, yPos)
         }
-        yPos += 15
+        yPos += 10
       }
       
       // Transaction/Payment Details Section
@@ -468,12 +443,11 @@ export function generateReceiptPDF(receipt) {
       // Show payment section when any payment/transaction data exists (infer type when entry_mode missing)
       const hasPaymentData = entryMode || channel || referenceNo || bankName || bankBranch || notes || instrumentType || instrumentNo
       if (hasPaymentData) {
-        // Divider line
-        doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
-        yPos += 15
+        doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
+        yPos += 8
         
-        doc.fontSize(12).font('Helvetica-Bold').fillColor('#111827').text('Transaction/Payment Details', 40, yPos)
-        yPos += 20
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text('Transaction/Payment Details', margin, yPos)
+        yPos += 10
         
         // Infer payment mode when not stored (legacy or flat data)
         const displayEntryMode = entryMode || (bankName ? 'Offline' : (notes || (channel && channel !== 'Cheque') ? 'Others' : 'Online'))
@@ -481,84 +455,61 @@ export function generateReceiptPDF(receipt) {
         if (displayEntryMode === 'Online') entryModeText = 'Online Payment'
         else if (displayEntryMode === 'Offline') entryModeText = 'Offline Payment (Cheque/Demand Draft)'
         else if (displayEntryMode === 'Others') entryModeText = 'Other Payment Method'
-        yPos = addField('Payment Mode', entryModeText, 40, yPos)
+        yPos = addField('Payment Mode', entryModeText, margin, yPos)
         
         // Online: reference / transaction number
         if (displayEntryMode === 'Online' && (referenceNo || channel)) {
-          yPos = addField('Transaction/Reference Number', referenceNo || channel, 40, yPos)
+          yPos = addField('Transaction/Reference Number', referenceNo || channel, margin, yPos)
         }
         
         // Others: details (e.g. RTGS, NEFT)
         if (displayEntryMode === 'Others' && (notes || channel)) {
-          yPos = addField('Payment Details', notes || channel, 40, yPos, 200, 320, 20)
+          yPos = addField('Payment Details', notes || channel, margin, yPos, 180, 300, 10)
         }
         
         // Offline: instrument, bank, branch, date
         if (displayEntryMode === 'Offline' || bankName || instrumentNo) {
-          if (instrumentType) yPos = addField('Instrument Type', instrumentType, 40, yPos)
-          else if (channel) yPos = addField('Instrument Type', channel, 40, yPos)
+          if (instrumentType) yPos = addField('Instrument Type', instrumentType, margin, yPos)
+          else if (channel) yPos = addField('Instrument Type', channel, margin, yPos)
           if (instrumentNo || referenceNo) {
-            yPos = addField('Cheque/Draft Number', instrumentNo || referenceNo, 40, yPos)
+            yPos = addField('Cheque/Draft Number', instrumentNo || referenceNo, margin, yPos)
           }
           const payDate = instrumentDate || transactionDate
           if (payDate) {
-            yPos = addField('Instrument/Transaction Date', new Date(payDate).toLocaleDateString('en-IN'), 40, yPos)
+            yPos = addField('Instrument/Transaction Date', new Date(payDate).toLocaleDateString('en-IN'), margin, yPos)
           }
-          if (bankName) yPos = addField('Bank Name', bankName, 40, yPos)
-          if (bankBranch) yPos = addField('Bank Branch', bankBranch, 40, yPos)
+          if (bankName) yPos = addField('Bank Name', bankName, margin, yPos)
+          if (bankBranch) yPos = addField('Bank Branch', bankBranch, margin, yPos)
         }
         
         // Transaction date (for Online/Others; Offline date already shown as Instrument/Transaction Date)
         if (transactionDate && displayEntryMode !== 'Offline') {
-          yPos = addField('Transaction Date', new Date(transactionDate).toLocaleDateString('en-IN'), 40, yPos)
+          yPos = addField('Transaction Date', new Date(transactionDate).toLocaleDateString('en-IN'), margin, yPos)
         }
         
         if (notes && displayEntryMode !== 'Others') {
-          yPos = addField('Notes', notes, 40, yPos, 200, 320, 20)
+          yPos = addField('Notes', notes, margin, yPos, 200, 320, 14)
         }
         
-        yPos += 15
+        yPos += 10
       }
       
-      // Ensure we don't exceed page height (A4 is ~842pt, with margins ~762pt usable)
-      const maxY = 770
-      const remainingSpace = maxY - yPos
-      
-      // Divider line
-      doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
-      yPos += 15
-      
-      // Terms and Conditions with better styling
-      doc.fontSize(11).font('Helvetica-Bold').fillColor('#111827').text('Terms and Conditions:', 40, yPos)
-      yPos += 15
-      
-      doc.fontSize(9).font('Helvetica').fillColor('#374151')
-      const terms = [
-        '• This receipt is proof of payment towards the specified investment and does not guarantee returns.',
-        '• Investments are subject to market risks; please read the scheme details carefully before investing.',
-        '• For queries, contact your branch manager or visit our website.'
-      ]
-      
-      terms.forEach((term) => {
-        doc.text(term, 50, yPos, { width: 500 })
-        yPos += 14
-      })
-      
-      yPos += 15
-      
-      // Professional thank you message
-      doc.rect(40, yPos, 520, 35).fillColor('#FEF2F2').fill()
-      doc.rect(40, yPos, 520, 35).strokeColor('#DC2626').lineWidth(1.5).stroke()
-      doc.fontSize(13).font('Helvetica-Bold').fillColor('#DC2626').text('Thank you for choosing ECS Financial', 50, yPos + 10, { align: 'center', width: 500 })
-      doc.fontSize(9).font('Helvetica').fillColor('#6B7280').text('We acknowledge the receipt of your payment and truly appreciate your trust.', 50, yPos + 25, { align: 'center', width: 500 })
-      yPos += 45
-      
-      // Signature lines with better styling
-      doc.moveTo(40, yPos).lineTo(560, yPos).strokeColor('#DC2626').lineWidth(1).stroke()
-      yPos += 20
-      
-      doc.fontSize(9).font('Helvetica').fillColor('#374151').text('Authorized Signature', 40, yPos)
-      doc.fontSize(9).font('Helvetica').fillColor('#374151').text('Company Stamp', 400, yPos)
+      // Footer: compact terms + thank you + signature (single page)
+      doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#E5E7EB').lineWidth(1).stroke()
+      yPos += 6
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#111827').text('Terms and Conditions:', margin, yPos)
+      yPos += 8
+      doc.fontSize(7).font('Helvetica').fillColor('#374151')
+      doc.text('• This receipt is proof of payment towards the specified investment and does not guarantee returns. • Investments are subject to market risks; please read the scheme details carefully before investing. • For queries, contact your branch manager or visit our website.', margin + 6, yPos, { width: contentWidth - 12, lineGap: 2 })
+      yPos += 18
+      doc.rect(margin, yPos, contentWidth, 20).fillColor('#FEF2F2').fill()
+      doc.rect(margin, yPos, contentWidth, 20).strokeColor('#DC2626').lineWidth(1.5).stroke()
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#DC2626').text('Thank you for choosing ECS Financial. We acknowledge the receipt of your payment and truly appreciate your trust.', margin + 10, yPos + 5, { align: 'center', width: contentWidth - 20 })
+      yPos += 26
+      doc.moveTo(margin, yPos).lineTo(contentRight, yPos).strokeColor('#DC2626').lineWidth(1).stroke()
+      yPos += 10
+      doc.fontSize(8).font('Helvetica').fillColor('#374151').text('Authorized Signature', margin, yPos)
+      doc.fontSize(8).font('Helvetica').fillColor('#374151').text('Company Stamp', contentRight - 100, yPos)
       
       doc.end()
     } catch (error) {

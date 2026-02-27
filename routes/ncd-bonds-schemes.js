@@ -440,19 +440,36 @@ router.delete('/issuer/:issuer_key/scheme/:scheme_id', requireAuth, requireRole(
 // Export NCD/Bond schemes to Excel
 router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const { issuer_key } = req.query // Optional: filter by issuer
+    let { issuer_key } = req.query // Optional: filter by issuer
+    // Treat empty or sentinel values as "export all"
+    if (issuer_key === '' || issuer_key === 'null' || issuer_key === 'undefined') {
+      issuer_key = null
+    }
     
-    // Fetch issuers
+    // Fetch issuers (handle missing collection like list endpoint)
     let issuers = []
-    if (issuer_key) {
-      const result = await q(`
-        FOR issuer IN ncd_bond_issuers
-        FILTER issuer._key == @issuer_key
-        RETURN issuer
-      `, { issuer_key })
-      issuers = result || []
-    } else {
-      issuers = await q(`FOR issuer IN ncd_bond_issuers RETURN issuer`)
+    try {
+      if (issuer_key) {
+        const result = await q(`
+          FOR issuer IN ncd_bond_issuers
+          FILTER issuer._key == @issuer_key
+          RETURN issuer
+        `, { issuer_key })
+        issuers = result || []
+      } else {
+        issuers = await q(`FOR issuer IN ncd_bond_issuers RETURN issuer`)
+      }
+    } catch (dbError) {
+      if (dbError.errorNum === 1203 || dbError.message?.includes('not found') || dbError.message?.includes('does not exist')) {
+        console.warn('Collection ncd_bond_issuers missing or inaccessible for export. Returning empty export.')
+        issuers = []
+      } else {
+        throw dbError
+      }
+    }
+    
+    if (!Array.isArray(issuers)) {
+      issuers = []
     }
     
     // Flatten schemes for export (one row per scheme)
@@ -543,12 +560,14 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
     })
     
     // Set response headers
-    const filename = `ncd-bonds-schemes-export-${issuer_key || 'all'}-${new Date().toISOString().split('T')[0]}.xlsx`
+    const filename = `ncd-bonds-schemes-export-${issuer_key ?? 'all'}-${new Date().toISOString().split('T')[0]}.xlsx`
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
     
     await workbook.xlsx.write(res)
-    res.end()
+    if (!res.writableEnded) {
+      res.end()
+    }
   } catch (error) {
     console.error('Error exporting NCD/Bond schemes to Excel:', error)
     res.status(500).json({ error: 'Failed to export NCD/Bond schemes', detail: error.message })

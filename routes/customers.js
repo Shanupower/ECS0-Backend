@@ -673,7 +673,7 @@ router.get('/', requireAuth, async (req, res) => {
 // Portfolio review: list customers with last_reviewed_at / next_review_due and optional filter
 router.get('/portfolio-review', requireAuth, async (req, res) => {
   try {
-    const { review_filter = 'all', page = '1', size = '50' } = req.query
+    const { review_filter = 'all', page = '1', size = '50', search } = req.query
     const userBranch = await getUserBranch(req.user.sub)
     const normalizedUserBranch = normalizeBranchName(userBranch)
     const userRole = await q(`
@@ -689,6 +689,18 @@ router.get('/portfolio-review', requireAuth, async (req, res) => {
         (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
       )`
       bindVars.userBranch = normalizedUserBranch
+    }
+
+    const searchTerm = typeof search === 'string' ? search.trim() : ''
+    if (searchTerm.length > 0) {
+      const searchLower = searchTerm.toLowerCase()
+      bindVars.searchLower = searchLower
+      const searchFilter = `(
+        (customer.name != null && CONTAINS(LOWER(TO_STRING(customer.name)), @searchLower)) ||
+        (customer.mobile != null && CONTAINS(LOWER(TO_STRING(customer.mobile)), @searchLower)) ||
+        (customer.email != null && CONTAINS(LOWER(TO_STRING(customer.email)), @searchLower))
+      )`
+      filterClause += (filterClause ? ' AND ' : 'FILTER ') + searchFilter
     }
 
     const today = new Date().toISOString().slice(0, 10)
@@ -724,6 +736,8 @@ router.get('/portfolio-review', requireAuth, async (req, res) => {
         email: customer.email,
         relationship_manager: customer.relationship_manager,
         last_reviewed_at: customer.last_reviewed_at || null,
+        last_reviewed_by_id: customer.last_reviewed_by_id || null,
+        last_reviewed_by_emp_code: customer.last_reviewed_by_emp_code || null,
         next_review_due: customer.next_review_due || null
       }
     `
@@ -1286,7 +1300,12 @@ router.patch('/:id', requireAuth, async (req, res) => {
     if (annual_income !== undefined) updates.annual_income = annual_income ? Number(annual_income) : null
     if (aadhar_number !== undefined) updates.aadhar_number = aadhar_number
 
-    if (last_reviewed_at !== undefined) updates.last_reviewed_at = last_reviewed_at || null
+    if (last_reviewed_at !== undefined) {
+      updates.last_reviewed_at = last_reviewed_at || null
+      // Record who marked the portfolio review as done
+      updates.last_reviewed_by_id = req.user.sub || null
+      updates.last_reviewed_by_emp_code = req.user.emp_code || null
+    }
     if (next_review_due !== undefined) updates.next_review_due = next_review_due || null
 
     // Handle branch updates - support both 'branches' array and 'relationship_manager' for backward compatibility

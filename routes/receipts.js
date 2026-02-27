@@ -13,9 +13,21 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
   try {
     // When FormData is used (file upload), payload is sent as JSON string; otherwise req.body is the receipt
     const rawBody = req.body || {}
-    const d = (typeof rawBody.payload === 'string')
-      ? (() => { try { return JSON.parse(rawBody.payload) } catch { return {} } })()
-      : rawBody
+    let d
+    if (typeof rawBody.payload === 'string') {
+      try {
+        d = JSON.parse(rawBody.payload)
+      } catch (parseErr) {
+        console.warn('Receipt payload parse error:', parseErr.message)
+        d = {}
+      }
+    } else {
+      d = rawBody
+    }
+    // If payload was missing (e.g. multipart body not populated by multer), receipt would lack required fields; ensure we have an object
+    if (!d || typeof d !== 'object') {
+      d = {}
+    }
     const today = new Date().toISOString().slice(0,10)
 
     // Validate required fields
@@ -471,55 +483,51 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       }
     }
     
-    // Payment Information
-    // Extract entry_mode: prioritize transaction_details, then entry_mode, then transactionType
-    let entryMode = d.transaction_details?.entry_mode || d.entry_mode || d.transactionType || null
-    
-    // Extract channel: prioritize transaction_details.channel, then transaction_channel, then based on transaction type
-    let channel = d.transaction_details?.channel || d.transaction_channel || null
-    
-    // If channel is not set and we have transaction type, set it appropriately
-    if (!channel && d.transactionType) {
-      if (d.transactionType === 'Online') {
-        channel = d.transactionNumber || d.transaction_details?.reference_no || null
-      } else if (d.transactionType === 'Offline') {
+    // Payment Information – build from both transaction_details and top-level flat fields so we never lose Online/Offline/Others data
+    const td = d.transaction_details && typeof d.transaction_details === 'object' ? d.transaction_details : {}
+
+    const entryMode = td.entry_mode ?? d.entry_mode ?? d.transactionType ?? null
+    let channel = td.channel ?? d.transaction_channel ?? null
+    if (channel == null || channel === '') {
+      if (entryMode === 'Online' || d.transactionType === 'Online') {
+        channel = d.transactionNumber ?? td.reference_no ?? null
+      } else if (entryMode === 'Offline' || d.transactionType === 'Offline') {
         channel = 'Cheque'
-      } else if (d.transactionType === 'Others') {
-        channel = d.othersTransactionType || d.transaction_details?.notes || null
+      } else if (entryMode === 'Others' || d.transactionType === 'Others') {
+        channel = d.othersTransactionType ?? td.notes ?? null
       }
     }
-    
-    // Extract reference_no: prioritize transaction_details, then specific fields, then transactionNumber
-    let referenceNo = d.transaction_details?.reference_no || null
-    if (!referenceNo) {
-      if (d.transactionType === 'Online') {
-        referenceNo = d.transactionNumber || null
-      } else if (d.transactionType === 'Offline') {
-        referenceNo = d.transaction_details?.reference_no || d.chequeNumber || null
+
+    let referenceNo = td.reference_no ?? d.transaction_reference_no ?? d.transactionNumber ?? null
+    if (referenceNo == null || referenceNo === '') {
+      if (entryMode === 'Online' || d.transactionType === 'Online') {
+        referenceNo = d.transactionNumber ?? td.reference_no ?? null
+      } else if (entryMode === 'Offline' || d.transactionType === 'Offline') {
+        referenceNo = d.chequeNumber ?? td.reference_no ?? null
       }
     }
-    if (!referenceNo) {
-      referenceNo = d.transaction_reference_no || d.transactionNumber || null
+    if (referenceNo == null || referenceNo === '') {
+      referenceNo = d.transactionNumber ?? null
     }
-    
-    // Extract bank details from transaction_details or offline details
-    let bankName = d.transaction_details?.bank_name || d.bankName || d.bank_name || null
-    let bankBranch = d.transaction_details?.bank_branch || d.bankBranch || d.bank_branch || null
-    
-    // Extract transaction date
-    const transactionDate = d.transaction_details?.txn_date || d.txn_date || d.chequeDate || d.instrumentDate || d.instrument_date || null
-    
-    // Extract notes: prioritize transaction_details, then othersTransactionType for Others type
-    let notes = d.transaction_details?.notes || d.transaction_notes || null
-    if (!notes && d.transactionType === 'Others') {
-      notes = d.othersTransactionType || null
+
+    const bankName = td.bank_name ?? d.bankName ?? d.bank_name ?? null
+    const bankBranch = td.bank_branch ?? d.bankBranch ?? d.bank_branch ?? null
+    const transactionDate = td.txn_date ?? d.txn_date ?? d.chequeDate ?? d.instrumentDate ?? d.instrument_date ?? null
+
+    let notes = td.notes ?? d.transaction_notes ?? d.notes ?? null
+    if ((notes == null || notes === '') && (entryMode === 'Others' || d.transactionType === 'Others')) {
+      notes = d.othersTransactionType ?? null
     }
-    
+
+    const instrumentType = d.instrumentType ?? d.instrument_type ?? (entryMode === 'Offline' || d.transactionType === 'Offline' ? 'Cheque' : null)
+    const instrumentNo = d.instrumentNo ?? d.instrument_no ?? (entryMode === 'Offline' ? d.chequeNumber : null) ?? null
+    const instrumentDate = d.instrumentDate ?? d.instrument_date ?? (entryMode === 'Offline' ? d.chequeDate : null) ?? null
+
     const payment = {
       instrument: {
-        type: d.instrumentType || d.instrument_type || null,
-        number: d.instrumentNo || d.instrument_no || null,
-        date: d.instrumentDate || d.instrument_date || null,
+        type: instrumentType,
+        number: instrumentNo,
+        date: instrumentDate,
         bank: {
           name: bankName,
           branch: bankBranch
@@ -529,7 +537,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       channel: channel,
       reference_no: referenceNo,
       transaction_date: transactionDate,
-      account_last4: d.transaction_details?.account_last4 || d.account_last4 || null,
+      account_last4: td.account_last4 ?? d.account_last4 ?? null,
       notes: notes
     }
     
@@ -583,6 +591,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     } : null
 
     // Build structured receipt document
+    const receiptEmpCode = d.empCode || d.emp_code || req.user.emp_code || null
     const receiptDoc = {
       // ============================================
       // CORE METADATA
@@ -592,6 +601,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       status: 'Pending',
       branch: d.branch || null,
       user_id: req.user.sub,
+      emp_code: receiptEmpCode,
       created_at: new Date().toISOString(),
       updated_at: null,
       is_deleted: false,
@@ -723,6 +733,27 @@ function withNormalizedDetails(receipt) {
   // Ensure transaction_details exists as an object for consumers that expect it
   if (!normalized.transaction_details) {
     normalized.transaction_details = null
+  }
+
+  // Flatten payment onto root so consumers (view page, list, PDF) always get entry_mode, reference_no, etc.
+  const payment = normalized.payment
+  if (payment && typeof payment === 'object') {
+    if (normalized.entry_mode == null) normalized.entry_mode = payment.entry_mode ?? null
+    if (normalized.channel == null) normalized.channel = payment.channel ?? null
+    if (normalized.reference_no == null) normalized.reference_no = payment.reference_no ?? null
+    const txnDate = payment.transaction_date ?? null
+    if (normalized.transaction_date == null) normalized.transaction_date = txnDate
+    if (normalized.txn_date == null) normalized.txn_date = txnDate
+    if (normalized.notes == null) normalized.notes = payment.notes ?? null
+    if (payment.instrument && typeof payment.instrument === 'object') {
+      if (normalized.instrument_type == null) normalized.instrument_type = payment.instrument.type ?? null
+      if (normalized.instrument_no == null) normalized.instrument_no = payment.instrument.number ?? null
+      if (normalized.instrument_date == null) normalized.instrument_date = payment.instrument.date ?? null
+      if (payment.instrument.bank && typeof payment.instrument.bank === 'object') {
+        if (normalized.bank_name == null) normalized.bank_name = payment.instrument.bank.name ?? null
+        if (normalized.bank_branch == null) normalized.bank_branch = payment.instrument.bank.branch ?? null
+      }
+    }
   }
 
   return normalized
@@ -1208,7 +1239,9 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
 
     let filterClause = ''
     let bindVars = { emp_code: requestedEmpCode }
-    let filterConditions = ['receipt.emp_code == @emp_code']
+    let filterConditions = [
+      '(receipt.emp_code == @emp_code OR (receipt.employee != null && receipt.employee.code == @emp_code))'
+    ]
 
     // Safe date filter only if both are valid
     if (

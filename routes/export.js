@@ -176,7 +176,8 @@ router.get('/transactions', requireAuth, async (req, res) => {
         status: receipt.status || 'Pending',
         transaction_type: receipt.transaction_type || receipt.txn_type || null,
         mode: receipt.mode || null,
-        txn_details: receipt.transaction_details || null
+        payment: receipt.payment || null,
+        transaction_details: receipt.transaction_details || null
       }
     `
 
@@ -188,13 +189,28 @@ router.get('/transactions', requireAuth, async (req, res) => {
       'Investment Amount', 'CC', 'SI', 'Status',
       'Transaction Type', 'Mode',
       'Entry Mode', 'Channel', 'Reference No', 'Txn Date',
-      'Txn Bank Name', 'Txn Account Last4', 'Txn Notes'
+      'Instrument Type', 'Instrument No', 'Instrument Date',
+      'Bank Name', 'Bank Branch', 'Txn Account Last4', 'Txn Notes'
     ]
 
     const csvRows = [headers.join(',')]
 
     rows.forEach(r => {
-      const td = r.txn_details || {}
+      // Prefer receipt.payment (stored format); fallback to legacy transaction_details
+      const payment = r.payment || {}
+      const legacy = r.transaction_details || {}
+      const entryMode = payment.entry_mode ?? legacy.entry_mode ?? ''
+      const channel = payment.channel ?? legacy.channel ?? ''
+      const referenceNo = payment.reference_no ?? legacy.reference_no ?? ''
+      const txnDate = payment.transaction_date ?? legacy.txn_date ?? ''
+      const instrumentType = payment.instrument?.type ?? ''
+      const instrumentNo = payment.instrument?.number ?? ''
+      const instrumentDate = payment.instrument?.date ?? ''
+      const bankName = payment.instrument?.bank?.name ?? legacy.bank_name ?? ''
+      const bankBranch = payment.instrument?.bank?.branch ?? legacy.bank_branch ?? ''
+      const accountLast4 = payment.account_last4 ?? legacy.account_last4 ?? ''
+      const notes = payment.notes ?? legacy.notes ?? ''
+
       const row = [
         r.receipt_id,
         r.date || '',
@@ -210,13 +226,17 @@ router.get('/transactions', requireAuth, async (req, res) => {
         r.status || 'Pending',
         r.transaction_type || '',
         r.mode || '',
-        td.entry_mode || '',
-        td.channel || '',
-        td.reference_no || '',
-        td.txn_date || '',
-        `"${td.bank_name || ''}"`,
-        td.account_last4 || '',
-        `"${td.notes || ''}"`
+        entryMode,
+        channel,
+        referenceNo,
+        txnDate,
+        instrumentType,
+        instrumentNo,
+        instrumentDate,
+        `"${bankName}"`,
+        `"${bankBranch}"`,
+        accountLast4,
+        `"${notes}"`
       ]
       csvRows.push(row.join(','))
     })
