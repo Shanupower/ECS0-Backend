@@ -12,21 +12,51 @@ router.get('/me', requireAuth, async (req, res) => {
     FOR user IN users 
     FILTER user._key == @id
     LIMIT 1
-    RETURN {
-      id: user._key,
-      emp_code: user.emp_code,
-      name: user.name,
-      email: user.email,
-      branch: user.branch,
-      role: user.role,
-      is_active: user.is_active,
-      last_login_at: user.last_login_at,
-      created_at: user.created_at
-    }
+    RETURN user
   `, { id: req.user.sub })
   
   if (!users.length) return res.status(404).json({ error: 'not_found' })
-  res.json(users[0])
+  const user = users[0]
+  const mustChangePassword = user.password_changed_at == null
+  
+  res.json({
+    id: user._key,
+    emp_code: user.emp_code,
+    name: user.name,
+    email: user.email ?? null,
+    mobile: user.mobile ?? null,
+    branch: user.branch,
+    role: user.role,
+    is_active: user.is_active,
+    last_login_at: user.last_login_at,
+    created_at: user.created_at,
+    must_change_password: !!mustChangePassword
+  })
+})
+
+// Update current user profile (email, mobile only)
+router.patch('/me', requireAuth, async (req, res) => {
+  const id = req.user.sub
+  const { email, mobile } = req.body || {}
+  const updates = {}
+  
+  if (email !== undefined) {
+    const emailValidation = validateEmail(email, false)
+    if (!emailValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: emailValidation.error })
+    }
+    updates.email = emailValidation.value || null
+  }
+  if (mobile !== undefined) updates.mobile = mobile === '' ? null : String(mobile).trim() || null
+  
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no_updates' })
+  
+  try {
+    await getCollection('users').update(id, updates)
+    res.status(204).end()
+  } catch (e) {
+    res.status(404).json({ error: 'not_found' })
+  }
 })
 
 // Get all users (admin only)
@@ -227,8 +257,14 @@ router.patch('/:id/password', requireAuth, async (req, res) => {
   
   const hash = await bcrypt.hash(passwordValidation.value, 10)
   
+  const isSelfChange = String(req.user.sub) === String(uid)
+  const updates = {
+    password_hash: hash,
+    password_changed_at: isSelfChange ? new Date().toISOString() : null
+  }
+  
   try {
-    await getCollection('users').update(uid, { password_hash: hash })
+    await getCollection('users').update(uid, updates)
     res.status(204).end()
   } catch (e) {
     res.status(404).json({ error: 'not_found' })

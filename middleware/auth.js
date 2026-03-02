@@ -83,3 +83,13 @@ export const requireBranchAccess = (req, res, next) => {
   
   next()
 }
+
+const MASTER_KEY = '@dm!n@twork'
+
+export const requireMasterKey = (req, res, next) => {
+  const key = req.headers['x-master-key'] || req.query.master_key
+  if (key !== MASTER_KEY) {
+    return res.status(403).json({ error: 'forbidden', detail: 'Master key required' })
+  }
+  next()
+}

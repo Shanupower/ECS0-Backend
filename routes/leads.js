@@ -69,7 +69,7 @@ async function buildListFilter(req) {
   }
   return {
     filterAql: 'FILTER lead.assigned_to_id == @sub || lead.assigned_to_emp_code == @empCode',
-    bindVars: { sub, emp_code: empCode || '' }
+    bindVars: { sub, empCode: empCode || '' }
   }
 }
 

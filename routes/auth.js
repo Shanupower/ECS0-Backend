@@ -27,6 +27,8 @@ router.post('/login', async (req, res) => {
     const ok = await bcrypt.compare(password, user.password_hash)
     if (!ok) return res.status(401).json({ error: 'invalid_credentials' })
     
+    const mustChangePassword = user.password_changed_at == null
+    
     await q(`
       UPDATE @id WITH { last_login_at: DATE_NOW() } IN users
     `, { id: user._key })
@@ -47,7 +49,8 @@ router.post('/login', async (req, res) => {
         role: user.role, 
         name: user.name, 
         branch: user.branch, 
-        branch_code: user.branch_code 
+        branch_code: user.branch_code,
+        must_change_password: !!mustChangePassword
       } 
     })
   } catch (error) {

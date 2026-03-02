@@ -1,6 +1,8 @@
 import express from 'express'
-import { q } from '../config/database.js'
-import { requireAuth, requireRole } from '../middleware/auth.js'
+import { q, getCollection } from '../config/database.js'
+import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.js'
+import { uploadCsv } from '../middleware/upload.js'
+import { normalizeBranchName } from '../config/database.js'
 
 const router = express.Router()
 
@@ -252,45 +254,59 @@ router.get('/transactions', requireAuth, async (req, res) => {
   }
 })
 
-// Export customers to CSV
-router.get('/customers', requireAuth, async (req, res) => {
+// Export customers to CSV (admin only, master key required)
+router.get('/customers', requireAuth, requireRole('admin'), requireMasterKey, async (req, res) => {
   try {
     const customers = await q(`
       FOR customer IN customers
+      FILTER customer.is_active != false
       RETURN {
         investor_id: customer.investor_id,
-        name: customer.investor_name,
+        name: customer.name,
         pan: customer.pan,
-        phone: customer.phone,
         email: customer.email,
-        address: customer.investor_address,
+        mobile: customer.mobile,
+        address1: customer.address1,
+        address2: customer.address2,
+        address3: customer.address3,
         city: customer.city,
         state: customer.state,
-        pincode: customer.pin_code,
-        created_at: customer.created_at,
-        updated_at: customer.updated_at
+        pin: customer.pin,
+        relationship_manager: customer.relationship_manager,
+        relationship_manager_display: customer.relationship_manager_display,
+        created_at: customer.created_at
       }
     `)
     
     const headers = [
-      'Investor ID', 'Name', 'PAN', 'Phone', 'Email', 'Address', 'City', 'State', 'Pincode', 'Created At', 'Updated At'
+      'Investor ID', 'Name', 'PAN', 'Email', 'Mobile', 'Address1', 'Address2', 'Address3',
+      'City', 'State', 'Pin', 'Branch(es)', 'Created At'
     ]
     
     const csvRows = [headers.join(',')]
     
     customers.forEach(customer => {
+      const branchVal = customer.relationship_manager_display != null
+        ? (Array.isArray(customer.relationship_manager_display)
+            ? customer.relationship_manager_display.join('; ')
+            : customer.relationship_manager_display)
+        : (Array.isArray(customer.relationship_manager)
+            ? customer.relationship_manager.join('; ')
+            : customer.relationship_manager || '')
       const row = [
         customer.investor_id,
-        `"${customer.name}"`,
-        customer.pan,
-        customer.phone,
-        customer.email,
-        `"${customer.address || ''}"`,
-        `"${customer.city || ''}"`,
-        `"${customer.state || ''}"`,
-        customer.pincode,
-        customer.created_at,
-        customer.updated_at
+        `"${(customer.name || '').replace(/"/g, '""')}"`,
+        customer.pan || '',
+        customer.email || '',
+        customer.mobile || '',
+        `"${(customer.address1 || '').replace(/"/g, '""')}"`,
+        `"${(customer.address2 || '').replace(/"/g, '""')}"`,
+        `"${(customer.address3 || '').replace(/"/g, '""')}"`,
+        `"${(customer.city || '').replace(/"/g, '""')}"`,
+        `"${(customer.state || '').replace(/"/g, '""')}"`,
+        customer.pin || '',
+        `"${String(branchVal).replace(/"/g, '""')}"`,
+        customer.created_at || ''
       ]
       csvRows.push(row.join(','))
     })
@@ -303,6 +319,113 @@ router.get('/customers', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export customers' })
+  }
+})
+
+// Import customers from CSV (admin only, master key required)
+router.post('/customers/import', requireAuth, requireRole('admin'), requireMasterKey, uploadCsv, async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'validation_error', detail: 'CSV file required (field: file)' })
+    }
+    const text = req.file.buffer.toString('utf-8')
+    const lines = text.split(/\r?\n/).filter(l => l.trim())
+    if (lines.length < 2) {
+      return res.status(400).json({ error: 'validation_error', detail: 'CSV must have header row and at least one data row' })
+    }
+    const header = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''))
+    const nameIdx = header.findIndex(h => /name/i.test(h))
+    const panIdx = header.findIndex(h => /pan/i.test(h))
+    const investorIdIdx = header.findIndex(h => /investor\s*id/i.test(h))
+    const emailIdx = header.findIndex(h => /email/i.test(h))
+    const mobileIdx = header.findIndex(h => /mobile/i.test(h))
+    const addr1Idx = header.findIndex(h => /address1|address\s*1/i.test(h))
+    const cityIdx = header.findIndex(h => /city/i.test(h))
+    const stateIdx = header.findIndex(h => /state/i.test(h))
+    const pinIdx = header.findIndex(h => /pin/i.test(h))
+    const branchIdx = header.findIndex(h => /branch/i.test(h))
+    if (nameIdx === -1 || panIdx === -1) {
+      return res.status(400).json({ error: 'validation_error', detail: 'CSV must include Name and PAN columns' })
+    }
+    function parseCsvField(str) {
+      if (!str) return ''
+      const s = str.trim()
+      if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1).replace(/""/g, '"').trim()
+      return s
+    }
+    const maxIdResult = await q(`
+      LET customerMax = (FOR c IN customers COLLECT AGGREGATE maxId = MAX(c.investor_id) RETURN maxId)[0] || 0
+      LET minorMax = (FOR c IN customers FILTER c.minors != null AND LENGTH(c.minors) > 0
+        FOR m IN c.minors COLLECT AGGREGATE maxId = MAX(m.investor_id) RETURN maxId)[0] || 0
+      RETURN MAX([customerMax, minorMax])
+    `)
+    let nextId = (maxIdResult[0] || 0) + 1
+    const col = getCollection('customers')
+    let imported = 0
+    const errors = []
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i]
+      const parts = []
+      let cur = ''
+      let inQuotes = false
+      for (let j = 0; j < line.length; j++) {
+        const ch = line[j]
+        if (ch === '"') {
+          inQuotes = !inQuotes
+        } else if ((ch === ',' && !inQuotes) || (ch === '\n' && !inQuotes)) {
+          parts.push(cur)
+          cur = ''
+        } else {
+          cur += ch
+        }
+      }
+      parts.push(cur)
+      const name = parseCsvField(parts[nameIdx])
+      const pan = parseCsvField(parts[panIdx])
+      if (!name || !pan) {
+        errors.push(`Row ${i + 1}: Name and PAN required`)
+        continue
+      }
+      const investorId = investorIdIdx >= 0 && parts[investorIdIdx] ? parseInt(parts[investorIdIdx], 10) : null
+      const branchRaw = branchIdx >= 0 ? parseCsvField(parts[branchIdx]) : ''
+      const branchParts = branchRaw ? branchRaw.split(/[;,]/).map(b => b.trim()).filter(Boolean) : []
+      const relationshipManager = branchParts.length === 0 ? 'UNASSIGNED' : branchParts.length === 1 ? normalizeBranchName(branchParts[0]) : branchParts.map(b => normalizeBranchName(b))
+      const relationshipManagerDisplay = branchParts.length === 0 ? null : branchParts.length === 1 ? branchParts[0] : branchParts
+      const doc = {
+        investor_id: investorId != null && !isNaN(investorId) ? investorId : nextId++,
+        name,
+        pan: pan.toUpperCase(),
+        email: emailIdx >= 0 ? parseCsvField(parts[emailIdx]) || null : null,
+        mobile: mobileIdx >= 0 ? parseCsvField(parts[mobileIdx]) || null : null,
+        address1: addr1Idx >= 0 ? parseCsvField(parts[addr1Idx]) || null : null,
+        address2: null,
+        address3: null,
+        city: cityIdx >= 0 ? parseCsvField(parts[cityIdx]) || null : null,
+        state: stateIdx >= 0 ? parseCsvField(parts[stateIdx]) || null : null,
+        pin: pinIdx >= 0 ? parseCsvField(parts[pinIdx]) || null : null,
+        country: 'India',
+        relationship_manager: Array.isArray(relationshipManager) ? relationshipManager : relationshipManager,
+        relationship_manager_display: relationshipManagerDisplay,
+        minors: [],
+        created_at: new Date().toISOString(),
+        is_active: true,
+        source_type: 'csv_import'
+      }
+      try {
+        await col.save(doc)
+        imported++
+      } catch (e) {
+        errors.push(`Row ${i + 1}: ${e.message || 'Save failed'}`)
+      }
+    }
+    res.status(200).json({
+      imported,
+      total_rows: lines.length - 1,
+      errors: errors.length ? errors : undefined
+    })
+  } catch (error) {
+    console.error('Customer import error:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })
 

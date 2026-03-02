@@ -66,4 +66,15 @@ export const uploadExcel = multer({
   }
 }).single('excelFile')
 
+// CSV upload for customer import
+export const uploadCsv = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = path.extname(file.originalname).toLowerCase() === '.csv' ||
+      file.mimetype === 'text/csv' || file.mimetype === 'application/csv'
+    cb(null, !!ok)
+  }
+}).single('file')
+
 export { uploadsDir }

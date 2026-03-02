@@ -112,6 +112,7 @@ router.get('/search', requireAuth, async (req, res) => {
         city: customer.city,
         state: customer.state,
         relationship_manager: customer.relationship_manager,
+        relationship_manager_display: customer.relationship_manager_display,
         created_at: customer.created_at,
         minors: customer.minors || []
       }
@@ -169,6 +170,7 @@ router.get('/search', requireAuth, async (req, res) => {
         city: minor.city,
         state: minor.state,
         relationship_manager: customer.relationship_manager,
+        relationship_manager_display: customer.relationship_manager_display,
         created_at: minor.created_at,
         is_minor: true,
         parent_investor_id: customer.investor_id,
@@ -297,6 +299,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
           city: customer.city,
           state: customer.state,
           relationship_manager: customer.relationship_manager,
+          relationship_manager_display: customer.relationship_manager_display,
           created_at: customer.created_at
         }
       `
@@ -379,6 +382,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
           city: customer.city,
           state: customer.state,
           relationship_manager: customer.relationship_manager,
+          relationship_manager_display: customer.relationship_manager_display,
           created_at: customer.created_at,
           minors: customer.minors || []
         }
@@ -438,6 +442,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
         city: minor.city,
         state: minor.state,
         relationship_manager: customer.relationship_manager,
+        relationship_manager_display: customer.relationship_manager_display,
         created_at: minor.created_at,
         is_minor: true,
         parent_investor_id: customer.investor_id,
@@ -735,6 +740,7 @@ router.get('/portfolio-review', requireAuth, async (req, res) => {
         mobile: customer.mobile,
         email: customer.email,
         relationship_manager: customer.relationship_manager,
+        relationship_manager_display: customer.relationship_manager_display,
         last_reviewed_at: customer.last_reviewed_at || null,
         last_reviewed_by_id: customer.last_reviewed_by_id || null,
         last_reviewed_by_emp_code: customer.last_reviewed_by_emp_code || null,
@@ -956,6 +962,18 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     // Store as array (even if single branch for consistency)
     const relationshipManager = branches.length === 1 ? branches[0] : branches
 
+    // Optional display names for branch dropdown (so "TINDIVANAM" doesn't show as "CHENNAI RO")
+    let relationshipManagerDisplay = null
+    const branchesDisplayInput = req.body.branches_display || req.body['branches_display[]']
+    if (branchesDisplayInput) {
+      const arr = Array.isArray(branchesDisplayInput)
+        ? branchesDisplayInput.map(b => (b && String(b).trim()) || '').filter(Boolean)
+        : typeof branchesDisplayInput === 'string'
+          ? [branchesDisplayInput.trim()].filter(Boolean)
+          : []
+      if (arr.length) relationshipManagerDisplay = arr.length === 1 ? arr[0] : arr
+    }
+
     // Check if PAN already exists (after validation)
     const existingPan = await q(`
       FOR customer IN customers 
@@ -1097,6 +1115,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       aadhar_number: aadhar_number || null,
       media_documents: mediaDocuments,
       relationship_manager: relationshipManager, // Can be single branch (string) or multiple branches (array)
+      relationship_manager_display: relationshipManagerDisplay,
       minors: minors, // Array of minors
       created_at: new Date().toISOString(),
       is_active: true,
@@ -1329,6 +1348,15 @@ router.patch('/:id', requireAuth, async (req, res) => {
       
       // Store as array if multiple branches, or single string if one branch (for backward compatibility)
       updates.relationship_manager = newBranches.length === 1 ? newBranches[0] : newBranches
+      const branchesDisplay = req.body.branches_display || req.body['branches_display[]']
+      if (branchesDisplay !== undefined) {
+        const arr = Array.isArray(branchesDisplay)
+          ? branchesDisplay.map(b => (b && String(b).trim()) || '').filter(Boolean)
+          : typeof branchesDisplay === 'string'
+            ? [branchesDisplay.trim()].filter(Boolean)
+            : []
+        updates.relationship_manager_display = arr.length === 0 ? null : arr.length === 1 ? arr[0] : arr
+      }
     }
 
     // Handle minors update
