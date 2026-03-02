@@ -362,6 +362,7 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
     let nextId = (maxIdResult[0] || 0) + 1
     const col = getCollection('customers')
     let imported = 0
+    let updated = 0
     const errors = []
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i]
@@ -412,14 +413,45 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
         source_type: 'csv_import'
       }
       try {
-        await col.save(doc)
-        imported++
+        let existing = null
+        if (investorId != null && !isNaN(investorId)) {
+          const byId = await q(`FOR c IN customers FILTER c.investor_id == @id LIMIT 1 RETURN c`, { id: investorId })
+          existing = byId[0] || null
+        }
+        if (!existing && pan) {
+          const byPan = await q(`FOR c IN customers FILTER c.pan == @pan LIMIT 1 RETURN c`, { pan: pan.toUpperCase() })
+          existing = byPan[0] || null
+        }
+        if (existing) {
+          await col.update(existing._key, {
+            name: doc.name,
+            pan: doc.pan,
+            email: doc.email,
+            mobile: doc.mobile,
+            address1: doc.address1,
+            address2: doc.address2,
+            address3: doc.address3,
+            city: doc.city,
+            state: doc.state,
+            pin: doc.pin,
+            country: doc.country,
+            relationship_manager: doc.relationship_manager,
+            relationship_manager_display: doc.relationship_manager_display,
+            is_active: doc.is_active,
+            source_type: doc.source_type
+          })
+          updated++
+        } else {
+          await col.save(doc)
+          imported++
+        }
       } catch (e) {
         errors.push(`Row ${i + 1}: ${e.message || 'Save failed'}`)
       }
     }
     res.status(200).json({
       imported,
+      updated,
       total_rows: lines.length - 1,
       errors: errors.length ? errors : undefined
     })
