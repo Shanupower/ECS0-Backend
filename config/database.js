@@ -45,11 +45,49 @@ export const getUserBranch = async (userId) => {
   }
 }
 
-// Use branch names as stored in DB (branches collection). No mapping — store and compare as-is.
+// Helper function to normalize branch names for customer filtering
 export const normalizeBranchName = (userBranch) => {
-  if (userBranch == null || userBranch === '') return null
-  const s = String(userBranch).trim()
-  return s || null
+  if (!userBranch) return null
+  
+  // Map user branch names (from users.branch) to customer relationship_manager / branches as stored in DB
+  const branchMapping = {
+    // Head Office mappings
+    'H.O': 'HO',
+    'HO': 'HO',
+    'HEAD OFFICE': 'HO',
+    'HEADOFFICE': 'HO',
+    
+    // Chennai branch mappings
+    'CHENNAI RO': 'CHENNAI',
+    'CHENNAI - MADIPAKKAM': 'MADIPAKKAM',
+    
+    // Mumbai branch mappings
+    'CHEMBUR - MUMBAI': 'CHEMBUR',
+    
+    // Other branch mappings (keep in sync with frontend branchMapping/API mappings)
+    'JAYANAGAR': 'JAYANAGAR',
+    'VIZAG': 'VIZAG',
+    'MALLESWARAM': 'MALLESWARAM',
+    'BAGH AMBERPET': 'BAGH AMBERPET',
+    'KUKAT PALLY': 'KUKATPALLY',
+    'AMEER PET': 'AMEERPET',
+    'RAJAHMUNDRY': 'RAJAHMUNDRY',
+    'DILSUKHNAGAR': 'DILSUKHNAGAR',
+    'MADHAPUR': 'MADHAPUR',
+    'MALKAJGIRI': 'MALKAJGIRI',
+    'SUCHITRA': 'SUCHITRA',
+    'TRIMULGHERRY': 'TRIMULGHERRY',
+    'WARANGAL': 'WARANGAL',
+    'GAJUWAKA': 'GAJUWAKA',
+    'VIJAYAWADA': 'VIJAYAWADA',
+    'BASHEERBAGH': 'BASHEERBAGH',
+    'HABSIGUDA': 'HABSIGUDA',
+    'COIMBATORE': 'COIMBATORE'
+  }
+  
+  const key = String(userBranch).trim()
+  if (!key) return null
+  return branchMapping[key] || key
 }
 
 // Helper function to check if user can access customer (branch-based filtering)

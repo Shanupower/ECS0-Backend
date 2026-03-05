@@ -1139,8 +1139,8 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
   }
 })
 
-// Update customer
-router.patch('/:id', requireAuth, async (req, res) => {
+// Update customer (supports optional document uploads)
+router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
   try {
     const id = req.params.id
     
@@ -1486,6 +1486,21 @@ router.patch('/:id', requireAuth, async (req, res) => {
       }
       
       updates.minors = processedMinors
+    }
+
+    // Handle newly uploaded media files (append to existing media_documents)
+    if (req.files && req.files.length > 0) {
+      const newMediaDocuments = req.files.map(file => ({
+        id: Date.now() + Math.random(),
+        original_name: file.originalname,
+        filename: file.filename,
+        file_size: file.size,
+        mime_type: file.mimetype,
+        uploaded_by: req.user.sub,
+        uploaded_at: new Date().toISOString()
+      }))
+      const existingMedia = Array.isArray(customer.media_documents) ? customer.media_documents : []
+      updates.media_documents = [...existingMedia, ...newMediaDocuments]
     }
 
     // Add update timestamp

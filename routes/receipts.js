@@ -163,7 +163,8 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
             serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
           }
         } else if (productCategory === 'FD' && d.fd_issuer_key && d.fd_scheme_id) {
-          // Fetch FD scheme to get CC and SI percentages
+          // Fetch FD issuer/scheme to get CC and SI percentages.
+          // Prefer rate-slab level CC/SI; fall back to scheme-level CC/SI for backward compatibility.
           const fdIssuers = await q(`
             FOR issuer IN fd_issuers
             FILTER issuer._key == @issuer_key
@@ -175,10 +176,39 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
             const issuer = fdIssuers[0]
             const scheme = issuer.schemes?.find(s => s.scheme_id === d.fd_scheme_id)
             if (scheme) {
-              const ccPercent = parseFloat(scheme.cc || 0)
-              const siPercent = parseFloat(scheme.si || 0)
-              collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
-              serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+              let ccPercent = 0
+              let siPercent = 0
+
+              // Try to locate matching rate slab based on tenure and payout frequency
+              const slabs = Array.isArray(scheme.rate_slabs) ? scheme.rate_slabs : []
+              const tenureMonths = d.fd_tenure_months || null
+              const payoutFrequency = d.fd_payout_frequency || null
+
+              let matchedSlab = null
+              if (tenureMonths && payoutFrequency && slabs.length > 0) {
+                matchedSlab = slabs.find(slab =>
+                  slab.payout_frequency_type === payoutFrequency &&
+                  slab.tenure_min_months <= tenureMonths &&
+                  slab.tenure_max_months >= tenureMonths &&
+                  (slab.is_active !== false)
+                )
+              }
+
+              if (matchedSlab && (matchedSlab.cc !== undefined || matchedSlab.si !== undefined)) {
+                ccPercent = parseFloat(matchedSlab.cc || 0)
+                siPercent = parseFloat(matchedSlab.si || 0)
+              } else {
+                // Fallback: use scheme-level CC/SI if configured
+                ccPercent = parseFloat(scheme.cc || 0)
+                siPercent = parseFloat(scheme.si || 0)
+              }
+
+              if (!Number.isNaN(ccPercent) && ccPercent !== 0) {
+                collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+              }
+              if (!Number.isNaN(siPercent) && siPercent !== 0) {
+                serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+              }
             }
           }
         } else if (productCategory === 'INS' && d.insurance_issuer_key && d.insurance_product_id) {

@@ -403,6 +403,20 @@ router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) =
     }
     if (password) updateData.password_hash = await bcrypt.hash(password, 10)
 
+    // Fetch existing branch to detect name changes
+    const existing = await q(`
+      FOR branch IN branches
+      FILTER branch.branch_code == @branchCode
+      LIMIT 1
+      RETURN branch
+    `, { branchCode })
+
+    if (!existing.length) {
+      return res.status(404).json({ error: 'not_found', detail: 'Branch not found' })
+    }
+
+    const oldBranch = existing[0]
+
     const result = await q(`
       FOR branch IN branches
       FILTER branch.branch_code == @branchCode
@@ -410,13 +424,46 @@ router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) =
       RETURN NEW
     `, { branchCode, updateData })
 
-    if (!result.length) {
-      return res.status(404).json({ error: 'not_found', detail: 'Branch not found' })
+    const updatedBranch = result[0]
+
+    // If branch_name changed, propagate to related customers (relationship_manager / display)
+    if (branch_name && branch_name !== oldBranch.branch_name) {
+      const oldName = oldBranch.branch_name
+      const newName = branch_name
+      console.log(`[Branch Rename] Propagating branch name change from "${oldName}" to "${newName}" to customers`)
+
+      try {
+        await q(`
+          FOR customer IN customers
+            LET rm = customer.relationship_manager
+            LET rmd = customer.relationship_manager_display
+            LET new_rm = (
+              rm == null ? null :
+              IS_ARRAY(rm)
+                ? (FOR b IN rm RETURN b == @old ? @neu : b)
+                : (rm == @old ? @neu : rm)
+            )
+            LET new_rmd = (
+              rmd == null ? null :
+              IS_ARRAY(rmd)
+                ? (FOR b IN rmd RETURN b == @old ? @neu : b)
+                : (rmd == @old ? @neu : rmd)
+            )
+            FILTER new_rm != rm OR new_rmd != rmd
+            UPDATE customer WITH {
+              relationship_manager: new_rm,
+              relationship_manager_display: new_rmd
+            } IN customers
+        `, { old: oldName, neu: newName })
+      } catch (propError) {
+        console.error('[Branch Rename] Failed to propagate to customers:', propError)
+        // Do not fail the branch update if propagation fails; just log for manual follow-up
+      }
     }
 
     res.json({
       message: 'Branch updated successfully',
-      branch: result[0]
+      branch: updatedBranch
     })
   } catch (error) {
     console.error('Branch update error:', error)

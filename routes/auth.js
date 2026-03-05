@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken'
 import rateLimit from 'express-rate-limit'
 import { q, getCollection, getUserBranch } from '../config/database.js'
 import { JWT_SECRET } from '../config/environment.js'
-import { requireAuth } from '../middleware/auth.js'
+import { requireAuth, requireRole } from '../middleware/auth.js'
 
 const router = express.Router()
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 })
@@ -173,6 +173,53 @@ router.get('/debug', requireAuth, async (req, res) => {
     })
   } catch (error) {
     console.error('Debug endpoint error:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// Admin impersonation: login as another user without their password
+router.post('/impersonate', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { emp_code } = req.body || {}
+    if (!emp_code) {
+      return res.status(400).json({ error: 'validation_error', detail: 'emp_code is required' })
+    }
+
+    const users = await q(`
+      FOR user IN users
+      FILTER user.emp_code == @emp_code AND user.is_active == true
+      LIMIT 1
+      RETURN user
+    `, { emp_code })
+
+    if (!users.length) {
+      return res.status(404).json({ error: 'user_not_found', detail: 'No active user found with that employee code' })
+    }
+
+    const target = users[0]
+
+    const token = jwt.sign({
+      sub: target._key,
+      role: target.role,
+      emp_code: target.emp_code,
+      name: target.name,
+      branch_code: target.branch_code,
+      impersonated_by: req.user.sub
+    }, JWT_SECRET, { expiresIn: '4h' })
+
+    res.json({
+      token,
+      user: {
+        id: target._key,
+        emp_code: target.emp_code,
+        role: target.role,
+        name: target.name,
+        branch: target.branch,
+        branch_code: target.branch_code
+      }
+    })
+  } catch (error) {
+    console.error('Impersonation error:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })
