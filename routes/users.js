@@ -6,6 +6,13 @@ import { validateEmail, validateEmpCode, validatePassword, validateRequired } fr
 
 const router = express.Router()
 
+// Allowed dashboard widget IDs for validation (single source of truth)
+const ALLOWED_DASHBOARD_WIDGETS = [
+  'kpi_cards', 'overdue_tasks', 'by_category', 'daily_timeline', 'branch_performance',
+  'target_vs_actual', 'recent_receipts', 'status_breakdown', 'category_donut', 'monthly_cc_si',
+  'top_employees', 'leads_snapshot', 'issues_snapshot', 'average_ticket', 'cc_vs_si', 'investor_heatmap'
+]
+
 // Get current user profile
 router.get('/me', requireAuth, async (req, res) => {
   const users = await q(`
@@ -18,6 +25,19 @@ router.get('/me', requireAuth, async (req, res) => {
   if (!users.length) return res.status(404).json({ error: 'not_found' })
   const user = users[0]
   const mustChangePassword = user.password_changed_at == null
+
+  // Resolve branch_name for display (user.branch may be id or name; prefer branch_name from branches)
+  let branch_name = user.branch
+  let branch_code = user.branch_code ?? null
+  if (user.branch_code) {
+    const branches = await q(`
+      FOR b IN branches
+      FILTER b.branch_code == @code
+      LIMIT 1
+      RETURN b.branch_name
+    `, { code: user.branch_code })
+    if (branches.length) branch_name = branches[0]
+  }
   
   res.json({
     id: user._key,
@@ -26,18 +46,22 @@ router.get('/me', requireAuth, async (req, res) => {
     email: user.email ?? null,
     mobile: user.mobile ?? null,
     branch: user.branch,
+    branch_code,
+    branch_name,
     role: user.role,
     is_active: user.is_active,
     last_login_at: user.last_login_at,
     created_at: user.created_at,
-    must_change_password: !!mustChangePassword
+    must_change_password: !!mustChangePassword,
+    monthly_target: user.monthly_target != null ? Number(user.monthly_target) : null,
+    dashboard_widgets: Array.isArray(user.dashboard_widgets) ? user.dashboard_widgets : null
   })
 })
 
-// Update current user profile (email, mobile only)
+// Update current user profile (email, mobile, dashboard_widgets)
 router.patch('/me', requireAuth, async (req, res) => {
   const id = req.user.sub
-  const { email, mobile } = req.body || {}
+  const { email, mobile, dashboard_widgets } = req.body || {}
   const updates = {}
   
   if (email !== undefined) {
@@ -48,6 +72,20 @@ router.patch('/me', requireAuth, async (req, res) => {
     updates.email = emailValidation.value || null
   }
   if (mobile !== undefined) updates.mobile = mobile === '' ? null : String(mobile).trim() || null
+  
+  if (dashboard_widgets !== undefined) {
+    if (dashboard_widgets === null) {
+      updates.dashboard_widgets = null
+    } else if (Array.isArray(dashboard_widgets)) {
+      const invalid = dashboard_widgets.filter(id => typeof id !== 'string' || !id.trim() || !ALLOWED_DASHBOARD_WIDGETS.includes(id.trim()))
+      if (invalid.length > 0) {
+        return res.status(400).json({ error: 'validation_error', detail: `Invalid dashboard_widgets: ${invalid.join(', ')}` })
+      }
+      updates.dashboard_widgets = dashboard_widgets.map(id => id.trim())
+    } else {
+      return res.status(400).json({ error: 'validation_error', detail: 'dashboard_widgets must be an array or null' })
+    }
+  }
   
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no_updates' })
   
@@ -74,7 +112,9 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
       role: user.role,
       is_active: user.is_active,
       last_login_at: user.last_login_at,
-      created_at: user.created_at
+      created_at: user.created_at,
+      monthly_target: user.monthly_target != null ? user.monthly_target : null,
+      dashboard_widgets: IS_ARRAY(user.dashboard_widgets) ? user.dashboard_widgets : null
     }
   `)
   res.json(users)
@@ -175,6 +215,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       }
     }
     
+    const { monthly_target } = req.body || {}
     const userDoc = {
       emp_code: empCodeValidation.value,
       name: nameValidation.value,
@@ -184,7 +225,8 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       role,
       password_hash: hash,
       is_active: true,
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      monthly_target: monthly_target !== undefined && monthly_target !== '' && monthly_target != null ? Number(monthly_target) : null
     }
     const result = await getCollection('users').save(userDoc)
     res.status(201).json({ id: result._key })
@@ -196,13 +238,25 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
 // Update user (admin only)
 router.patch('/:id', requireAuth, requireRole('admin'), async (req, res) => {
   const id = req.params.id
-  const { name, email, branch, role, is_active } = req.body || {}
+  const { name, email, branch, role, is_active, monthly_target, dashboard_widgets } = req.body || {}
   const updates = {}
   
   if (name !== undefined) updates.name = name
   if (email !== undefined) updates.email = email
   if (role !== undefined) updates.role = role
   if (is_active !== undefined) updates.is_active = is_active
+  if (monthly_target !== undefined) updates.monthly_target = monthly_target === '' || monthly_target === null ? null : Number(monthly_target)
+  if (dashboard_widgets !== undefined) {
+    if (dashboard_widgets === null) {
+      updates.dashboard_widgets = null
+    } else if (Array.isArray(dashboard_widgets)) {
+      const invalid = dashboard_widgets.filter(w => typeof w !== 'string' || !w.trim() || !ALLOWED_DASHBOARD_WIDGETS.includes(w.trim()))
+      if (invalid.length > 0) return res.status(400).json({ error: 'validation_error', detail: `Invalid dashboard_widgets: ${invalid.join(', ')}` })
+      updates.dashboard_widgets = dashboard_widgets.map(w => w.trim())
+    } else {
+      return res.status(400).json({ error: 'validation_error', detail: 'dashboard_widgets must be an array or null' })
+    }
+  }
   
   // If branch is being updated, also update branch_code
   if (branch !== undefined) {
@@ -279,6 +333,41 @@ router.delete('/:id', requireAuth, requireRole('admin'), async (req, res) => {
     res.status(204).end()
   } catch (e) {
     res.status(404).json({ error: 'not_found' })
+  }
+})
+
+// Delete a user's drafts, tasks, and leads (admin only)
+// This is a hard delete for related records and is intended for cleanup
+router.delete('/:id/related-data', requireAuth, requireRole('admin'), async (req, res) => {
+  const userId = req.params.id
+
+  try {
+    // Delete receipt drafts created by the user
+    await q(`
+      FOR d IN receipt_drafts
+      FILTER d.created_by == @userId
+      REMOVE d IN receipt_drafts
+    `, { userId })
+
+    // Delete tasks where the user is the assignee or assigner
+    await q(`
+      FOR t IN tasks
+      FILTER t.assignee_id == @userId
+         OR t.assigned_by_id == @userId
+      REMOVE t IN tasks
+    `, { userId })
+
+    // Delete leads where the user is the assignee
+    await q(`
+      FOR l IN leads
+      FILTER l.assigned_to_id == @userId
+      REMOVE l IN leads
+    `, { userId })
+
+    res.status(204).end()
+  } catch (error) {
+    console.error('Error deleting user related data:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to delete user related data' })
   }
 })
 

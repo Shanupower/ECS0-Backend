@@ -15,10 +15,20 @@ function validateBusinessRules(data) {
   
   // Validate schemes
   if (data.schemes && Array.isArray(data.schemes)) {
+    const allowedInstrumentTypes = ['BOND', 'NCD']
+    const allowedInterestFrequencies = ['Monthly', 'Quarterly', 'Half-Yearly', 'Annual', 'Cumulative', 'At Maturity']
+    
     data.schemes.forEach((scheme, idx) => {
+      const prefix = `Scheme ${idx + 1}:`
+      
+      // Instrument type validation (when provided)
+      if (scheme.instrument_type && !allowedInstrumentTypes.includes(scheme.instrument_type)) {
+        errors.push(`${prefix} instrument_type must be one of: ${allowedInstrumentTypes.join(', ')}`)
+      }
+      
       // ISIN format validation (12 characters)
       if (scheme.isin && scheme.isin.length !== 12) {
-        errors.push(`Scheme ${idx + 1}: ISIN must be exactly 12 characters`)
+        errors.push(`${prefix} ISIN must be exactly 12 characters`)
       }
       
       // Date validations
@@ -26,23 +36,25 @@ function validateBusinessRules(data) {
         const issueDate = new Date(scheme.issue_date)
         const maturityDate = new Date(scheme.maturity_date)
         if (maturityDate <= issueDate) {
-          errors.push(`Scheme ${idx + 1}: maturity_date must be after issue_date`)
+          errors.push(`${prefix} maturity_date must be after issue_date`)
         }
       }
       
       // Coupon rate validation (0-100)
       if (scheme.coupon_rate !== undefined && (scheme.coupon_rate < 0 || scheme.coupon_rate > 100)) {
-        errors.push(`Scheme ${idx + 1}: coupon_rate must be between 0 and 100`)
+        errors.push(`${prefix} coupon_rate must be between 0 and 100`)
       }
       
       // Face value validation
       if (scheme.face_value !== undefined && scheme.face_value <= 0) {
-        errors.push(`Scheme ${idx + 1}: face_value must be greater than 0`)
+        errors.push(`${prefix} face_value must be greater than 0`)
       }
       
       // Interest payment frequency validation
-      if (scheme.interest_payment_frequency && !['Monthly', 'Quarterly', 'Half-Yearly', 'Annual', 'Cumulative', 'At Maturity'].includes(scheme.interest_payment_frequency)) {
-        errors.push(`Scheme ${idx + 1}: interest_payment_frequency must be one of: Monthly, Quarterly, Half-Yearly, Annual, Cumulative, At Maturity`)
+      if (scheme.interest_payment_frequency && !allowedInterestFrequencies.includes(scheme.interest_payment_frequency)) {
+        errors.push(
+          `${prefix} interest_payment_frequency must be one of: ${allowedInterestFrequencies.join(', ')}`
+        )
       }
       
       // Note: NCDs/Bonds don't use rate slabs like FDs - they have fixed coupon rates
@@ -482,10 +494,13 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
             issuer_legal_name: issuer.legal_name || '',
             issuer_short_name: issuer.short_name || '',
             issuer_type: issuer.type || '',
+            instrument_type: scheme.instrument_type || '',
+            issuer_security_type: scheme.category || '',
+            product_type: scheme.sub_category || '',
             scheme_id: scheme.scheme_id || '',
             scheme_name: scheme.scheme_name || '',
             isin: scheme.isin || '',
-            description: scheme.description || '',
+            description: scheme.description || scheme.description_short || '',
             coupon_rate: scheme.coupon_rate || 0,
             face_value: scheme.face_value || 0,
             issue_date: scheme.issue_date || '',
@@ -502,6 +517,8 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
             call_option_available: scheme.call_option_available !== undefined ? (scheme.call_option_available ? 'Yes' : 'No') : '',
             currency: scheme.currency || 'INR',
             issue_size: scheme.issue_size || '',
+            maturity_method: scheme.maturity_method || '',
+            maturity_notes: scheme.maturity_notes || '',
             is_active: scheme.is_active !== false ? 'Yes' : 'No',
             cc: scheme.cc || 0,
             si: scheme.si || 0
@@ -512,7 +529,8 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
     
     // Create workbook
     const workbook = new ExcelJS.Workbook()
-    const worksheet = workbook.addWorksheet('NCD/Bond Schemes')
+    // Excel worksheet names cannot contain: * ? : \ / [ ]
+    const worksheet = workbook.addWorksheet('NCD-Bond Schemes')
     
     // Define columns
     worksheet.columns = [
@@ -520,6 +538,9 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       { header: 'Issuer Legal Name', key: 'issuer_legal_name', width: 30 },
       { header: 'Issuer Short Name', key: 'issuer_short_name', width: 25 },
       { header: 'Issuer Type', key: 'issuer_type', width: 15 },
+      { header: 'Instrument Type (L1)', key: 'instrument_type', width: 18 },
+      { header: 'Issuer / Security Type (L2)', key: 'issuer_security_type', width: 28 },
+      { header: 'Product Type (L3)', key: 'product_type', width: 28 },
       { header: 'Scheme ID', key: 'scheme_id', width: 25 },
       { header: 'Scheme Name', key: 'scheme_name', width: 40 },
       { header: 'ISIN', key: 'isin', width: 15 },
@@ -540,6 +561,8 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       { header: 'Call Option', key: 'call_option_available', width: 12 },
       { header: 'Currency', key: 'currency', width: 12 },
       { header: 'Issue Size', key: 'issue_size', width: 15 },
+      { header: 'Maturity Calculation Method', key: 'maturity_method', width: 30 },
+      { header: 'Maturity Notes', key: 'maturity_notes', width: 50 },
       { header: 'Is Active', key: 'is_active', width: 12 },
       { header: 'CC %', key: 'cc', width: 12 },
       { header: 'SI %', key: 'si', width: 12 }

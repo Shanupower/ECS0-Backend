@@ -45,6 +45,64 @@ export const getUserBranch = async (userId) => {
   }
 }
 
+// Returns all possible receipt.branch values for a user's branch (key, code, name)
+// so stats can match receipts regardless of whether they store branch as "ECS005", "5", or branch name.
+export const getBranchIdentifiersForFilter = async (userBranch) => {
+  if (!userBranch) return []
+  const str = String(userBranch).trim()
+  if (!str) return []
+  try {
+    const rows = await q(`
+      FOR b IN branches
+        FILTER b._key == @str
+           OR (b.branch_code != null && LOWER(TRIM(TO_STRING(b.branch_code))) == LOWER(@str))
+           OR (b.branch_name != null && LOWER(TRIM(TO_STRING(b.branch_name))) == LOWER(@str))
+        LIMIT 1
+        RETURN [ b._key, b.branch_code, b.branch_name ]
+    `, { str })
+    if (!rows.length || !rows[0]) return []
+    const arr = rows[0]
+    const identifiers = [...new Set([arr[0], arr[1], arr[2]].filter(Boolean).map(x => String(x).trim()))]
+    return identifiers
+  } catch (e) {
+    console.error('getBranchIdentifiersForFilter error:', e)
+    return []
+  }
+}
+
+// Helper function to resolve user's branch (name or code) to canonical branch key (branches._key)
+// Used for filtering customers by customer.branches[]
+export const getCanonicalBranchKey = async (userBranch) => {
+  if (!userBranch) return null
+  const str = String(userBranch).trim()
+  if (!str) return null
+  try {
+    const rows = await q(`
+      FOR b IN branches
+        FILTER b._key == @str
+           OR (b.branch_code != null && LOWER(TRIM(b.branch_code)) == LOWER(@str))
+           OR (b.branch_name != null && LOWER(TRIM(b.branch_name)) == LOWER(@str))
+        LIMIT 1
+        RETURN b._key
+    `, { str })
+    if (rows.length) return String(rows[0])
+    // Fallback: try normalized name match (e.g. "CHENNAI RO" -> CHENNAI -> match branch_name)
+    const normalized = normalizeBranchName(str)
+    if (!normalized) return null
+    const byNorm = await q(`
+      FOR b IN branches
+        FILTER b.branch_name != null
+          AND (LOWER(TRIM(b.branch_name)) == LOWER(@norm) OR b._key == @norm)
+        LIMIT 1
+        RETURN b._key
+    `, { norm: normalized })
+    return byNorm.length ? String(byNorm[0]) : null
+  } catch (e) {
+    console.error('getCanonicalBranchKey error:', e)
+    return null
+  }
+}
+
 // Helper function to normalize branch names for customer filtering
 export const normalizeBranchName = (userBranch) => {
   if (!userBranch) return null
@@ -82,7 +140,12 @@ export const normalizeBranchName = (userBranch) => {
     'VIJAYAWADA': 'VIJAYAWADA',
     'BASHEERBAGH': 'BASHEERBAGH',
     'HABSIGUDA': 'HABSIGUDA',
-    'COIMBATORE': 'COIMBATORE'
+    'COIMBATORE': 'COIMBATORE',
+    // Aliases (same branch, different spelling/name)
+    'Yapral': 'SAINIKPURI',
+    'YAPRAL': 'SAINIKPURI',
+    'WFH KALPANA': 'Thirumullaivoyal',
+    'CHANDA NAGAR': 'CHANDANAGAR'
   }
   
   const key = String(userBranch).trim()
@@ -91,12 +154,9 @@ export const normalizeBranchName = (userBranch) => {
 }
 
 // Helper function to check if user can access customer (branch-based filtering)
-// Supports both single branch (string) and multiple branches (array) for backward compatibility
-export const canAccessCustomer = async (userId, customerRelationshipManager) => {
+// Uses canonical branch key and customer.branches[] when present; falls back to relationship_manager
+export const canAccessCustomer = async (userId, customerBranchesOrRm) => {
   try {
-    console.log(`[Access Check] Checking access for user ${userId} to customer with RM ${customerRelationshipManager}`)
-    
-    // Admin users can access all customers
     const users = await q(`
       FOR user IN users 
       FILTER user._key == @id
@@ -104,32 +164,19 @@ export const canAccessCustomer = async (userId, customerRelationshipManager) => 
       RETURN user.role
     `, { id: userId })
     
-    if (users.length > 0 && users[0] === 'admin') {
-      console.log(`[Access Check] User ${userId} is admin - access granted`)
-      return true
-    }
+    if (users.length > 0 && users[0] === 'admin') return true
     
-    // Non-admin users can only access their branch customers
     const userBranch = await getUserBranch(userId)
-    console.log(`[Access Check] User ${userId} branch: ${userBranch}`)
-    
-    const normalizedUserBranch = normalizeBranchName(userBranch)
-    console.log(`[Access Check] Normalized user branch: ${normalizedUserBranch}`)
-    console.log(`[Access Check] Customer RM: ${customerRelationshipManager}`)
-    
-    // Handle both single branch (string) and multiple branches (array)
-    let hasAccess = false
-    if (Array.isArray(customerRelationshipManager)) {
-      // Check if user's branch is in the customer's branches array
-      hasAccess = normalizedUserBranch && customerRelationshipManager.includes(normalizedUserBranch)
-    } else {
-      // Backward compatibility: single branch string
-      hasAccess = normalizedUserBranch && normalizedUserBranch === customerRelationshipManager
+    const canonicalKey = await getCanonicalBranchKey(userBranch)
+    if (!canonicalKey) return false
+
+    if (Array.isArray(customerBranchesOrRm)) {
+      return customerBranchesOrRm.some(b => String(b) === canonicalKey)
     }
-    
-    console.log(`[Access Check] Access result: ${hasAccess}`)
-    
-    return hasAccess
+    if (customerBranchesOrRm != null && customerBranchesOrRm !== '') {
+      return String(customerBranchesOrRm) === canonicalKey
+    }
+    return false
   } catch (error) {
     console.error(`[Access Check] Error checking access for user ${userId}:`, error)
     throw error

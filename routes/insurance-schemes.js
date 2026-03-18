@@ -59,9 +59,23 @@ function validateBusinessRules(data) {
           errors.push(`Product ${idx + 1}: withdrawal_date must be after launch_date`)
         }
       }
+
+      // PPT slabs (CC/SI by Premium Payment Term): optional array of { ppt_type, ppt_years_min?, ppt_years_max?, cc, si }
+      if (product.ppt_slabs && Array.isArray(product.ppt_slabs)) {
+        product.ppt_slabs.forEach((slab, slabIdx) => {
+          const type = slab.ppt_type
+          if (type === 'PPT') {
+            const min = slab.ppt_years_min
+            const max = slab.ppt_years_max
+            if (min != null && max != null && min > max) {
+              errors.push(`Product ${idx + 1}, PPT slab ${slabIdx + 1}: ppt_years_min (${min}) must be <= ppt_years_max (${max})`)
+            }
+          }
+        })
+      }
     })
   }
-  
+
   return errors
 }
 

@@ -33,14 +33,14 @@ router.get('/receipts', requireAuth, async (req, res) => {
       SORT receipt.created_at DESC
       RETURN {
         receipt_id: receipt._key,
-        investor_id: receipt.investor_id,
-        investor_name: receipt.investor_name,
-        investor_pan: receipt.pan,
-        investor_phone: receipt.phone || '',
-        investor_email: receipt.email,
-        amount: receipt.investment_amount,
-        category: receipt.product_category,
-        payment_method: receipt.mode,
+        investor_id: (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id,
+        investor_name: (receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name,
+        investor_pan: (receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan,
+        investor_phone: (receipt.investor != null && receipt.investor.mobile != null) ? receipt.investor.mobile : receipt.phone || '',
+        investor_email: (receipt.investor != null && receipt.investor.email != null) ? receipt.investor.email : receipt.email,
+        amount: (receipt.transaction != null && receipt.transaction.amount != null) ? receipt.transaction.amount : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? receipt.product_details.fd.deposit.amount : receipt.investment_amount,
+        category: (receipt.product != null && receipt.product.category != null) ? receipt.product.category : receipt.product_category,
+        payment_method: (receipt.transaction != null && receipt.transaction.mode != null) ? receipt.transaction.mode : receipt.mode,
         branch_code: receipt.branch,
         branch_name: receipt.branch,
         created_by: receipt.user_id,
@@ -143,7 +143,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
       bindVars.status = status
     }
     if (category) {
-      query += ` AND receipt.product_category == @category`
+      query += ` AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)`
       bindVars.category = category
     }
     if (mode) {
@@ -169,15 +169,15 @@ router.get('/transactions', requireAuth, async (req, res) => {
         date: receipt.date,
         branch: receipt.branch,
         emp_code: receipt.emp_code,
-        investor_id: receipt.investor_id,
-        investor_name: receipt.investor_name,
-        product_category: receipt.product_category,
-        investment_amount: receipt.investment_amount,
+        investor_id: (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id,
+        investor_name: (receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name,
+        product_category: (receipt.product != null && receipt.product.category != null) ? receipt.product.category : receipt.product_category,
+        investment_amount: (receipt.transaction != null && receipt.transaction.amount != null) ? receipt.transaction.amount : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? receipt.product_details.fd.deposit.amount : receipt.investment_amount,
         cc: receipt.collection_credit || receipt.cc || 0,
         si: receipt.service_income || receipt.si || 0,
         status: receipt.status || 'Pending',
         transaction_type: receipt.transaction_type || receipt.txn_type || null,
-        mode: receipt.mode || null,
+        mode: (receipt.transaction != null && receipt.transaction.mode != null) ? receipt.transaction.mode : receipt.mode || null,
         payment: receipt.payment || null,
         transaction_details: receipt.transaction_details || null
       }

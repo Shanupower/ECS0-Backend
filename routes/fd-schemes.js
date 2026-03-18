@@ -745,35 +745,31 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       issuers = await q(`FOR issuer IN fd_issuers RETURN issuer`)
     }
     
-    // Flatten schemes for export (one row per scheme)
-    const flattenedSchemes = []
+    // Flatten rate slabs for export (one row per slab; CC/SI are at slab level)
+    const flattenedSlabs = []
     issuers.forEach(issuer => {
       if (issuer.schemes && Array.isArray(issuer.schemes)) {
         issuer.schemes.forEach(scheme => {
-          flattenedSchemes.push({
-            issuer_key: issuer._key,
-            issuer_legal_name: issuer.legal_name || '',
-            issuer_short_name: issuer.short_name || '',
-            scheme_id: scheme.scheme_id || '',
-            scheme_name: scheme.scheme_name || '',
-            description_short: scheme.description_short || '',
-            is_cumulative: scheme.is_cumulative ? 'Yes' : 'No',
-            payout_frequency_type: Array.isArray(scheme.payout_frequency_type) ? scheme.payout_frequency_type.join(', ') : '',
-            lock_in_months: scheme.lock_in_months || 0,
-            premature_allowed: scheme.premature_allowed ? 'Yes' : 'No',
-            premature_terms: scheme.premature_terms || '',
-            min_tenure_months: scheme.min_tenure_months || 0,
-            max_tenure_months: scheme.max_tenure_months || 0,
-            min_amount: scheme.min_amount || '',
-            max_amount: scheme.max_amount || '',
-            senior_citizen_bonus_bps: scheme.senior_citizen_bonus_bps || 0,
-            women_bonus_bps: scheme.women_bonus_bps || 0,
-            renewal_bonus_bps: scheme.renewal_bonus_bps || 0,
-            tds_applicable: scheme.tds_applicable ? 'Yes' : 'No',
-            show_form15g15h_option: scheme.show_form15g15h_option ? 'Yes' : 'No',
-            is_active: scheme.is_active !== false ? 'Yes' : 'No',
-            cc: scheme.cc || 0,
-            si: scheme.si || 0
+          const slabs = scheme.rate_slabs || []
+          slabs.forEach(slab => {
+            flattenedSlabs.push({
+              issuer_key: issuer._key,
+              issuer_legal_name: issuer.legal_name || '',
+              issuer_short_name: issuer.short_name || '',
+              scheme_id: scheme.scheme_id || '',
+              scheme_name: scheme.scheme_name || '',
+              slab_id: slab.slab_id || '',
+              tenure_min_months: slab.tenure_min_months ?? '',
+              tenure_max_months: slab.tenure_max_months ?? '',
+              payout_frequency_type: slab.payout_frequency_type || '',
+              base_interest_rate_pa: slab.base_interest_rate_pa ?? '',
+              compounding_frequency: slab.compounding_frequency || '',
+              effective_yield_pa: slab.effective_yield_pa ?? '',
+              notes_public_display: slab.notes_public_display || '',
+              is_active: slab.is_active !== false ? 'Yes' : 'No',
+              cc: slab.cc ?? 0,
+              si: slab.si ?? 0
+            })
           })
         })
       }
@@ -781,30 +777,23 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
     
     // Create workbook
     const workbook = new ExcelJS.Workbook()
-    const worksheet = workbook.addWorksheet('FD Schemes')
+    const worksheet = workbook.addWorksheet('FD Rate Slabs')
     
-    // Define columns with protection
+    // Define columns (one row per rate slab; CC/SI at slab level)
     worksheet.columns = [
       { header: 'Issuer Key', key: 'issuer_key', width: 20, protection: { locked: true } },
       { header: 'Issuer Legal Name', key: 'issuer_legal_name', width: 30, protection: { locked: true } },
       { header: 'Issuer Short Name', key: 'issuer_short_name', width: 25, protection: { locked: true } },
       { header: 'Scheme ID', key: 'scheme_id', width: 25, protection: { locked: true } },
       { header: 'Scheme Name', key: 'scheme_name', width: 40, protection: { locked: true } },
-      { header: 'Description', key: 'description_short', width: 40, protection: { locked: false } },
-      { header: 'Is Cumulative', key: 'is_cumulative', width: 15, protection: { locked: true } },
-      { header: 'Payout Frequency', key: 'payout_frequency_type', width: 30, protection: { locked: false } },
-      { header: 'Lock In (months)', key: 'lock_in_months', width: 15, protection: { locked: false } },
-      { header: 'Premature Allowed', key: 'premature_allowed', width: 18, protection: { locked: false } },
-      { header: 'Premature Terms', key: 'premature_terms', width: 40, protection: { locked: false } },
-      { header: 'Min Tenure (months)', key: 'min_tenure_months', width: 18, protection: { locked: false } },
-      { header: 'Max Tenure (months)', key: 'max_tenure_months', width: 18, protection: { locked: false } },
-      { header: 'Min Amount', key: 'min_amount', width: 15, protection: { locked: false } },
-      { header: 'Max Amount', key: 'max_amount', width: 15, protection: { locked: false } },
-      { header: 'Senior Citizen Bonus (bps)', key: 'senior_citizen_bonus_bps', width: 22, protection: { locked: false }, style: { numFmt: '0' } },
-      { header: 'Women Bonus (bps)', key: 'women_bonus_bps', width: 18, protection: { locked: false }, style: { numFmt: '0' } },
-      { header: 'Renewal Bonus (bps)', key: 'renewal_bonus_bps', width: 18, protection: { locked: false }, style: { numFmt: '0' } },
-      { header: 'TDS Applicable', key: 'tds_applicable', width: 15, protection: { locked: false } },
-      { header: 'Form 15G/15H Option', key: 'show_form15g15h_option', width: 20, protection: { locked: false } },
+      { header: 'Slab ID', key: 'slab_id', width: 20, protection: { locked: true } },
+      { header: 'Tenure Min (months)', key: 'tenure_min_months', width: 18, protection: { locked: false }, style: { numFmt: '0' } },
+      { header: 'Tenure Max (months)', key: 'tenure_max_months', width: 18, protection: { locked: false }, style: { numFmt: '0' } },
+      { header: 'Payout Frequency', key: 'payout_frequency_type', width: 22, protection: { locked: false } },
+      { header: 'Base Interest Rate (% p.a.)', key: 'base_interest_rate_pa', width: 22, protection: { locked: false }, style: { numFmt: '0.00' } },
+      { header: 'Compounding Frequency', key: 'compounding_frequency', width: 22, protection: { locked: false } },
+      { header: 'Effective Yield (% p.a.)', key: 'effective_yield_pa', width: 20, protection: { locked: false }, style: { numFmt: '0.00' } },
+      { header: 'Notes (public)', key: 'notes_public_display', width: 35, protection: { locked: false } },
       { header: 'Is Active', key: 'is_active', width: 12, protection: { locked: false } },
       { header: 'CC %', key: 'cc', width: 12, protection: { locked: false }, style: { numFmt: '0.00000' } },
       { header: 'SI %', key: 'si', width: 12, protection: { locked: false }, style: { numFmt: '0.00000' } }
@@ -820,46 +809,17 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
     worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' }
     
     // Add data rows
-    flattenedSchemes.forEach((scheme, index) => {
-      const row = worksheet.addRow(scheme)
-      
-      // Explicitly set protection for each cell
-      // Locked cells (protected)
-      for (let col = 1; col <= 5; col++) {
+    flattenedSlabs.forEach((slabRow) => {
+      const row = worksheet.addRow(slabRow)
+      for (let col = 1; col <= 6; col++) {
         row.getCell(col).protection = { locked: true }
-        row.getCell(col).fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: 'FFF5F5F5' }
-        }
+        row.getCell(col).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } }
       }
-      row.getCell(7).protection = { locked: true } // is_cumulative
-      row.getCell(7).fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FFF5F5F5' }
+      for (let col = 7; col <= 15; col++) {
+        row.getCell(col).protection = { locked: false }
       }
-      
-      // Unlocked cells (editable) - explicitly set to ensure they're editable
-      row.getCell(6).protection = { locked: false } // description_short
-      row.getCell(8).protection = { locked: false } // payout_frequency_type
-      row.getCell(9).protection = { locked: false } // lock_in_months
-      row.getCell(10).protection = { locked: false } // premature_allowed
-      row.getCell(11).protection = { locked: false } // premature_terms
-      row.getCell(12).protection = { locked: false } // min_tenure_months
-      row.getCell(13).protection = { locked: false } // max_tenure_months
-      row.getCell(14).protection = { locked: false } // min_amount
-      row.getCell(15).protection = { locked: false } // max_amount
-      row.getCell(16).protection = { locked: false } // senior_citizen_bonus_bps
-      row.getCell(17).protection = { locked: false } // women_bonus_bps
-      row.getCell(18).protection = { locked: false } // renewal_bonus_bps
-      row.getCell(19).protection = { locked: false } // tds_applicable
-      row.getCell(20).protection = { locked: false } // show_form15g15h_option
-      row.getCell(21).protection = { locked: false } // is_active
-      row.getCell(22).protection = { locked: false } // cc
-      row.getCell(22).numFmt = '0.00000' // CC with 5 decimal places
-      row.getCell(23).protection = { locked: false } // si
-      row.getCell(23).numFmt = '0.00000' // SI with 5 decimal places
+      row.getCell(14).numFmt = '0.00000'
+      row.getCell(15).numFmt = '0.00000'
     })
     
     // Protect worksheet but allow editing unlocked cells
@@ -885,7 +845,7 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
     ]
     
     // Set response headers
-    const filename = `fd-schemes-export-${issuer_key || 'all'}-${new Date().toISOString().split('T')[0]}.xlsx`
+    const filename = `fd-rate-slabs-export-${issuer_key || 'all'}-${new Date().toISOString().split('T')[0]}.xlsx`
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
     
@@ -897,7 +857,7 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
   }
 })
 
-// Import FD schemes from Excel
+// Import FD rate slabs from Excel (one row per slab; updates slab-level CC/SI and slab fields)
 router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, async (req, res) => {
   try {
     if (!req.file) {
@@ -918,7 +878,9 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
     const errors = []
     let rowNumber = 0
     
-    // Process each row (skip header)
+    // Columns: 1=issuer_key, 2=issuer_legal_name, 3=issuer_short_name, 4=scheme_id, 5=scheme_name, 6=slab_id,
+    // 7=tenure_min_months, 8=tenure_max_months, 9=payout_frequency_type, 10=base_interest_rate_pa,
+    // 11=compounding_frequency, 12=effective_yield_pa, 13=notes_public_display, 14=is_active, 15=cc, 16=si
     worksheet.eachRow((row, rowNum) => {
       rowNumber = rowNum
       if (rowNum === 1) return
@@ -926,83 +888,55 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
       try {
         const issuer_key = row.getCell(1).value?.toString()?.trim()
         const scheme_id = row.getCell(4).value?.toString()?.trim()
+        const slab_id = row.getCell(6).value?.toString()?.trim()
         
-        if (!issuer_key || !scheme_id) {
-          errors.push({ row: rowNum, error: 'Missing issuer_key or scheme_id' })
+        if (!issuer_key || !scheme_id || !slab_id) {
+          errors.push({ row: rowNum, error: 'Missing issuer_key, scheme_id or slab_id' })
           return
         }
         
-        // Extract updatable fields
-        const description_short = row.getCell(6).value?.toString()?.trim()
-        const payout_frequency_type = row.getCell(8).value?.toString()?.trim()
-        const lock_in_months = parseInt(row.getCell(9).value) || 0
-        const premature_allowed = row.getCell(10).value?.toString()?.toLowerCase()?.trim() === 'yes'
-        const premature_terms = row.getCell(11).value?.toString()?.trim()
-        const min_tenure_months = parseInt(row.getCell(12).value) || 0
-        const max_tenure_months = parseInt(row.getCell(13).value) || 0
-        const min_amount = row.getCell(14).value ? parseFloat(row.getCell(14).value) : null
-        const max_amount = row.getCell(15).value ? parseFloat(row.getCell(15).value) : null
-        const senior_citizen_bonus_bps = parseInt(row.getCell(16).value) || 0
-        const women_bonus_bps = parseInt(row.getCell(17).value) || 0
-        const renewal_bonus_bps = parseInt(row.getCell(18).value) || 0
-        const tds_applicable = row.getCell(19).value?.toString()?.toLowerCase()?.trim() === 'yes'
-        const show_form15g15h_option = row.getCell(20).value?.toString()?.toLowerCase()?.trim() === 'yes'
-        const is_active = row.getCell(21).value?.toString()?.toLowerCase()?.trim() === 'yes'
+        const tenure_min_months = row.getCell(7).value != null ? parseInt(row.getCell(7).value) : undefined
+        const tenure_max_months = row.getCell(8).value != null ? parseInt(row.getCell(8).value) : undefined
+        const payout_frequency_type = row.getCell(9).value?.toString()?.trim()
+        const base_interest_rate_pa = row.getCell(10).value != null ? parseFloat(row.getCell(10).value) : undefined
+        const compounding_frequency = row.getCell(11).value?.toString()?.trim() || null
+        const effective_yield_pa = row.getCell(12).value != null ? parseFloat(row.getCell(12).value) : undefined
+        const notes_public_display = row.getCell(13).value?.toString()?.trim()
+        const is_active = row.getCell(14).value?.toString()?.toLowerCase()?.trim() === 'yes'
         
         let cc = 0
-        const ccValue = row.getCell(22).value
-        if (typeof ccValue === 'number') {
-          cc = ccValue
-        } else if (typeof ccValue === 'string') {
-          cc = parseFloat(ccValue) || 0
-        }
+        const ccValue = row.getCell(15).value
+        if (typeof ccValue === 'number') cc = ccValue
+        else if (typeof ccValue === 'string') cc = parseFloat(ccValue) || 0
         
         let si = 0
-        const siValue = row.getCell(23).value
-        if (typeof siValue === 'number') {
-          si = siValue
-        } else if (typeof siValue === 'string') {
-          si = parseFloat(siValue) || 0
-        }
+        const siValue = row.getCell(16).value
+        if (typeof siValue === 'number') si = siValue
+        else if (typeof siValue === 'string') si = parseFloat(siValue) || 0
         
-        // Build update object
         const updateData = {}
-        
-        if (description_short !== undefined && description_short !== '') {
-          updateData.description_short = description_short
-        }
-        if (payout_frequency_type !== undefined && payout_frequency_type !== '') {
-          updateData.payout_frequency_type = payout_frequency_type.split(',').map(f => f.trim()).filter(f => f)
-        }
-        if (lock_in_months !== undefined) updateData.lock_in_months = lock_in_months
-        if (premature_allowed !== undefined) updateData.premature_allowed = premature_allowed
-        if (premature_terms !== undefined) updateData.premature_terms = premature_terms || ''
-        if (min_tenure_months !== undefined) updateData.min_tenure_months = min_tenure_months
-        if (max_tenure_months !== undefined) updateData.max_tenure_months = max_tenure_months
-        if (min_amount !== undefined && min_amount !== null) updateData.min_amount = min_amount
-        if (max_amount !== undefined && max_amount !== null) updateData.max_amount = max_amount
-        if (senior_citizen_bonus_bps !== undefined) updateData.senior_citizen_bonus_bps = senior_citizen_bonus_bps
-        if (women_bonus_bps !== undefined) updateData.women_bonus_bps = women_bonus_bps
-        if (renewal_bonus_bps !== undefined) updateData.renewal_bonus_bps = renewal_bonus_bps
-        if (tds_applicable !== undefined) updateData.tds_applicable = tds_applicable
-        if (show_form15g15h_option !== undefined) updateData.show_form15g15h_option = show_form15g15h_option
+        if (tenure_min_months !== undefined) updateData.tenure_min_months = tenure_min_months
+        if (tenure_max_months !== undefined) updateData.tenure_max_months = tenure_max_months
+        if (payout_frequency_type !== undefined && payout_frequency_type !== '') updateData.payout_frequency_type = payout_frequency_type
+        if (base_interest_rate_pa !== undefined) updateData.base_interest_rate_pa = base_interest_rate_pa
+        if (compounding_frequency !== undefined) updateData.compounding_frequency = compounding_frequency || null
+        if (effective_yield_pa !== undefined) updateData.effective_yield_pa = effective_yield_pa
+        if (notes_public_display !== undefined) updateData.notes_public_display = notes_public_display || ''
         if (is_active !== undefined) updateData.is_active = is_active
-        if (cc !== undefined) updateData.cc = cc
-        if (si !== undefined) updateData.si = si
+        updateData.cc = cc
+        updateData.si = si
         
-        updates.push({ issuer_key, scheme_id, updateData, row: rowNum })
+        updates.push({ issuer_key, scheme_id, slab_id, updateData, row: rowNum })
       } catch (err) {
         errors.push({ row: rowNum, error: `Parsing error: ${err.message}` })
       }
     })
     
-    // Batch update schemes
     let updated = 0
     let failed = 0
     
-    for (const { issuer_key, scheme_id, updateData, row } of updates) {
+    for (const { issuer_key, scheme_id, slab_id, updateData, row } of updates) {
       try {
-        // Get issuer
         const issuers = await q(`
           FOR issuer IN fd_issuers
           FILTER issuer._key == @issuer_key
@@ -1010,28 +944,32 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         `, { issuer_key })
         
         if (issuers.length === 0) {
-          errors.push({ row, issuer_key, scheme_id, error: 'Issuer not found' })
+          errors.push({ row, issuer_key, scheme_id, slab_id, error: 'Issuer not found' })
           failed++
           continue
         }
         
         const issuer = issuers[0]
         const schemeIndex = issuer.schemes?.findIndex(s => s.scheme_id === scheme_id)
-        
         if (schemeIndex === -1 || schemeIndex === undefined) {
-          errors.push({ row, issuer_key, scheme_id, error: 'Scheme not found' })
+          errors.push({ row, issuer_key, scheme_id, slab_id, error: 'Scheme not found' })
           failed++
           continue
         }
         
-        // Update scheme
-        const updatedSchemes = [...issuer.schemes]
-        updatedSchemes[schemeIndex] = {
-          ...updatedSchemes[schemeIndex],
-          ...updateData
+        const scheme = issuer.schemes[schemeIndex]
+        const slabIndex = scheme.rate_slabs?.findIndex(s => s.slab_id === slab_id)
+        if (slabIndex === -1 || slabIndex === undefined) {
+          errors.push({ row, issuer_key, scheme_id, slab_id, error: 'Rate slab not found' })
+          failed++
+          continue
         }
         
-        // Save updated issuer
+        const updatedSlabs = [...(scheme.rate_slabs || [])]
+        updatedSlabs[slabIndex] = { ...updatedSlabs[slabIndex], ...updateData }
+        const updatedSchemes = [...issuer.schemes]
+        updatedSchemes[schemeIndex] = { ...scheme, rate_slabs: updatedSlabs }
+        
         const collection = getCollection('fd_issuers')
         await collection.update(issuer_key, {
           schemes: updatedSchemes,
@@ -1040,7 +978,7 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         
         updated++
       } catch (err) {
-        errors.push({ row, issuer_key, scheme_id, error: err.message })
+        errors.push({ row, issuer_key, scheme_id, slab_id, error: err.message })
         failed++
       }
     }

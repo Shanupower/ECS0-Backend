@@ -1,7 +1,7 @@
 import express from 'express'
 import fs from 'fs'
 import path from 'path'
-import { q, getCollection, getUserBranch, normalizeBranchName } from '../config/database.js'
+import { q, getCollection, getUserBranch, normalizeBranchName, getBranchIdentifiersForFilter } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
 import { validateRequired, validatePositiveNumber, validateDate } from '../utils/validators.js'
@@ -146,21 +146,24 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     // If not provided and we have investment amount, calculate from scheme
     if (investmentAmount > 0 && collectionCredit === 0 && serviceIncome === 0) {
       try {
-        if (productCategory === 'MF' && d.scheme_code) {
-          // Fetch MF scheme to get CC and SI percentages
-          const mfSchemes = await q(`
-            FOR scheme IN mf_schemes
-            FILTER scheme.scheme_code == @scheme_code
-            LIMIT 1
-            RETURN { cc: scheme.cc || 0, si: scheme.si || 0 }
-          `, { scheme_code: d.scheme_code })
-          
-          if (mfSchemes.length > 0) {
-            const scheme = mfSchemes[0]
-            const ccPercent = parseFloat(scheme.cc || 0)
-            const siPercent = parseFloat(scheme.si || 0)
-            collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
-            serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+        if (productCategory === 'MF') {
+          // Use target scheme for CC/SI when present (e.g. STP target, Switch To scheme); else primary scheme
+          const schemeCodeForCcSi = d.stp_target_scheme_code || d.switch_to_scheme_code || d.scheme_code
+          if (schemeCodeForCcSi) {
+            const mfSchemes = await q(`
+              FOR scheme IN mf_schemes
+              FILTER scheme.scheme_code == @scheme_code
+              LIMIT 1
+              RETURN { cc: scheme.cc || 0, si: scheme.si || 0 }
+            `, { scheme_code: schemeCodeForCcSi })
+            
+            if (mfSchemes.length > 0) {
+              const scheme = mfSchemes[0]
+              const ccPercent = parseFloat(scheme.cc || 0)
+              const siPercent = parseFloat(scheme.si || 0)
+              collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+              serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+            }
           }
         } else if (productCategory === 'FD' && d.fd_issuer_key && d.fd_scheme_id) {
           // Fetch FD issuer/scheme to get CC and SI percentages.
@@ -212,7 +215,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
             }
           }
         } else if (productCategory === 'INS' && d.insurance_issuer_key && d.insurance_product_id) {
-          // Fetch insurance product to get CC and SI percentages
+          // Fetch insurance product to get CC and SI (optionally by Premium Payment Term / PPT slab)
           const insuranceIssuers = await q(`
             FOR issuer IN insurance_issuers
             FILTER issuer._key == @insurance_issuer_key
@@ -224,8 +227,35 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
             const issuer = insuranceIssuers[0]
             const product = issuer.products?.find(p => p.product_id === d.insurance_product_id)
             if (product) {
-              const ccPercent = parseFloat(product.cc || 0)
-              const siPercent = parseFloat(product.si || 0)
+              let ccPercent = parseFloat(product.cc || 0)
+              let siPercent = parseFloat(product.si || 0)
+              const pptSlabs = product.ppt_slabs && Array.isArray(product.ppt_slabs) ? product.ppt_slabs : []
+              const pptRaw = d.insurance_premium_payment_term ?? d.insurance_premium_payment_term_years ?? d.insurance_premium_pay_term ?? d.premium_payment_term
+              const pptStr = pptRaw != null ? String(pptRaw).trim().toLowerCase() : ''
+              const pptYears = typeof pptRaw === 'number' && !Number.isNaN(pptRaw) ? pptRaw : (parseInt(pptRaw, 10) || null)
+              if (pptSlabs.length > 0) {
+                const singleOrZero = pptStr === 'single premium' || pptStr === 'single' || pptYears === 0 || pptRaw === null || pptRaw === ''
+                const limitedPay = pptStr === 'limited pay' || pptStr === 'limited'
+                let slab = null
+                if (singleOrZero) {
+                  slab = pptSlabs.find(s => s.ppt_type === 'Single Premium')
+                } else if (limitedPay) {
+                  slab = pptSlabs.find(s => s.ppt_type === 'Limited Pay')
+                } else if (pptYears != null && !Number.isNaN(pptYears)) {
+                  slab = pptSlabs.find(s => {
+                    if (s.ppt_type !== 'PPT') return false
+                    const min = s.ppt_years_min != null ? Number(s.ppt_years_min) : null
+                    const max = s.ppt_years_max != null ? Number(s.ppt_years_max) : null
+                    if (min != null && pptYears < min) return false
+                    if (max != null && pptYears > max) return false
+                    return true
+                  })
+                }
+                if (slab) {
+                  ccPercent = parseFloat(slab.cc ?? product.cc ?? 0)
+                  siPercent = parseFloat(slab.si ?? product.si ?? 0)
+                }
+              }
               collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
               serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
             }
@@ -369,7 +399,12 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     
     // MF Details
     if (productCategory === 'MF') {
+      const validMfAmcCategories = ['MF', 'SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS']
+      const mfAmcCategory = (d.mf_amc_category && validMfAmcCategories.includes(d.mf_amc_category)) ? d.mf_amc_category : 'MF'
+      const mfAmcMinInvestment = d.mf_amc_category_min_investment != null ? parseFloat(d.mf_amc_category_min_investment) : null
       productDetails.mf = {
+        amc_category: mfAmcCategory,
+        min_investment: Number.isFinite(mfAmcMinInvestment) ? mfAmcMinInvestment : null,
         amc: {
           code: d.amc_code || null,
           name: d.amc_name || null
@@ -591,7 +626,9 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       plan: d.scheme_plan || null,
       option: d.scheme_option || null,
       type: d.scheme_type || null,
-      is_nfo: d.scheme_is_nfo || null
+      is_nfo: d.scheme_is_nfo || null,
+      amc_category: (d.mf_amc_category && ['MF', 'SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS'].includes(d.mf_amc_category)) ? d.mf_amc_category : 'MF',
+      min_investment: d.mf_amc_category_min_investment != null ? parseFloat(d.mf_amc_category_min_investment) : null
     } : null
 
     const fdDetails = productCategory === 'FD' ? {
@@ -620,7 +657,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       renewal_additional_amount: d.fd_renewal_additional_amount || null
     } : null
 
-    // Build structured receipt document
+    // Build structured receipt document — nested tree only; stats/list use product.category, transaction.amount, etc.
     const receiptEmpCode = d.empCode || d.emp_code || req.user.emp_code || null
     const receiptDoc = {
       // ============================================
@@ -636,9 +673,9 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       updated_at: null,
       is_deleted: false,
       deleted_at: null,
-      
+
       // ============================================
-      // STRUCTURED SECTIONS (Clean structure only)
+      // STRUCTURED SECTIONS (nested tree — single source of truth)
       // ============================================
       employee: employee,
       investor: investor,
@@ -715,19 +752,25 @@ function withNormalizedDetails(receipt) {
   if (!receipt) return receipt
   const normalized = { ...receipt }
 
-  // Backfill mf_details for legacy MF receipts
+  // Backfill mf_details for legacy MF receipts (from flat or product_details.mf)
   if (!normalized.mf_details && normalized.product_category === 'MF') {
+    const mf = normalized.product_details?.mf
+    const validMfAmc = ['MF', 'SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS']
+    const amcCat = (normalized.mf_amc_category && validMfAmc.includes(normalized.mf_amc_category)) ? normalized.mf_amc_category : (mf?.amc_category && validMfAmc.includes(mf.amc_category) ? mf.amc_category : 'MF')
+    const minInv = normalized.mf_amc_category_min_investment ?? mf?.min_investment ?? null
     normalized.mf_details = {
-      amc_code: normalized.amc_code || null,
-      amc_name: normalized.amc_name || null,
-      scheme_code: normalized.scheme_code || null,
-      scheme_name: normalized.scheme_name || null,
-      category: normalized.scheme_category || null,
-      sub_category: normalized.scheme_sub_category || null,
-      plan: normalized.scheme_plan || null,
-      option: normalized.scheme_option || null,
-      type: normalized.scheme_type || null,
-      is_nfo: normalized.scheme_is_nfo || null
+      amc_code: normalized.amc_code ?? mf?.amc?.code ?? null,
+      amc_name: normalized.amc_name ?? mf?.amc?.name ?? null,
+      scheme_code: normalized.scheme_code ?? mf?.scheme?.code ?? null,
+      scheme_name: normalized.scheme_name ?? mf?.scheme?.name ?? null,
+      category: normalized.scheme_category ?? mf?.scheme?.category ?? null,
+      sub_category: normalized.scheme_sub_category ?? mf?.scheme?.sub_category ?? null,
+      plan: normalized.scheme_plan ?? mf?.scheme?.plan ?? null,
+      option: normalized.scheme_option ?? null,
+      type: normalized.scheme_type ?? mf?.scheme?.type ?? null,
+      is_nfo: normalized.scheme_is_nfo ?? mf?.scheme?.is_nfo ?? null,
+      amc_category: amcCat,
+      min_investment: minInv != null ? parseFloat(minInv) : null
     }
   }
 
@@ -760,9 +803,27 @@ function withNormalizedDetails(receipt) {
     }
   }
 
-  // Ensure transaction_details exists as an object for consumers that expect it
-  if (!normalized.transaction_details) {
-    normalized.transaction_details = null
+  // Backfill flat fields from nested tree so list/export/PDF can use them (we store only nested)
+  const inv = normalized.investor
+  if (inv && typeof inv === 'object') {
+    if (normalized.investor_id == null) normalized.investor_id = inv.id ?? null
+    if (normalized.investor_name == null) normalized.investor_name = inv.name ?? null
+  }
+  const prod = normalized.product
+  if (prod && typeof prod === 'object') {
+    if (normalized.product_category == null) normalized.product_category = prod.category ?? null
+  }
+  const txn = normalized.transaction
+  if (txn && typeof txn === 'object' && normalized.investment_amount == null && txn.amount != null) {
+    normalized.investment_amount = txn.amount
+  }
+  if (normalized.product_details?.fd?.deposit?.amount != null && normalized.fd_deposit_amount == null) {
+    normalized.fd_deposit_amount = normalized.product_details.fd.deposit.amount
+  }
+  const mfPd = normalized.product_details?.mf
+  if (mfPd && typeof mfPd === 'object' && normalized.product_category === 'MF') {
+    if (normalized.mf_amc_category == null && mfPd.amc_category != null) normalized.mf_amc_category = mfPd.amc_category
+    if (normalized.mf_amc_category_min_investment == null && mfPd.min_investment != null) normalized.mf_amc_category_min_investment = mfPd.min_investment
   }
 
   // Flatten payment onto root so consumers (view page, list, PDF) always get entry_mode, reference_no, etc.
@@ -808,10 +869,13 @@ router.get('/recent', requireAuth, async (req, res) => {
       bindVars.user_id = String(req.user.sub)
     } else if (req.user.role === 'manager') {
       const userBranch = await getUserBranch(req.user.sub)
-      const normalizedBranch = normalizeBranchName(userBranch)
-      if (normalizedBranch) {
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
         filterConditions.push('receipt.branch == @branch')
-        bindVars.branch = normalizedBranch
+        bindVars.branch = normalizeBranchName(userBranch) || userBranch
       }
     }
 
@@ -865,10 +929,10 @@ router.get('/check-duplicate', requireAuth, async (req, res) => {
 
     const filterConditions = [
       'receipt.is_deleted == false',
-      'receipt.investor_id == @investor_id',
-      'receipt.product_category == @product_category',
+      '((receipt.investor != null && receipt.investor.id == @investor_id) OR receipt.investor_id == @investor_id)',
+      '((receipt.product != null && receipt.product.category == @product_category) OR receipt.product_category == @product_category)',
       'receipt.date == @date',
-      'ABS(TO_NUMBER(receipt.investment_amount) - @investment_amount) <= 1'
+      'ABS((TO_NUMBER(receipt.transaction.amount) != null ? TO_NUMBER(receipt.transaction.amount) : (TO_NUMBER(receipt.investment_amount) != null ? TO_NUMBER(receipt.investment_amount) : (TO_NUMBER(receipt.fd_deposit_amount) || 0))) - @investment_amount) <= 1'
     ]
 
     if (scheme_code) {
@@ -955,7 +1019,7 @@ router.get('/summary', requireAuth, async (req, res) => {
 
     // Category filter
     if (category) {
-      filterConditions.push('receipt.product_category == @category')
+      filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
       bindVars.category = category
     }
 
@@ -977,36 +1041,58 @@ router.get('/summary', requireAuth, async (req, res) => {
       bindVars.emp_code = emp_code
     }
 
-    // Branch code filter
+    // Branch code filter (admin) - match by code, name, or key
     if (branch_code) {
-      filterConditions.push('receipt.branch == @branch_code')
-      bindVars.branch_code = branch_code
+      const branchIdentifiers = await getBranchIdentifiersForFilter(branch_code)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else {
+        filterConditions.push('receipt.branch == @branch_code')
+        bindVars.branch_code = branch_code
+      }
     }
 
     // Search filter (investor name, investor ID, or receipt number)
     if (search) {
-      filterConditions.push('(LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true) || LIKE(receipt.investor_id, CONCAT("%", @search, "%"), true) || LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true))')
+      filterConditions.push('(LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true) OR (receipt.investor != null && (LIKE(receipt.investor.name, CONCAT("%", @search, "%"), true) || LIKE(receipt.investor.id, CONCAT("%", @search, "%"), true))) OR LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true) OR LIKE(receipt.investor_id, CONCAT("%", @search, "%"), true))')
       bindVars.search = search
     }
 
-    // User access control
+    // User access control - same scope as list and dashboard
     if (req.user.role === 'employee' && req.user.emp_code) {
       filterConditions.push('receipt.emp_code == @user_emp_code')
       bindVars.user_emp_code = req.user.emp_code
+    } else if (req.user.role === 'manager') {
+      const userBranch = await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizeBranchName(userBranch) || userBranch
+      }
     } else if (req.user.role === 'branch' && req.user.branch_code) {
-      filterConditions.push('receipt.branch == @user_branch_code')
-      bindVars.user_branch_code = req.user.branch_code
+      const branchIdentifiers = await getBranchIdentifiersForFilter(req.user.branch_code)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else {
+        filterConditions.push('receipt.branch == @user_branch_code')
+        bindVars.user_branch_code = req.user.branch_code
+      }
     }
 
     const filterClause = filterConditions.length > 0 ? `FILTER ${filterConditions.join(' AND ')}` : ''
 
-    // Calculate summary statistics
+    // Calculate summary statistics (category and amount from nested tree first)
     const summary = await q(`
       FOR receipt IN receipts
       ${filterClause}
       LET status_val = receipt.status != null ? receipt.status : "Pending"
-      LET category_val = receipt.product_category
-      LET inv_amount = TO_NUMBER(receipt.investment_amount) != null ? TO_NUMBER(receipt.investment_amount) : (TO_NUMBER(receipt.fd_deposit_amount) != null ? TO_NUMBER(receipt.fd_deposit_amount) : 0)
+      LET category_val = (receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : (receipt.product_category != null && receipt.product_category != "" ? receipt.product_category : "Other")
+      LET inv_amount = (TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0)
       COLLECT status = status_val, category = category_val
       AGGREGATE 
         total_count = LENGTH(1),
@@ -1021,11 +1107,11 @@ router.get('/summary', requireAuth, async (req, res) => {
       }
     `, bindVars)
 
-    // Calculate overall totals
+    // Calculate overall totals (amount from nested first)
     const totals = await q(`
       FOR receipt IN receipts
       ${filterClause}
-      LET inv_amount = TO_NUMBER(receipt.investment_amount) != null ? TO_NUMBER(receipt.investment_amount) : (TO_NUMBER(receipt.fd_deposit_amount) != null ? TO_NUMBER(receipt.fd_deposit_amount) : 0)
+      LET inv_amount = (TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0)
       COLLECT WITH COUNT INTO total_count
       AGGREGATE 
         total_investment = SUM(inv_amount),
@@ -1131,7 +1217,7 @@ router.get('/', requireAuth, async (req, res) => {
     }
 
     if (category) {
-      filterConditions.push('receipt.product_category == @category')
+      filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
       bindVars.category = category
     }
     if (status) {
@@ -1163,25 +1249,58 @@ router.get('/', requireAuth, async (req, res) => {
       bindVars.issuer = `%${issuer}%`
     }
 
-    // Branch filter (for admins)
+    // Branch filter (for admins) - match by branch code, name, or key
     if (branch_code && req.user.role === 'admin') {
-      filterConditions.push('receipt.branch == @branch_code')
-      bindVars.branch_code = branch_code
+      const branchIdentifiers = await getBranchIdentifiersForFilter(branch_code)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else {
+        filterConditions.push('receipt.branch == @branch_code')
+        bindVars.branch_code = branch_code
+      }
     }
 
     // Search filter (investor name/ID or receipt ID)
     if (search && search.trim().length > 0) {
       const searchTerm = `%${search.trim()}%`
-      filterConditions.push('(receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search OR receipt.receipt_no LIKE @search)')
+      filterConditions.push('(receipt.receipt_no LIKE @search OR (receipt.investor != null && (receipt.investor.name LIKE @search OR receipt.investor.id LIKE @search)) OR receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search)')
       bindVars.search = searchTerm
     }
 
     if (req.user.role === 'employee') {
       filterConditions.push('receipt.user_id == @user_id')
-      bindVars.user_id = req.user.sub
+      bindVars.user_id = String(req.user.sub)
+    } else if (req.user.role === 'manager') {
+      const userBranch = await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizeBranchName(userBranch) || userBranch
+      }
+    } else if (req.user.role === 'branch') {
+      const userBranch = req.user.branch_code || req.user.branch
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizeBranchName(userBranch) || userBranch
+      }
     } else if (emp_code) {
-      filterConditions.push('receipt.emp_code == @emp_code')
-      bindVars.emp_code = emp_code
+      // Admin viewing personal / emp filter: match list to dashboard (user_id OR emp_code)
+      if (req.user.role === 'admin' && req.user.emp_code === emp_code) {
+        filterConditions.push('(receipt.user_id == @user_id OR receipt.emp_code == @emp_code)')
+        bindVars.user_id = String(req.user.sub)
+        bindVars.emp_code = emp_code
+      } else {
+        filterConditions.push('receipt.emp_code == @emp_code')
+        bindVars.emp_code = emp_code
+      }
     }
 
     // only admins can include deleted
@@ -1287,7 +1406,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
 
     // Category filter
     if (category) {
-      filterConditions.push('receipt.product_category == @category')
+      filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
       bindVars.category = category
     }
 
@@ -1311,7 +1430,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
     // Search filter (investor name/ID or receipt ID)
     if (search && search.trim().length > 0) {
       const searchTerm = `%${search.trim()}%`
-      filterConditions.push('(receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search OR receipt.receipt_no LIKE @search)')
+      filterConditions.push('(receipt.receipt_no LIKE @search OR (receipt.investor != null && (receipt.investor.name LIKE @search OR receipt.investor.id LIKE @search)) OR receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search)')
       bindVars.search = searchTerm
     }
 
@@ -1534,6 +1653,75 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     
   } catch (error) {
     console.error('Error updating receipt status:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// Add or update additional CC/SI bonus on a receipt
+router.put('/:id/bonus', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const id = req.params.id
+    const { additional_cc = 0, additional_si = 0 } = req.body || {}
+
+    // Load current receipt
+    const rows = await q(`
+      FOR receipt IN receipts
+      FILTER receipt._key == @id
+      LIMIT 1
+      RETURN receipt
+    `, { id })
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'not_found', detail: 'Receipt not found' })
+    }
+
+    const receipt = rows[0]
+
+    // Derive base CC/SI amounts (excluding any existing additional bonus)
+    const baseCC =
+      (typeof receipt.total_cc === 'number' && receipt.total_cc !== 0)
+        ? Number(receipt.total_cc)
+        : (typeof receipt.cc_amount === 'number' && receipt.cc_amount !== 0)
+          ? Number(receipt.cc_amount)
+          : (receipt.collection_credit != null || receipt.cc != null)
+            ? Number(receipt.collection_credit || receipt.cc || 0)
+            : (receipt.calculations && (receipt.calculations.collection_credit != null || receipt.calculations.cc != null))
+              ? Number(receipt.calculations.collection_credit || receipt.calculations.cc || 0)
+              : 0
+
+    const baseSI =
+      (typeof receipt.total_si === 'number' && receipt.total_si !== 0)
+        ? Number(receipt.total_si)
+        : (typeof receipt.si_amount === 'number' && receipt.si_amount !== 0)
+          ? Number(receipt.si_amount)
+          : (receipt.service_income != null || receipt.si != null)
+            ? Number(receipt.service_income || receipt.si || 0)
+            : (receipt.calculations && (receipt.calculations.service_income != null || receipt.calculations.si != null))
+              ? Number(receipt.calculations.service_income || receipt.calculations.si || 0)
+              : 0
+
+    const addCC = Number(additional_cc) || 0
+    const addSI = Number(additional_si) || 0
+
+    const updates = {
+      additional_cc: addCC,
+      additional_si: addSI,
+      cc_amount: baseCC,
+      si_amount: baseSI,
+      total_cc: baseCC + addCC,
+      total_si: baseSI + addSI
+    }
+
+    await q(`
+      FOR receipt IN receipts
+      FILTER receipt._key == @id
+      UPDATE receipt WITH @updates IN receipts
+      RETURN NEW
+    `, { id, updates })
+
+    res.status(200).json({ message: 'Bonus updated successfully', receipt_id: id, additional_cc: addCC, additional_si: addSI })
+  } catch (error) {
+    console.error('Error updating receipt bonus:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })

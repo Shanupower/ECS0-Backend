@@ -59,11 +59,19 @@ function checkETFIDCWWarning(category, subCategory, option) {
   return isETF && isIDCW ? ['IDCW not typical for ETF/Index schemes'] : []
 }
 
+// Valid MF AMC category values (MF, SIF, PMS, AIF, GIFT_CITY_FUNDS). Default for existing schemes: MF.
+const VALID_AMC_CATEGORIES = ['MF', 'SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS']
+function normalizeAmcCategory(val) {
+  if (val == null || val === '') return 'MF'
+  const v = String(val).trim()
+  return VALID_AMC_CATEGORIES.includes(v) ? v : 'MF'
+}
+
 // ===================================
 // GET ROUTES (Everyone can access)
 // ===================================
 
-// List all AMCs
+// List all AMCs (amc_category and min_investment default to MF / null for legacy)
 router.get('/amcs', async (req, res) => {
   try {
     const amcs = await q(`
@@ -71,31 +79,55 @@ router.get('/amcs', async (req, res) => {
       SORT amc.amc_name
       RETURN amc
     `)
-    
-    res.json(amcs)
+    const normalized = amcs.map(a => ({
+      ...a,
+      amc_category: a.amc_category && VALID_AMC_CATEGORIES.includes(a.amc_category) ? a.amc_category : 'MF',
+      min_investment: a.min_investment != null ? a.min_investment : null
+    }))
+    res.json(normalized)
   } catch (error) {
     console.error('Error fetching AMCs:', error)
     res.status(500).json({ error: 'Failed to fetch AMCs' })
   }
 })
 
-// Get schemes by AMC code (filter out expired NFOs)
+// Get schemes by AMC code (filter out expired NFOs). Enrich with AMC's amc_category and min_investment.
+// Optional query: ?amc_category=MF|SIF|PMS|AIF|GIFT_CITY_FUNDS to filter by category.
 router.get('/amc/:amc_code', async (req, res) => {
   try {
     const { amc_code } = req.params
-    const today = new Date().toISOString().split('T')[0] // Get date in YYYY-MM-DD format
-    
-    // Automatically expire NFOs that have passed their validity date
+    const amc_category_filter = req.query.amc_category ? normalizeAmcCategory(req.query.amc_category) : null
+    const today = new Date().toISOString().split('T')[0]
+
     await expireNFOs()
-    
-    const schemes = await q(`
+
+    const amcList = await q(`
+      FOR amc IN amcs
+      FILTER amc.amc_code == @amc_code
+      LIMIT 1
+      RETURN amc
+    `, { amc_code })
+    const amc = amcList[0] || null
+    const amcCategory = amc?.amc_category && VALID_AMC_CATEGORIES.includes(amc.amc_category) ? amc.amc_category : 'MF'
+    const amcMinInvestment = amc?.min_investment != null ? amc.min_investment : null
+
+    let schemes = await q(`
       FOR scheme IN mf_schemes
       FILTER scheme.amc_code == @amc_code
       FILTER (scheme.is_nfo == false OR scheme.is_nfo == true AND scheme.nfo_validity >= @today)
       SORT scheme.scheme_name
       RETURN scheme
     `, { amc_code, today })
-    
+
+    schemes = schemes.map(s => ({
+      ...s,
+      amc_category: s.amc_category && VALID_AMC_CATEGORIES.includes(s.amc_category) ? s.amc_category : amcCategory,
+      min_investment: s.min_investment != null ? s.min_investment : amcMinInvestment
+    }))
+    if (amc_category_filter) {
+      schemes = schemes.filter(s => s.amc_category === amc_category_filter)
+    }
+
     res.json(schemes)
   } catch (error) {
     console.error('Error fetching schemes:', error)
@@ -122,7 +154,9 @@ router.get('/:scheme_code', async (req, res) => {
       return res.status(404).json({ error: 'Scheme not found' })
     }
     
-    res.json(schemes[0])
+    const scheme = schemes[0]
+    const out = { ...scheme, amc_category: scheme.amc_category && VALID_AMC_CATEGORIES.includes(scheme.amc_category) ? scheme.amc_category : 'MF' }
+    res.json(out)
   } catch (error) {
     console.error('Error fetching scheme:', error)
     res.status(500).json({ error: 'Failed to fetch scheme' })
@@ -133,35 +167,39 @@ router.get('/:scheme_code', async (req, res) => {
 // CREATE ROUTES (Admin only)
 // ===================================
 
-// Create AMC
+// Create AMC (amc_category = type, min_investment editable, default from category)
 router.post('/amc', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const { amc_name, amc_code } = req.body
-    
+    const { amc_name, amc_code, amc_category: amcCategoryRaw, min_investment } = req.body
+
     if (!amc_name || !amc_code) {
       return res.status(400).json({ error: 'amc_name and amc_code are required' })
     }
-    
-    // Check if AMC code already exists
+
+    const amc_category = normalizeAmcCategory(amcCategoryRaw)
+
     const existing = await q(`
       FOR amc IN amcs
       FILTER amc.amc_code == @amc_code
       LIMIT 1
       RETURN amc
     `, { amc_code })
-    
+
     if (existing.length > 0) {
       return res.status(400).json({ error: 'AMC code already exists' })
     }
-    
+
     const amcsCollection = getCollection('amcs')
-    const result = await amcsCollection.save({
+    const payload = {
       _key: amc_code,
       amc_name,
       amc_code,
+      amc_category,
+      min_investment: min_investment != null && min_investment !== '' ? Number(min_investment) : null,
       created_at: new Date().toISOString()
-    })
-    
+    }
+    const result = await amcsCollection.save(payload)
+
     res.status(201).json({ id: result._key, message: 'AMC created successfully' })
   } catch (error) {
     console.error('Error creating AMC:', error)
@@ -179,6 +217,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       amc_name,
       category,
       sub_category,
+      amc_category: amcCategoryRaw,
       plan,
       option,
       base_name,
@@ -192,6 +231,8 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
     if (!scheme_code || !scheme_name || !amc_code || !amc_name) {
       return res.status(400).json({ error: 'scheme_code, scheme_name, amc_code, and amc_name are required' })
     }
+    
+    const amc_category = normalizeAmcCategory(amcCategoryRaw)
     
     // Check if scheme code already exists
     const existing = await q(`
@@ -220,6 +261,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       amc_name,
       category,
       sub_category,
+      amc_category,
       plan: plan || 'REGULAR',
       option: option || 'GROWTH',
       type,
@@ -273,6 +315,14 @@ router.post('/expand-preview', requireAuth, requireRole('admin'), async (req, re
     for (const plan of plans) {
       for (const option of options) {
         const displayName = generateDisplayName(base_name, plan, option)
+
+        // Normalize CC/SI values from variant (if provided)
+        const ccVal = variant.cc !== undefined && variant.cc !== null
+          ? Number(variant.cc)
+          : null
+        const siVal = variant.si !== undefined && variant.si !== null
+          ? Number(variant.si)
+          : null
         const comboKey = `${plan}|${option}`
         const proposedCode = proposedAmfiCodes?.[comboKey] || ''
         
@@ -320,11 +370,14 @@ router.post('/commit-variants', requireAuth, requireRole('admin'), async (req, r
       base_name,
       category,
       sub_category,
+      amc_category: amcCategoryRaw,
       type,
       is_nfo,
       nfo_validity,
       variants
     } = req.body
+    
+    const amc_category = normalizeAmcCategory(amcCategoryRaw)
     
     // Validation
     if (!amc_code || !amc_name || !base_name) {
@@ -393,11 +446,14 @@ router.post('/commit-variants', requireAuth, requireRole('admin'), async (req, r
           amc_name,
           category: category || '',
           sub_category: sub_category || '',
+          amc_category: normalizeAmcCategory(amc_category),
           plan,
           option,
           type: type || 'OPEN_ENDED',
           nav_latest: 0,
           nav_date: null,
+          cc: ccVal,
+          si: siVal,
           is_nfo: is_nfo || false,
           nfo_validity: is_nfo ? nfo_validity : null,
           is_active: is_nfo ? false : true, // NFO schemes start as inactive
@@ -590,22 +646,27 @@ router.get('/check-duplicate', requireAuth, requireRole('admin'), async (req, re
 // UPDATE ROUTES (Admin only)
 // ===================================
 
-// Update AMC
+// Update AMC (amc_category = type, min_investment editable)
 router.put('/amc/:amc_code', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const { amc_code } = req.params
-    const { amc_name } = req.body
-    
+    const { amc_name, amc_category: amcCategoryRaw, min_investment } = req.body
+
     if (!amc_name) {
       return res.status(400).json({ error: 'amc_name is required' })
     }
-    
-    const amcsCollection = getCollection('amcs')
-    const result = await amcsCollection.update(amc_code, {
+
+    const amc_category = amcCategoryRaw != null ? normalizeAmcCategory(amcCategoryRaw) : undefined
+    const updatePayload = {
       amc_name,
       updated_at: new Date().toISOString()
-    })
-    
+    }
+    if (amc_category !== undefined) updatePayload.amc_category = amc_category
+    if (min_investment !== undefined) updatePayload.min_investment = min_investment != null && min_investment !== '' ? Number(min_investment) : null
+
+    const amcsCollection = getCollection('amcs')
+    const result = await amcsCollection.update(amc_code, updatePayload)
+
     res.json({ message: 'AMC updated successfully', result })
   } catch (error) {
     console.error('Error updating AMC:', error)
@@ -622,6 +683,7 @@ router.put('/:scheme_code', requireAuth, requireRole('admin'), async (req, res) 
       base_name,
       category,
       sub_category,
+      amc_category: amcCategoryRaw,
       plan,
       option,
       type,
@@ -641,6 +703,7 @@ router.put('/:scheme_code', requireAuth, requireRole('admin'), async (req, res) 
     if (base_name !== undefined) updateData.base_name = base_name
     if (category !== undefined) updateData.category = category
     if (sub_category !== undefined) updateData.sub_category = sub_category
+    if (amcCategoryRaw !== undefined) updateData.amc_category = normalizeAmcCategory(amcCategoryRaw)
     if (plan !== undefined) updateData.plan = plan
     if (option !== undefined) updateData.option = option
     if (type !== undefined) updateData.type = type
@@ -813,6 +876,7 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       { header: 'Option', key: 'option', width: 20, protection: { locked: true } },
       { header: 'Category', key: 'category', width: 20, protection: { locked: false } },
       { header: 'Sub Category', key: 'sub_category', width: 25, protection: { locked: false } },
+      { header: 'AMC Category', key: 'amc_category', width: 18, protection: { locked: false } },
       { header: 'Type', key: 'type', width: 15, protection: { locked: false } },
       { header: 'NAV Latest', key: 'nav_latest', width: 15, protection: { locked: false }, style: { numFmt: '#,##0.0000' } },
       { header: 'NAV Date', key: 'nav_date', width: 15, protection: { locked: false } },
@@ -844,6 +908,7 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
         option: scheme.option || 'GROWTH',
         category: scheme.category || '',
         sub_category: scheme.sub_category || '',
+        amc_category: scheme.amc_category && VALID_AMC_CATEGORIES.includes(scheme.amc_category) ? scheme.amc_category : 'MF',
         type: scheme.type || 'OPEN_ENDED',
         nav_latest: scheme.nav_latest || 0,
         nav_date: scheme.nav_date ? new Date(scheme.nav_date).toLocaleDateString('en-IN') : '',
@@ -867,16 +932,17 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       // Unlocked cells (editable) - explicitly set
       row.getCell(8).protection = { locked: false } // category
       row.getCell(9).protection = { locked: false } // sub_category
-      row.getCell(10).protection = { locked: false } // type
-      row.getCell(11).protection = { locked: false } // nav_latest
-      row.getCell(12).protection = { locked: false } // nav_date
-      row.getCell(13).protection = { locked: false } // cc
-      row.getCell(13).numFmt = '0.00000' // CC with 5 decimal places
-      row.getCell(14).protection = { locked: false } // si
-      row.getCell(14).numFmt = '0.00000' // SI with 5 decimal places
-      row.getCell(15).protection = { locked: false } // is_active
-      row.getCell(16).protection = { locked: false } // is_nfo
-      row.getCell(17).protection = { locked: false } // nfo_validity
+      row.getCell(10).protection = { locked: false } // amc_category
+      row.getCell(11).protection = { locked: false } // type
+      row.getCell(12).protection = { locked: false } // nav_latest
+      row.getCell(13).protection = { locked: false } // nav_date
+      row.getCell(14).protection = { locked: false } // cc
+      row.getCell(14).numFmt = '0.00000' // CC with 5 decimal places
+      row.getCell(15).protection = { locked: false } // si
+      row.getCell(15).numFmt = '0.00000' // SI with 5 decimal places
+      row.getCell(16).protection = { locked: false } // is_active
+      row.getCell(17).protection = { locked: false } // is_nfo
+      row.getCell(18).protection = { locked: false } // nfo_validity
       
       // Add light gray background to locked cells
       for (let col = 1; col <= 7; col++) {
@@ -956,14 +1022,15 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
           return
         }
         
-        // Extract only updatable fields (columns 8-17)
+        // Extract only updatable fields (columns 8-18; 10 = amc_category)
         const category = row.getCell(8).value?.toString()?.trim()
         const sub_category = row.getCell(9).value?.toString()?.trim()
-        const type = row.getCell(10).value?.toString()?.trim()
+        const amc_category = row.getCell(10).value?.toString()?.trim()
+        const type = row.getCell(11).value?.toString()?.trim()
         
         // Parse numeric values
         let nav_latest = 0
-        const navLatestValue = row.getCell(11).value
+        const navLatestValue = row.getCell(12).value
         if (typeof navLatestValue === 'number') {
           nav_latest = navLatestValue
         } else if (typeof navLatestValue === 'string') {
@@ -972,7 +1039,7 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         
         // Parse NAV date
         let nav_date = undefined
-        const navDateValue = row.getCell(12).value
+        const navDateValue = row.getCell(13).value
         if (navDateValue) {
           if (navDateValue instanceof Date) {
             nav_date = navDateValue.toISOString().split('T')[0]
@@ -991,7 +1058,7 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         
         // Parse CC and SI
         let cc = 0
-        const ccValue = row.getCell(13).value
+        const ccValue = row.getCell(14).value
         if (typeof ccValue === 'number') {
           cc = ccValue
         } else if (typeof ccValue === 'string') {
@@ -999,7 +1066,7 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         }
         
         let si = 0
-        const siValue = row.getCell(14).value
+        const siValue = row.getCell(15).value
         if (typeof siValue === 'number') {
           si = siValue
         } else if (typeof siValue === 'string') {
@@ -1007,15 +1074,15 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         }
         
         // Parse boolean values
-        const isActiveValue = row.getCell(15).value?.toString()?.toLowerCase()?.trim()
+        const isActiveValue = row.getCell(16).value?.toString()?.toLowerCase()?.trim()
         const is_active = isActiveValue === 'yes' || isActiveValue === 'true' || isActiveValue === '1'
         
-        const isNfoValue = row.getCell(16).value?.toString()?.toLowerCase()?.trim()
+        const isNfoValue = row.getCell(17).value?.toString()?.toLowerCase()?.trim()
         const is_nfo = isNfoValue === 'yes' || isNfoValue === 'true' || isNfoValue === '1'
         
         // Parse NFO validity date
         let nfo_validity = undefined
-        const nfoValidityValue = row.getCell(17).value
+        const nfoValidityValue = row.getCell(18).value
         if (nfoValidityValue && is_nfo) {
           if (nfoValidityValue instanceof Date) {
             nfo_validity = nfoValidityValue.toISOString().split('T')[0]
@@ -1044,6 +1111,9 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         }
         if (sub_category !== undefined && sub_category !== null && sub_category !== '') {
           updateData.sub_category = sub_category
+        }
+        if (amc_category !== undefined && amc_category !== null && amc_category !== '') {
+          updateData.amc_category = normalizeAmcCategory(amc_category)
         }
         if (type !== undefined && type !== null && type !== '') {
           updateData.type = type

@@ -85,4 +85,34 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 })
 
+// Delete a receipt draft (admin or owner)
+router.delete('/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+    await ensureDraftsCollection()
+
+    const drafts = await q(`
+      FOR draft IN receipt_drafts
+      FILTER draft._key == @id
+      LIMIT 1
+      RETURN draft
+    `, { id })
+
+    if (!drafts.length) {
+      return res.status(404).json({ error: 'not_found', detail: 'Draft not found' })
+    }
+
+    const draft = drafts[0]
+    if (req.user.role !== 'admin' && draft.created_by !== req.user.sub) {
+      return res.status(403).json({ error: 'forbidden', detail: 'Access denied' })
+    }
+
+    await getCollection('receipt_drafts').remove(id)
+    res.status(204).end()
+  } catch (error) {
+    console.error('Error deleting receipt draft:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to delete receipt draft' })
+  }
+})
+
 export default router

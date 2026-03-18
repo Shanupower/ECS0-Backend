@@ -1,10 +1,47 @@
 import express from 'express'
-import { q, getCollection, getUserBranch, normalizeBranchName, canAccessCustomer } from '../config/database.js'
+import fs from 'fs'
+import path from 'path'
+import { q, getCollection, getUserBranch, normalizeBranchName, getCanonicalBranchKey, canAccessCustomer } from '../config/database.js'
 import { requireAuth } from '../middleware/auth.js'
-import { uploadMultiple } from '../middleware/upload.js'
+import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
 import { validatePAN, validateEmail, validateMobile, validateAadhar, validatePIN, validateRequired, validateMinorsArray } from '../utils/validators.js'
 
 const router = express.Router()
+
+// Build branch filter for customer queries: prefer customer.branches[] with canonical key; fallback to relationship_manager
+async function getBranchFilterForCustomer(userId) {
+  const userRole = await q(`
+    FOR user IN users FILTER user._key == @id LIMIT 1 RETURN user.role
+  `, { id: userId })
+  const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
+  if (isAdmin) return { filterClause: '', branchCondition: '', bindVars: {}, isAdmin: true, canonicalKey: null, normalizedUserBranch: null }
+
+  const userBranch = await getUserBranch(userId)
+  const canonicalKey = await getCanonicalBranchKey(userBranch)
+  const normalizedUserBranch = normalizeBranchName(userBranch)
+  if (!canonicalKey && !normalizedUserBranch) {
+    return { filterClause: '', branchCondition: '', bindVars: {}, isAdmin: false, canonicalKey: null, normalizedUserBranch: null }
+  }
+
+  const filterClause = `FILTER (
+    (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && @canonicalKey IN customer.branches)
+    OR
+    ( (customer.branches == null OR !IS_ARRAY(customer.branches) OR LENGTH(customer.branches) == 0) AND (
+      (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+      (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+    ))
+  )`
+  const branchCondition = `(
+    (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && @canonicalKey IN customer.branches)
+    OR
+    ( (customer.branches == null OR !IS_ARRAY(customer.branches) OR LENGTH(customer.branches) == 0) AND (
+      (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
+      (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
+    ))
+  )`
+  const bindVars = { canonicalKey: canonicalKey || '', userBranch: normalizedUserBranch || '' }
+  return { filterClause, branchCondition, bindVars, isAdmin: false, canonicalKey, normalizedUserBranch }
+}
 
 // Customer search endpoint for receipt creation (branch-filtered)
 router.get('/search', requireAuth, async (req, res) => {
@@ -20,20 +57,12 @@ router.get('/search', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'invalid_query', detail: 'Search query must be at least 2 characters' })
     }
 
-    // Get user's branch for filtering
-    const userBranch = await getUserBranch(req.user.sub)
-    const normalizedUserBranch = normalizeBranchName(userBranch)
-    const userRole = await q(`
-      FOR user IN users 
-      FILTER user._key == @id
-      LIMIT 1
-      RETURN user.role
-    `, { id: req.user.sub })
-
-    const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
+    const branchFilter = await getBranchFilterForCustomer(req.user.sub)
+    const isAdmin = branchFilter.isAdmin
+    const normalizedUserBranch = branchFilter.normalizedUserBranch
     
     // Enhanced pagination with larger limits for search
-    const searchLimit = Math.min(100, Math.max(10, parseInt(limit, 10) || 20))
+    const searchLimit = Math.min(100, Math.max(4, parseInt(limit, 10) || 20))
     const searchPage = Math.max(1, parseInt(page, 10) || 1)
     const searchOffset = (searchPage - 1) * searchLimit
 
@@ -43,18 +72,17 @@ router.get('/search', requireAuth, async (req, res) => {
     const allowedSort = new Set(['name', 'investor_id', 'created_at'])
     const orderBy = allowedSort.has(sortCol) ? sortCol : 'name'
 
+    const rawSearch = searchQuery.trim().toLowerCase()
     let filterClause = ''
     let bindVars = { 
-      searchQuery: `%${searchQuery}%`
+      searchQuery: `%${rawSearch}%`,
+      rawSearch,
+      ...branchFilter.bindVars
     }
 
     // Branch-based filtering (unless admin)
-    if (!isAdmin && normalizedUserBranch) {
-      filterClause = `FILTER (
-        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-      )`
-      bindVars.userBranch = normalizedUserBranch
+    if (branchFilter.filterClause) {
+      filterClause = branchFilter.filterClause
     }
 
     // Enhanced search filter with more fields and better performance
@@ -102,6 +130,17 @@ router.get('/search', requireAuth, async (req, res) => {
     const customerQuery = `
       FOR customer IN customers
       ${filterClause}
+      LET qLower = LOWER(@rawSearch)
+      LET nameLower = LOWER(customer.name)
+      LET panLower = customer.pan != null ? LOWER(customer.pan) : null
+      LET exactPanMatch = panLower != null && panLower == qLower ? 1 : 0
+      LET exactNameMatch = nameLower == qLower ? 1 : 0
+      LET prefixPanMatch = panLower != null && LIKE(panLower, CONCAT(@rawSearch, '%'), true) ? 1 : 0
+      LET prefixNameMatch = LIKE(nameLower, CONCAT(@rawSearch, '%'), true) ? 1 : 0
+      LET score = exactPanMatch * 100
+        + exactNameMatch * 80
+        + prefixPanMatch * 60
+        + prefixNameMatch * 40
       LET customerResult = {
         investor_id: customer.investor_id,
         name: customer.name,
@@ -113,19 +152,21 @@ router.get('/search', requireAuth, async (req, res) => {
         state: customer.state,
         relationship_manager: customer.relationship_manager,
         relationship_manager_display: customer.relationship_manager_display,
+        branches: customer.branches,
         created_at: customer.created_at,
-        minors: customer.minors || []
+        minors: customer.minors || [],
+        has_minors: customer.minors != null && LENGTH(customer.minors) > 0,
+        minors_count: customer.minors != null ? LENGTH(customer.minors) : 0,
+        rank: score
       }
+      SORT score DESC, customer.name ASC
       LIMIT ${searchOffset}, ${searchLimit}
       RETURN customerResult
     `
     
-    // Search query for minors (flat format); use (customer.minors || []) so FOR never iterates over null
-    const minorSearchFilter = !isAdmin && normalizedUserBranch ? `
-      FILTER (
-        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-      ) AND (
+    // Search query for minors (flat format); use branch condition when present
+    const minorSearchFilter = branchFilter.branchCondition ? `
+      FILTER ${branchFilter.branchCondition} AND (
         customer.minors != null && LENGTH(customer.minors) > 0
       ) AND (
         FOR minor IN (customer.minors != null ? customer.minors : [])
@@ -171,6 +212,7 @@ router.get('/search', requireAuth, async (req, res) => {
         state: minor.state,
         relationship_manager: customer.relationship_manager,
         relationship_manager_display: customer.relationship_manager_display,
+        branches: customer.branches,
         created_at: minor.created_at,
         is_minor: true,
         parent_investor_id: customer.investor_id,
@@ -204,14 +246,22 @@ router.get('/search', requireAuth, async (req, res) => {
       RETURN customerCount + minorCount
     `
     
-    // Create separate bindVars for count query (without limit/offset)
-    const countBindVars = { ...bindVars }
-    delete countBindVars.limit
-    delete countBindVars.pageSkip
+    // Count and minor queries do not use @rawSearch; only customerQuery does.
+    // ArangoDB rejects bind params that are not declared in the query.
+    const countBindVars = {
+      searchQuery: bindVars.searchQuery,
+      exactId: bindVars.exactId,
+      ...branchFilter.bindVars
+    }
+    const minorBindVars = {
+      searchQuery: bindVars.searchQuery,
+      exactId: bindVars.exactId,
+      ...branchFilter.bindVars
+    }
 
     const [customersResult, minorsResult, totalResult] = await Promise.all([
       q(customerQuery, bindVars),
-      q(minorQuery, bindVars),
+      q(minorQuery, minorBindVars),
       q(countQuery, countBindVars)
     ])
     
@@ -257,20 +307,12 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'invalid_query', detail: 'Search query must be at least 2 characters' })
     }
 
-    // Get user's branch for filtering
-    const userBranch = await getUserBranch(req.user.sub)
-    const normalizedUserBranch = normalizeBranchName(userBranch)
-    const userRole = await q(`
-      FOR user IN users 
-      FILTER user._key == @id
-      LIMIT 1
-      RETURN user.role
-    `, { id: req.user.sub })
-
-    const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
+    const branchFilter = await getBranchFilterForCustomer(req.user.sub)
+    const isAdmin = branchFilter.isAdmin
+    const normalizedUserBranch = branchFilter.normalizedUserBranch
     
     // Enhanced pagination with larger limits for search
-    const searchLimit = Math.min(100, Math.max(10, parseInt(limit, 10) || 20))
+    const searchLimit = Math.min(100, Math.max(4, parseInt(limit, 10) || 20))
     const searchPage = Math.max(1, parseInt(page, 10) || 1)
     const searchOffset = (searchPage - 1) * searchLimit
 
@@ -286,7 +328,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       // Use fulltext search for better performance
       query = `
         FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
-        ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
+        ${branchFilter.filterClause}
         SORT customer.${orderBy} ${sortDir}
         LIMIT ${searchOffset}, ${searchLimit}
         RETURN {
@@ -300,32 +342,27 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
           state: customer.state,
           relationship_manager: customer.relationship_manager,
           relationship_manager_display: customer.relationship_manager_display,
+          branches: customer.branches,
           created_at: customer.created_at
         }
       `
 
       bindVars = {
-        searchQuery: searchQuery.trim()
-      }
-
-      if (!isAdmin && normalizedUserBranch) {
-        bindVars.userBranch = normalizedUserBranch
+        searchQuery: searchQuery.trim().toLowerCase(),
+        ...branchFilter.bindVars
       }
     } else {
       // Fallback to regular search
       let filterClause = ''
+      const searchLower = searchQuery.trim().toLowerCase()
       bindVars = { 
-        searchQuery: `%${searchQuery}%`
+        searchQuery: `%${searchLower}%`,
+        ...branchFilter.bindVars
       }
 
       // Branch-based filtering (unless admin)
-      // Support both single branch (string) and multiple branches (array)
-      if (!isAdmin && normalizedUserBranch) {
-        filterClause = `FILTER (
-          (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-          (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-        )`
-        bindVars.userBranch = normalizedUserBranch
+      if (branchFilter.filterClause) {
+        filterClause = branchFilter.filterClause
       }
 
       // Enhanced search filter
@@ -383,6 +420,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
           state: customer.state,
           relationship_manager: customer.relationship_manager,
           relationship_manager_display: customer.relationship_manager_display,
+          branches: customer.branches,
           created_at: customer.created_at,
           minors: customer.minors || []
         }
@@ -390,15 +428,9 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       `
     }
     
-    // Minor search query (same for both fulltext and regular)
-    const exactId = parseInt(searchQuery.trim())
-    const exactIdForMinors = !isNaN(exactId) ? exactId : -1
-    
-    const minorSearchFilter = !isAdmin && normalizedUserBranch ? `
-      FILTER (
-        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-      ) AND (
+    // Minor search query - use branch condition when present (same as main search)
+    const minorSearchFilter = branchFilter.branchCondition ? `
+      FILTER ${branchFilter.branchCondition} AND (
         customer.minors != null && LENGTH(customer.minors) > 0
       ) AND (
         FOR minor IN customer.minors
@@ -443,6 +475,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
         state: minor.state,
         relationship_manager: customer.relationship_manager,
         relationship_manager_display: customer.relationship_manager_display,
+        branches: customer.branches,
         created_at: minor.created_at,
         is_minor: true,
         parent_investor_id: customer.investor_id,
@@ -453,7 +486,9 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
     `
     
     // Add exactId to bindVars for minor search
-    const minorBindVars = { ...bindVars }
+    const exactId = parseInt(searchQuery.trim())
+    const exactIdForMinors = !isNaN(exactId) ? exactId : -1
+    const minorBindVars = { ...bindVars, exactId: exactIdForMinors }
     if (!minorBindVars.exactId) {
       minorBindVars.exactId = exactIdForMinors
     }
@@ -464,7 +499,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
     const countQuery = useFulltext === 'true' ? `
       LET customerCount = (
         FOR customer IN FULLTEXT(customers, 'name', @searchQuery)
-        ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
+        ${branchFilter.filterClause}
         COLLECT WITH COUNT INTO total
         RETURN total
       )[0] || 0
@@ -486,7 +521,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
     ` : `
       LET customerCount = (
         FOR customer IN customers
-        ${!isAdmin && normalizedUserBranch ? 'FILTER ((IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch))' : ''}
+        ${branchFilter.filterClause}
         FILTER (
           LOWER(customer.name) LIKE LOWER(@searchQuery) 
           OR customer.investor_id == @exactId
@@ -574,17 +609,9 @@ router.get('/', requireAuth, async (req, res) => {
       includeDeleted = '0'
     } = req.query
 
-    // Get user's branch for filtering
-    const userBranch = await getUserBranch(req.user.sub)
-    const normalizedUserBranch = normalizeBranchName(userBranch)
-    const userRole = await q(`
-      FOR user IN users 
-      FILTER user._key == @id
-      LIMIT 1
-      RETURN user.role
-    `, { id: req.user.sub })
-
-    const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
+    const branchFilter = await getBranchFilterForCustomer(req.user.sub)
+    const isAdmin = branchFilter.isAdmin
+    const normalizedUserBranch = branchFilter.normalizedUserBranch
 
     // Sanitize pagination
     const p = Math.max(1, parseInt(page, 10) || 1)
@@ -604,12 +631,9 @@ router.get('/', requireAuth, async (req, res) => {
     let bindVars = { }
 
     // Branch-based filtering (unless admin)
-    if (!isAdmin && normalizedUserBranch) {
-      filterClause = `FILTER (
-        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-      )`
-      bindVars.userBranch = normalizedUserBranch
+    if (branchFilter.filterClause) {
+      filterClause = branchFilter.filterClause
+      Object.assign(bindVars, branchFilter.bindVars)
     }
 
     // Search functionality (case-insensitive)
@@ -631,7 +655,7 @@ router.get('/', requireAuth, async (req, res) => {
       } else {
         filterClause = searchFilter
       }
-      bindVars.search = `%${search}%`
+      bindVars.search = `%${String(search).trim().toLowerCase()}%`
     }
 
     const query = `
@@ -679,50 +703,42 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/portfolio-review', requireAuth, async (req, res) => {
   try {
     const { review_filter = 'all', page = '1', size = '50', search } = req.query
-    const userBranch = await getUserBranch(req.user.sub)
-    const normalizedUserBranch = normalizeBranchName(userBranch)
-    const userRole = await q(`
-      FOR user IN users FILTER user._key == @id LIMIT 1 RETURN user.role
-    `, { id: req.user.sub })
-    const isAdmin = userRole.length > 0 && userRole[0] === 'admin'
+    const branchFilter = await getBranchFilterForCustomer(req.user.sub)
 
-    let filterClause = ''
-    const bindVars = {}
-    if (!isAdmin && normalizedUserBranch) {
-      filterClause = `FILTER (
-        (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-      )`
-      bindVars.userBranch = normalizedUserBranch
+    const bindVars = { ...branchFilter.bindVars }
+    const conditions = []
+    if (branchFilter.branchCondition) {
+      conditions.push(`(${branchFilter.branchCondition})`)
     }
 
     const searchTerm = typeof search === 'string' ? search.trim() : ''
     if (searchTerm.length > 0) {
       const searchLower = searchTerm.toLowerCase()
       bindVars.searchLower = searchLower
-      const searchFilter = `(
+      conditions.push(`(
         (customer.name != null && CONTAINS(LOWER(TO_STRING(customer.name)), @searchLower)) ||
         (customer.mobile != null && CONTAINS(LOWER(TO_STRING(customer.mobile)), @searchLower)) ||
         (customer.email != null && CONTAINS(LOWER(TO_STRING(customer.email)), @searchLower))
-      )`
-      filterClause += (filterClause ? ' AND ' : 'FILTER ') + searchFilter
+      )`)
     }
 
     const today = new Date().toISOString().slice(0, 10)
     if (review_filter === 'overdue') {
       bindVars.today = today
-      filterClause += (filterClause ? ' AND ' : 'FILTER ') + 'customer.next_review_due != null && customer.next_review_due < @today'
+      conditions.push('customer.next_review_due != null && customer.next_review_due < @today')
     } else if (review_filter === 'due_today') {
       bindVars.today = today
-      filterClause += (filterClause ? ' AND ' : 'FILTER ') + 'customer.next_review_due == @today'
+      conditions.push('customer.next_review_due == @today')
     } else if (review_filter === 'due_this_week') {
       const d = new Date()
       const endOfWeek = new Date(d)
       endOfWeek.setDate(d.getDate() + (7 - d.getDay()))
       bindVars.today = today
       bindVars.endWeek = endOfWeek.toISOString().slice(0, 10)
-      filterClause += (filterClause ? ' AND ' : 'FILTER ') + 'customer.next_review_due != null && customer.next_review_due >= @today && customer.next_review_due <= @endWeek'
+      conditions.push('customer.next_review_due != null && customer.next_review_due >= @today && customer.next_review_due <= @endWeek')
     }
+
+    const filterClause = conditions.length > 0 ? `FILTER ${conditions.join(' AND ')}` : ''
 
     const p = Math.max(1, parseInt(page, 10) || 1)
     const s = Math.min(200, Math.max(1, parseInt(size, 10) || 50))
@@ -741,6 +757,7 @@ router.get('/portfolio-review', requireAuth, async (req, res) => {
         email: customer.email,
         relationship_manager: customer.relationship_manager,
         relationship_manager_display: customer.relationship_manager_display,
+        branches: customer.branches,
         last_reviewed_at: customer.last_reviewed_at || null,
         last_reviewed_by_id: customer.last_reviewed_by_id || null,
         last_reviewed_by_emp_code: customer.last_reviewed_by_emp_code || null,
@@ -795,7 +812,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     
     // Check if user can access this customer (branch-based filtering)
     try {
-      const canAccess = await canAccessCustomer(req.user.sub, customer.relationship_manager)
+      const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
       
       if (!canAccess) {
         return res.status(403).json({ 
@@ -922,20 +939,26 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     
     if (branchesInput) {
       if (Array.isArray(branchesInput)) {
-        // Already an array (from FormData with brackets or JSON)
-        branches = branchesInput.map(b => normalizeBranchName(b)).filter(Boolean)
+        branches = branchesInput.map(b => (b != null ? String(b).trim() : '')).filter(Boolean)
       } else if (typeof branchesInput === 'string') {
-        // Single string or JSON string - try to parse
         try {
           const parsed = JSON.parse(branchesInput)
-          if (Array.isArray(parsed)) {
-            branches = parsed.map(b => normalizeBranchName(b)).filter(Boolean)
-          } else {
-            branches = [normalizeBranchName(branchesInput)].filter(Boolean)
-          }
+          branches = Array.isArray(parsed)
+            ? parsed.map(b => (b != null ? String(b).trim() : '')).filter(Boolean)
+            : [String(branchesInput).trim()].filter(Boolean)
         } catch {
-          // Not JSON, treat as single branch string
-          branches = [normalizeBranchName(branchesInput)].filter(Boolean)
+          branches = [String(branchesInput).trim()].filter(Boolean)
+        }
+      }
+      // Validate that each value is an existing branch key (frontend sends branch id / _key)
+      if (branches.length > 0) {
+        const found = await q(`
+          FOR b IN branches FILTER b._key IN @keys RETURN b._key
+        `, { keys: branches })
+        const foundSet = new Set(found)
+        const invalid = branches.filter(k => !foundSet.has(k))
+        if (invalid.length > 0) {
+          return res.status(400).json({ error: 'validation_error', detail: `Invalid branch key(s): ${invalid.join(', ')}` })
         }
       }
       
@@ -943,23 +966,24 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         return res.status(400).json({ error: 'validation_error', detail: 'At least one valid branch must be provided' })
       }
     } else if (req.body.relationship_manager) {
-      // Single branch provided (backward compatibility)
-      const normalizedBranch = normalizeBranchName(req.body.relationship_manager)
-      if (!normalizedBranch) {
+      // Single branch provided (backward compatibility) - resolve to canonical key
+      const userBranch = req.body.relationship_manager
+      const canonicalKey = await getCanonicalBranchKey(userBranch) || normalizeBranchName(userBranch)
+      if (!canonicalKey) {
         return res.status(400).json({ error: 'validation_error', detail: 'Invalid branch name' })
       }
-      branches = [normalizedBranch]
+      branches = [canonicalKey]
     } else {
       // Auto-assign user's branch if no branches specified
       const userBranch = await getUserBranch(req.user.sub)
-      const normalizedUserBranch = normalizeBranchName(userBranch)
-      if (!normalizedUserBranch) {
+      const canonicalKey = await getCanonicalBranchKey(userBranch) || normalizeBranchName(userBranch)
+      if (!canonicalKey) {
         return res.status(400).json({ error: 'invalid_user', detail: 'User branch not found' })
       }
-      branches = [normalizedUserBranch]
+      branches = [canonicalKey]
     }
     
-    // Store as array (even if single branch for consistency)
+    // Store as array (canonical keys)
     const relationshipManager = branches.length === 1 ? branches[0] : branches
 
     // Optional display names for branch dropdown (so "TINDIVANAM" doesn't show as "CHENNAI RO")
@@ -1116,6 +1140,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       media_documents: mediaDocuments,
       relationship_manager: relationshipManager, // Can be single branch (string) or multiple branches (array)
       relationship_manager_display: relationshipManagerDisplay,
+      branches: branches, // Canonical branch keys for filtering
       minors: minors, // Array of minors
       created_at: new Date().toISOString(),
       is_active: true,
@@ -1189,7 +1214,7 @@ router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
     
     // Check if user can access this customer (branch-based filtering)
     try {
-      const canAccess = await canAccessCustomer(req.user.sub, customer.relationship_manager)
+      const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
       
       if (!canAccess) {
         return res.status(403).json({ 
@@ -1327,26 +1352,32 @@ router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
     }
     if (next_review_due !== undefined) updates.next_review_due = next_review_due || null
 
-    // Handle branch updates - support both 'branches' array and 'relationship_manager' for backward compatibility
+    // Handle branch updates - support both 'branches' array (canonical keys) and 'relationship_manager' for backward compatibility
     if (branches !== undefined || relationship_manager !== undefined) {
       let newBranches = []
       
       if (branches !== undefined && Array.isArray(branches)) {
-        // Multiple branches provided
-        newBranches = branches.map(b => normalizeBranchName(b)).filter(Boolean)
+        newBranches = branches.map(b => (b != null ? String(b).trim() : '')).filter(Boolean)
+        if (newBranches.length > 0) {
+          const found = await q(`FOR b IN branches FILTER b._key IN @keys RETURN b._key`, { keys: newBranches })
+          const foundSet = new Set(found)
+          const invalid = newBranches.filter(k => !foundSet.has(k))
+          if (invalid.length > 0) {
+            return res.status(400).json({ error: 'validation_error', detail: `Invalid branch key(s): ${invalid.join(', ')}` })
+          }
+        }
         if (newBranches.length === 0) {
           return res.status(400).json({ error: 'validation_error', detail: 'At least one valid branch must be provided' })
         }
       } else if (relationship_manager !== undefined) {
-        // Single branch provided (backward compatibility)
-        const normalizedBranch = normalizeBranchName(relationship_manager)
-        if (!normalizedBranch) {
+        const canonicalKey = await getCanonicalBranchKey(relationship_manager) || normalizeBranchName(relationship_manager)
+        if (!canonicalKey) {
           return res.status(400).json({ error: 'validation_error', detail: 'Invalid branch name' })
         }
-        newBranches = [normalizedBranch]
+        newBranches = [canonicalKey]
       }
       
-      // Store as array if multiple branches, or single string if one branch (for backward compatibility)
+      updates.branches = newBranches
       updates.relationship_manager = newBranches.length === 1 ? newBranches[0] : newBranches
       const branchesDisplay = req.body.branches_display || req.body['branches_display[]']
       if (branchesDisplay !== undefined) {
@@ -1435,7 +1466,9 @@ router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
       if (removedMinorIds.length > 0) {
         const receiptsCheck = await q(`
           FOR receipt IN receipts
-          FILTER receipt.investor_id IN @minorIds AND receipt.is_deleted == false
+          FILTER receipt.is_deleted == false
+          LET inv_id = (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id
+          FILTER inv_id IN @minorIds
           COLLECT WITH COUNT INTO count
           RETURN count
         `, { minorIds: removedMinorIds })
@@ -1559,6 +1592,166 @@ router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
   }
 })
 
+// Attach documents to existing customer (upload-only endpoint)
+router.post('/:id/media', requireAuth, uploadMultiple, async (req, res) => {
+  try {
+    const id = req.params.id
+    
+    if (!id || isNaN(Number(id))) {
+      return res.status(400).json({ error: 'invalid_customer_id', detail: 'Customer ID must be a valid number' })
+    }
+
+    // Load customer
+    const existing = await q(`
+      FOR customer IN customers 
+      FILTER customer.investor_id == @id
+      LIMIT 1
+      RETURN customer
+    `, { id: Number(id) })
+    
+    if (!existing.length) {
+      return res.status(404).json({ error: 'not_found', detail: `Customer with ID ${id} not found` })
+    }
+
+    const customer = existing[0]
+
+    // Branch-based access check
+    try {
+      const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+      if (!canAccess) {
+        return res.status(403).json({
+          error: 'forbidden',
+          detail: 'Access denied - customer belongs to different branch',
+          customer_branch: customer.relationship_manager,
+          user_id: req.user.sub
+        })
+      }
+    } catch (accessError) {
+      console.error('[Customer Media] Access check failed:', accessError)
+      return res.status(500).json({
+        error: 'access_check_failed',
+        detail: 'Failed to verify access permissions',
+        error_message: accessError.message
+      })
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'no_files', detail: 'No files uploaded' })
+    }
+
+    const newMediaDocuments = req.files.map(file => ({
+      id: Date.now() + Math.random(),
+      original_name: file.originalname,
+      filename: file.filename,
+      file_size: file.size,
+      mime_type: file.mimetype,
+      uploaded_by: req.user.sub,
+      uploaded_at: new Date().toISOString()
+    }))
+
+    const existingMedia = Array.isArray(customer.media_documents) ? customer.media_documents : []
+    const updates = {
+      media_documents: [...existingMedia, ...newMediaDocuments],
+      updated_at: new Date().toISOString()
+    }
+
+    const updateResult = await q(`
+      FOR customer IN customers
+      FILTER customer.investor_id == @id
+      UPDATE customer WITH @updates IN customers
+      RETURN NEW
+    `, { id: Number(id), updates })
+
+    if (!updateResult || updateResult.length === 0) {
+      return res.status(500).json({
+        error: 'update_failed',
+        detail: 'Customer media update query did not affect any records'
+      })
+    }
+
+    res.json({
+      added: newMediaDocuments.length,
+      total_media: updates.media_documents.length
+    })
+  } catch (error) {
+    console.error('[Customer Media] Error attaching documents:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// Delete a single media document from a customer
+router.delete('/:id/media/:mediaId', requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id
+    const mediaId = req.params.mediaId
+
+    if (!id || isNaN(Number(id))) {
+      return res.status(400).json({ error: 'invalid_customer_id', detail: 'Customer ID must be a valid number' })
+    }
+
+    const existing = await q(`
+      FOR customer IN customers
+      FILTER customer.investor_id == @id
+      LIMIT 1
+      RETURN customer
+    `, { id: Number(id) })
+
+    if (!existing.length) {
+      return res.status(404).json({ error: 'not_found', detail: `Customer with ID ${id} not found` })
+    }
+
+    const customer = existing[0]
+
+    try {
+      const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+      if (!canAccess) {
+        return res.status(403).json({
+          error: 'forbidden',
+          detail: 'Access denied - customer belongs to different branch'
+        })
+      }
+    } catch (accessError) {
+      console.error('[Customer Media Delete] Access check failed:', accessError)
+      return res.status(500).json({ error: 'access_check_failed', detail: accessError.message })
+    }
+
+    const mediaDocs = Array.isArray(customer.media_documents) ? customer.media_documents : []
+    const doc = mediaDocs.find(d => String(d.id) === String(mediaId))
+    if (!doc) {
+      return res.status(404).json({ error: 'media_not_found', detail: 'Document not found' })
+    }
+
+    const updatedMedia = mediaDocs.filter(d => String(d.id) !== String(mediaId))
+    const updates = {
+      media_documents: updatedMedia,
+      updated_at: new Date().toISOString()
+    }
+
+    await q(`
+      FOR customer IN customers
+      FILTER customer.investor_id == @id
+      UPDATE customer WITH @updates IN customers
+      RETURN NEW
+    `, { id: Number(id), updates })
+
+    if (doc.filename) {
+      try {
+        const filePath = path.join(uploadsDir, doc.filename)
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath)
+        }
+      } catch (unlinkErr) {
+        console.warn('[Customer Media Delete] Could not remove file from disk:', unlinkErr.message)
+      }
+    }
+
+    res.status(204).end()
+  } catch (error) {
+    console.error('[Customer Media Delete] Error:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
 // Delete customer
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
@@ -1582,15 +1775,17 @@ router.delete('/:id', requireAuth, async (req, res) => {
     const customer = existing[0]
     
     // Check if user can access this customer (branch-based filtering)
-    const canAccess = await canAccessCustomer(req.user.sub, customer.relationship_manager)
+    const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
     if (!canAccess) {
       return res.status(403).json({ error: 'forbidden', detail: 'Access denied - customer belongs to different branch' })
     }
 
-    // Check if customer has any receipts
+    // Check if customer has any receipts (investor id from nested or legacy flat)
     const receipts = await q(`
       FOR receipt IN receipts
-      FILTER receipt.investor_id == @id AND receipt.is_deleted == false
+      FILTER receipt.is_deleted == false
+      LET inv_id = (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id
+      FILTER inv_id == @id
       COLLECT WITH COUNT INTO count
       RETURN count
     `, { id })

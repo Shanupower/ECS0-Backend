@@ -313,4 +313,41 @@ router.post('/:id/convert', requireAuth, async (req, res) => {
   }
 })
 
+// DELETE /:id - Delete lead
+router.delete('/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const leads = await q(`FOR lead IN leads FILTER lead._key == @id LIMIT 1 RETURN lead`, { id })
+    if (!leads.length) return res.status(404).json({ error: 'not_found', detail: 'Lead not found' })
+    const lead = leads[0]
+
+    const scope = await buildListFilter(req)
+    const canAccess = await q(`
+      FOR lead IN leads
+      FILTER lead._key == @id
+      ${scope.filterAql}
+      LIMIT 1
+      RETURN true
+    `, { id, ...scope.bindVars })
+    if (!canAccess.length) return res.status(403).json({ error: 'forbidden' })
+
+    if (lead.converted_to_customer_id) {
+      return res.status(400).json({ error: 'invalid_operation', detail: 'Cannot delete a converted lead' })
+    }
+
+    const isAssignee = lead.assigned_to_id === req.user.sub || lead.assigned_to_emp_code === req.user.emp_code
+    const isAdminOrManager = req.user.role === 'admin' || req.user.role === 'manager'
+    if (!isAdminOrManager && !isAssignee) {
+      return res.status(403).json({ error: 'forbidden', detail: 'Only assignee or admin/manager can delete lead' })
+    }
+
+    await getCollection('leads').remove(id)
+    res.status(204).end()
+  } catch (error) {
+    console.error('Error deleting lead:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
 export default router

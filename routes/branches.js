@@ -1,6 +1,6 @@
 import express from 'express'
 import bcrypt from 'bcryptjs'
-import { q, normalizeBranchName } from '../config/database.js'
+import { q } from '../config/database.js'
 import { requireAuth, requireRole, requireBranchAccess } from '../middleware/auth.js'
 import { validateBranchCode, validateEmail, validateMobile, validatePIN, validateRequired } from '../utils/validators.js'
 
@@ -90,6 +90,7 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
     if (!branchQuery.length) return res.status(404).json({ error: 'branch_not_found' })
     
     const branch = branchQuery[0]
+    const branchIdentifiers = [branch._key, branch.branch_code, branch.branch_name].filter(Boolean).map(String)
     
     // Build date filter
     let dateFilter = ''
@@ -107,25 +108,28 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
       deletedFilter = 'FILTER receipt.is_deleted == false'
     }
     
-    // Get branch statistics - include pending if requested
+    // Get branch statistics - include pending if requested (same logic as /stats/summary)
     const includePending = req.query.includePending === '1'
-    const statusFilter = includePending ? '' : 'FILTER receipt.status == "Completed"'
-    
+    const statusFilter = includePending
+      ? 'FILTER (receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)'
+      : 'FILTER receipt.status == "Completed"'
+    // Same investment amount formula as stats: nested transaction.amount / product_details.fd first, then flat
+    const invAmountExpr = '(TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0)'
     const statsQuery = `
       FOR receipt IN receipts
-      FILTER receipt.branch == @branchName
+      FILTER receipt.branch IN @branchIdentifiers
       ${statusFilter}
       ${dateFilter}
       ${deletedFilter}
       COLLECT AGGREGATE 
         total_receipts = LENGTH(1),
-        total_investments = SUM(TO_NUMBER(receipt.investment_amount) || 0),
+        total_investments = SUM(${invAmountExpr}),
         total_cc = SUM(TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0),
         total_si = SUM(TO_NUMBER(receipt.service_income || receipt.si || 0) || 0)
       RETURN { total_receipts, total_investments, total_cc, total_si }
     `
     
-    const stats = await q(statsQuery, { ...bindVars, branchName: branch.branch_name })
+    const stats = await q(statsQuery, { ...bindVars, branchIdentifiers })
     
     // Get employee count for this branch
     const employeeCount = await q(`
@@ -135,17 +139,14 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
       RETURN total
     `, { branchName: branch.branch_name })
     
-    // Get customer count for this branch - all customers in the branch
-    const normalizedBranchName = normalizeBranchName(branch.branch_name)
+    // Get customer count for this branch - use canonical branch key and customer.branches
+    const branchKey = branch._key
     const customerCount = await q(`
       FOR customer IN customers
-      FILTER (
-        (IS_ARRAY(customer.relationship_manager) && @normalizedBranch IN customer.relationship_manager) ||
-        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @normalizedBranch)
-      )
-      COLLECT WITH COUNT INTO total
-      RETURN total
-    `, { normalizedBranch: normalizedBranchName || branch.branch_name })
+        FILTER IS_ARRAY(customer.branches) && @branchKey IN customer.branches
+        COLLECT WITH COUNT INTO total
+        RETURN total
+    `, { branchKey })
     
     const totalInvestments = stats[0]?.total_investments || 0
     const totalCC = stats[0]?.total_cc || 0
@@ -206,6 +207,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     if (!branchQuery.length) return res.status(404).json({ error: 'branch_not_found' })
     
     const branch = branchQuery[0]
+    const branchIdentifiers = [branch._key, branch.branch_code, branch.branch_name].filter(Boolean).map(String)
     
     // Sanitize pagination
     const p = Math.max(1, parseInt(page, 10) || 1)
@@ -221,8 +223,8 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     const numPage = Math.max(1, parseInt(page, 10) || 1)
     const numOffset = (numPage - 1) * numLimit
 
-    let filterClause = 'FILTER receipt.branch == @branchName'
-    let bindVars = { branchName: branch.branch_name }
+    let filterClause = 'FILTER receipt.branch IN @branchIdentifiers'
+    let bindVars = { branchIdentifiers }
     
     // Date filter
     if (from && to && !isNaN(Date.parse(from)) && !isNaN(Date.parse(to))) {
@@ -231,9 +233,9 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       bindVars.to = to
     }
     
-    // Category filter
+    // Category filter (nested product.category or legacy product_category)
     if (category) {
-      filterClause += ' AND receipt.product_category == @category'
+      filterClause += ' AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)'
       bindVars.category = category
     }
     
@@ -266,7 +268,8 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     `
     
     // Create separate bindVars for count query (without limit/offset)
-    const countBindVars = { ...bindVars } = await Promise.all([
+    const countBindVars = { ...bindVars }
+    const [rows, totalResult] = await Promise.all([
       q(query, bindVars),
       q(countQuery, countBindVars)
     ])
