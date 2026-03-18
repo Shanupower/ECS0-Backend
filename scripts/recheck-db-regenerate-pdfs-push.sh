@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Recheck everything we have done to the DB, regenerate receipt PDFs, and push to main.
+# Recheck everything we have done to the DB, regenerate receipt PDFs, and push to origin.
 # Run from ECS0-Backend directory or as ./scripts/recheck-db-regenerate-pdfs-push.sh
 #
 # Usage:
@@ -19,7 +19,7 @@ ROOT="$(pwd)"
 
 echo ""
 echo "=============================================="
-echo "Recheck DB, regenerate PDFs, push to main"
+echo "Recheck DB, regenerate PDFs, push to origin"
 echo "=============================================="
 
 # 1) Optional: run all migrations (set RUN_PROD_MIGRATIONS=1 to enable)
@@ -52,10 +52,10 @@ echo "Regenerating receipt PDFs"
 echo "=============================================="
 (cd "$ROOT" && npm run regenerate-pdfs) || { echo "FAILED: regenerate-pdfs"; exit 1; }
 
-# 4) Push to main (commit any local changes first)
+# 4) Commit any local changes and push current branch to origin
 echo ""
 echo "=============================================="
-echo "Git: commit and push to main"
+echo "Git: commit and push to origin"
 echo "=============================================="
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 if [[ -z "$BRANCH" ]]; then
@@ -68,12 +68,9 @@ if git diff --staged --quiet 2>/dev/null; then
 else
   git commit -m "Recheck DB and regenerate PDFs"
 fi
-if [[ "$BRANCH" == "main" ]]; then
-  git push origin main
-  echo "Pushed to main."
-else
-  echo "Current branch is '$BRANCH'. To push to main: checkout main, merge, then push."
-fi
+# Push current branch to origin (typically master or main)
+git push origin "$BRANCH"
+echo "Pushed to origin/$BRANCH."
 
 echo ""
 echo "=============================================="
