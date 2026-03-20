@@ -606,6 +606,7 @@ router.get('/', requireAuth, async (req, res) => {
       size = '20',
       sort = 'created_at:desc',
       search,
+      branch_key,
       includeDeleted = '0'
     } = req.query
 
@@ -656,6 +657,22 @@ router.get('/', requireAuth, async (req, res) => {
         filterClause = searchFilter
       }
       bindVars.search = `%${String(search).trim().toLowerCase()}%`
+    }
+
+    // Admin-only: filter list by branch key (customer.branches or relationship_manager)
+    if (isAdmin && branch_key && String(branch_key).trim()) {
+      const bk = String(branch_key).trim()
+      const branchClause = `(
+        (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && @branch_key IN customer.branches)
+        OR customer.relationship_manager == @branch_key
+        OR (IS_ARRAY(customer.relationship_manager) && @branch_key IN customer.relationship_manager)
+      )`
+      if (filterClause) {
+        filterClause += ` AND ${branchClause}`
+      } else {
+        filterClause = `FILTER ${branchClause}`
+      }
+      bindVars.branch_key = bk
     }
 
     const query = `

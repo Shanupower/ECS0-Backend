@@ -31,7 +31,7 @@ const app = express()
 app.set('trust proxy', 1)
 
 // Middleware
-app.use(express.json({ limit: '1mb' }))
+app.use(express.json({ limit: '12mb' }))
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN, credentials: true }))
 
 // Serve uploaded files statically

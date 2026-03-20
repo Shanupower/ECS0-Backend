@@ -379,19 +379,7 @@ export function generateReceiptPDF(receipt) {
         if (svcPrice != null) y = amountField('Service Price', svcPrice, margin, y)
       }
 
-      // CC / SI (Collection Credit & Service Income) — what counts toward targets
-      const ccVal = val(
-        receipt.total_cc, receipt.cc_amount,
-        receipt.calculations?.collection_credit, receipt.calculations?.cc,
-        receipt.collection_credit, receipt.cc
-      )
-      const siVal = val(
-        receipt.total_si, receipt.si_amount,
-        receipt.calculations?.service_income, receipt.calculations?.si,
-        receipt.service_income, receipt.si
-      )
-      if (ccVal != null && Number(ccVal) > 0) y = field('Collection Credit (CC)', fmtINR(ccVal), margin, y)
-      if (siVal != null && Number(siVal) > 0) y = field('Service Income (SI)', fmtINR(siVal), margin, y)
+      // CC / SI omitted from acknowledgement PDF (internal-only metrics)
 
       y += 4
 

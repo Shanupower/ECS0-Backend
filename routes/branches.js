@@ -1,5 +1,4 @@
 import express from 'express'
-import bcrypt from 'bcryptjs'
 import { q } from '../config/database.js'
 import { requireAuth, requireRole, requireBranchAccess } from '../middleware/auth.js'
 import { validateBranchCode, validateEmail, validateMobile, validatePIN, validateRequired } from '../utils/validators.js'
@@ -39,6 +38,7 @@ router.get('/', requireAuth, async (req, res) => {
         total_customers: branch.total_customers,
         total_receipts: branch.total_receipts,
         total_investments: branch.total_investments,
+        monthly_target: branch.monthly_target != null ? TO_NUMBER(branch.monthly_target) : null,
         created_at: branch.created_at,
         updated_at: branch.updated_at
       }
@@ -65,8 +65,10 @@ router.get('/:branchCode', requireAuth, requireBranchAccess, async (req, res) =>
     `, { branchCode })
     
     if (!branches.length) return res.status(404).json({ error: 'not_found' })
-    
-    res.json(branches[0])
+
+    const doc = { ...branches[0] }
+    delete doc.password_hash
+    res.json(doc)
   } catch (error) {
     console.error('Error fetching branch:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
@@ -122,7 +124,7 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
       ${dateFilter}
       ${deletedFilter}
       COLLECT AGGREGATE 
-        total_receipts = LENGTH(1),
+        total_receipts = SUM(1),
         total_investments = SUM(${invAmountExpr}),
         total_cc = SUM(TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0),
         total_si = SUM(TO_NUMBER(receipt.service_income || receipt.si || 0) || 0)
@@ -292,7 +294,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
 // Create new branch (admin only)
 router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const { branch_code, branch_name, branch_type, address, phone, email, password } = req.body
+    const { branch_code, branch_name, branch_type, address, phone, email, monthly_target } = req.body
     
     // Validate required fields
     const branchCodeValidation = validateBranchCode(branch_code, true)
@@ -335,7 +337,6 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
     // Hash the password
     const password_hash = await bcrypt.hash(password || 'password123', 10)
 
-    // Create new branch
     const newBranch = {
       branch_code: branch_code.toUpperCase(),
       branch_name: branch_name,
@@ -345,7 +346,11 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       email: email || '',
       password_hash: password_hash,
       created_at: new Date().toISOString(),
-      is_active: true
+      is_active: true,
+      monthly_target:
+        monthly_target !== undefined && monthly_target !== '' && monthly_target != null
+          ? Number(monthly_target)
+          : null
     }
 
     const result = await q(`
@@ -367,7 +372,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
 router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const { branchCode } = req.params
-    const { branch_name, branch_type, address, phone, email, password } = req.body
+    const { branch_name, branch_type, address, phone, email, monthly_target } = req.body
 
     // Validate email if provided
     if (email !== undefined && email !== null && email !== '') {
@@ -404,7 +409,10 @@ router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) =
     } else if (email !== undefined) {
       updateData.email = email
     }
-    if (password) updateData.password_hash = await bcrypt.hash(password, 10)
+    if (monthly_target !== undefined) {
+      updateData.monthly_target =
+        monthly_target === '' || monthly_target === null ? null : Number(monthly_target)
+    }
 
     // Fetch existing branch to detect name changes
     const existing = await q(`

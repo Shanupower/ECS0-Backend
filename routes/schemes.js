@@ -67,11 +67,29 @@ function normalizeAmcCategory(val) {
   return VALID_AMC_CATEGORIES.includes(v) ? v : 'MF'
 }
 
+// Derive categories array from AMC doc (supports legacy amc_category or new categories array).
+function getAmcCategories(amc) {
+  if (amc?.categories && Array.isArray(amc.categories) && amc.categories.length > 0) {
+    return amc.categories.filter(c => VALID_AMC_CATEGORIES.includes(c))
+  }
+  const single = amc?.amc_category && VALID_AMC_CATEGORIES.includes(amc.amc_category) ? amc.amc_category : 'MF'
+  return [single]
+}
+
+// Resolve min_investment for a scheme: category_settings[cat] > AMC-level > null.
+function resolveMinInvestment(amc, schemeCategory) {
+  const cat = schemeCategory && VALID_AMC_CATEGORIES.includes(schemeCategory) ? schemeCategory : 'MF'
+  const fromSettings = amc?.category_settings?.[cat]?.min_investment
+  if (fromSettings !== undefined && fromSettings !== null) return fromSettings
+  if (amc?.min_investment != null) return amc.min_investment
+  return null
+}
+
 // ===================================
 // GET ROUTES (Everyone can access)
 // ===================================
 
-// List all AMCs (amc_category and min_investment default to MF / null for legacy)
+// List all AMCs. Returns categories (array), category_settings; legacy amc_category derived for backward compat.
 router.get('/amcs', async (req, res) => {
   try {
     const amcs = await q(`
@@ -79,11 +97,17 @@ router.get('/amcs', async (req, res) => {
       SORT amc.amc_name
       RETURN amc
     `)
-    const normalized = amcs.map(a => ({
-      ...a,
-      amc_category: a.amc_category && VALID_AMC_CATEGORIES.includes(a.amc_category) ? a.amc_category : 'MF',
-      min_investment: a.min_investment != null ? a.min_investment : null
-    }))
+    const normalized = amcs.map(a => {
+      const categories = getAmcCategories(a)
+      const legacyCategory = a.amc_category && VALID_AMC_CATEGORIES.includes(a.amc_category) ? a.amc_category : 'MF'
+      return {
+        ...a,
+        categories,
+        category_settings: a.category_settings || null,
+        amc_category: legacyCategory,
+        min_investment: a.min_investment != null ? a.min_investment : null
+      }
+    })
     res.json(normalized)
   } catch (error) {
     console.error('Error fetching AMCs:', error)
@@ -91,8 +115,9 @@ router.get('/amcs', async (req, res) => {
   }
 })
 
-// Get schemes by AMC code (filter out expired NFOs). Enrich with AMC's amc_category and min_investment.
+// Get schemes by AMC code (filter out expired NFOs). Enrich with AMC categories and resolved min_investment.
 // Optional query: ?amc_category=MF|SIF|PMS|AIF|GIFT_CITY_FUNDS to filter by category.
+// Response includes amc summary (categories, category_settings) when Accept or query asks for it; for backward compat returns array of schemes only by default.
 router.get('/amc/:amc_code', async (req, res) => {
   try {
     const { amc_code } = req.params
@@ -108,8 +133,8 @@ router.get('/amc/:amc_code', async (req, res) => {
       RETURN amc
     `, { amc_code })
     const amc = amcList[0] || null
-    const amcCategory = amc?.amc_category && VALID_AMC_CATEGORIES.includes(amc.amc_category) ? amc.amc_category : 'MF'
-    const amcMinInvestment = amc?.min_investment != null ? amc.min_investment : null
+    const categories = getAmcCategories(amc)
+    const legacyCategory = amc?.amc_category && VALID_AMC_CATEGORIES.includes(amc.amc_category) ? amc.amc_category : 'MF'
 
     let schemes = await q(`
       FOR scheme IN mf_schemes
@@ -119,15 +144,32 @@ router.get('/amc/:amc_code', async (req, res) => {
       RETURN scheme
     `, { amc_code, today })
 
-    schemes = schemes.map(s => ({
-      ...s,
-      amc_category: s.amc_category && VALID_AMC_CATEGORIES.includes(s.amc_category) ? s.amc_category : amcCategory,
-      min_investment: s.min_investment != null ? s.min_investment : amcMinInvestment
-    }))
+    schemes = schemes.map(s => {
+      const schemeCat = s.amc_category && VALID_AMC_CATEGORIES.includes(s.amc_category) ? s.amc_category : legacyCategory
+      const minInv = s.min_investment != null ? s.min_investment : resolveMinInvestment(amc, schemeCat)
+      return {
+        ...s,
+        amc_category: schemeCat,
+        min_investment: minInv
+      }
+    })
     if (amc_category_filter) {
       schemes = schemes.filter(s => s.amc_category === amc_category_filter)
     }
 
+    const includeAmcSummary = req.query.include_amc === 'true' || req.query.include_amc === '1'
+    if (includeAmcSummary && amc) {
+      return res.json({
+        amc: {
+          amc_code: amc.amc_code,
+          amc_name: amc.amc_name,
+          categories,
+          category_settings: amc.category_settings || null,
+          min_investment: amc.min_investment != null ? amc.min_investment : null
+        },
+        schemes
+      })
+    }
     res.json(schemes)
   } catch (error) {
     console.error('Error fetching schemes:', error)
@@ -167,16 +209,25 @@ router.get('/:scheme_code', async (req, res) => {
 // CREATE ROUTES (Admin only)
 // ===================================
 
-// Create AMC (amc_category = type, min_investment editable, default from category)
+// Create AMC. Accepts categories (array) or legacy amc_category; optional category_settings.
 router.post('/amc', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const { amc_name, amc_code, amc_category: amcCategoryRaw, min_investment } = req.body
+    const { amc_name, amc_code, categories: categoriesRaw, amc_category: amcCategoryRaw, min_investment, category_settings: categorySettingsRaw } = req.body
 
     if (!amc_name || !amc_code) {
       return res.status(400).json({ error: 'amc_name and amc_code are required' })
     }
 
-    const amc_category = normalizeAmcCategory(amcCategoryRaw)
+    let categories
+    if (Array.isArray(categoriesRaw) && categoriesRaw.length > 0) {
+      categories = categoriesRaw.filter(c => VALID_AMC_CATEGORIES.includes(String(c).trim()))
+      if (categories.length === 0) {
+        return res.status(400).json({ error: 'categories must contain at least one of: ' + VALID_AMC_CATEGORIES.join(', ') })
+      }
+    } else {
+      const single = normalizeAmcCategory(amcCategoryRaw)
+      categories = [single]
+    }
 
     const existing = await q(`
       FOR amc IN amcs
@@ -189,15 +240,18 @@ router.post('/amc', requireAuth, requireRole('admin'), async (req, res) => {
       return res.status(400).json({ error: 'AMC code already exists' })
     }
 
+    const category_settings = categorySettingsRaw && typeof categorySettingsRaw === 'object' ? categorySettingsRaw : null
     const amcsCollection = getCollection('amcs')
     const payload = {
       _key: amc_code,
       amc_name,
       amc_code,
-      amc_category,
+      categories,
+      amc_category: categories[0],
       min_investment: min_investment != null && min_investment !== '' ? Number(min_investment) : null,
       created_at: new Date().toISOString()
     }
+    if (category_settings) payload.category_settings = category_settings
     const result = await amcsCollection.save(payload)
 
     res.status(201).json({ id: result._key, message: 'AMC created successfully' })
@@ -646,22 +700,37 @@ router.get('/check-duplicate', requireAuth, requireRole('admin'), async (req, re
 // UPDATE ROUTES (Admin only)
 // ===================================
 
-// Update AMC (amc_category = type, min_investment editable)
+// Update AMC. Accepts categories (array), category_settings, min_investment.
 router.put('/amc/:amc_code', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const { amc_code } = req.params
-    const { amc_name, amc_category: amcCategoryRaw, min_investment } = req.body
+    const { amc_name, categories: categoriesRaw, amc_category: amcCategoryRaw, min_investment, category_settings: categorySettingsRaw } = req.body
 
     if (!amc_name) {
       return res.status(400).json({ error: 'amc_name is required' })
     }
 
-    const amc_category = amcCategoryRaw != null ? normalizeAmcCategory(amcCategoryRaw) : undefined
     const updatePayload = {
       amc_name,
       updated_at: new Date().toISOString()
     }
-    if (amc_category !== undefined) updatePayload.amc_category = amc_category
+
+    if (Array.isArray(categoriesRaw) && categoriesRaw.length > 0) {
+      const categories = categoriesRaw.filter(c => VALID_AMC_CATEGORIES.includes(String(c).trim()))
+      if (categories.length === 0) {
+        return res.status(400).json({ error: 'categories must contain at least one of: ' + VALID_AMC_CATEGORIES.join(', ') })
+      }
+      updatePayload.categories = categories
+      updatePayload.amc_category = categories[0]
+    } else if (amcCategoryRaw != null) {
+      const single = normalizeAmcCategory(amcCategoryRaw)
+      updatePayload.amc_category = single
+      updatePayload.categories = [single]
+    }
+
+    if (categorySettingsRaw !== undefined) {
+      updatePayload.category_settings = categorySettingsRaw && typeof categorySettingsRaw === 'object' ? categorySettingsRaw : null
+    }
     if (min_investment !== undefined) updatePayload.min_investment = min_investment != null && min_investment !== '' ? Number(min_investment) : null
 
     const amcsCollection = getCollection('amcs')

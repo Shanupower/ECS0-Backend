@@ -1,8 +1,8 @@
 import express from 'express'
-import { q, getCollection } from '../config/database.js'
+import ExcelJS from 'exceljs'
+import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName } from '../config/database.js'
 import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.js'
 import { uploadCsv } from '../middleware/upload.js'
-import { normalizeBranchName } from '../config/database.js'
 
 const router = express.Router()
 
@@ -98,7 +98,14 @@ router.get('/receipts', requireAuth, async (req, res) => {
   }
 })
 
-// Export detailed transaction history to CSV
+function escapeCsvField(v) {
+  if (v == null || v === '') return ''
+  const s = String(v)
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+// Export detailed transaction history (CSV or XLSX)
 router.get('/transactions', requireAuth, async (req, res) => {
   try {
     const {
@@ -109,7 +116,8 @@ router.get('/transactions', requireAuth, async (req, res) => {
       status,
       category,
       mode,
-      txn_type
+      search,
+      format = 'csv'
     } = req.query
 
     let query = `
@@ -127,8 +135,14 @@ router.get('/transactions', requireAuth, async (req, res) => {
       bindVars.to = to
     }
     if (branch_code) {
-      query += ` AND receipt.branch == @branch_code`
-      bindVars.branch_code = branch_code
+      const branchIdentifiers = await getBranchIdentifiersForFilter(branch_code)
+      if (branchIdentifiers.length > 0) {
+        query += ` AND receipt.branch IN @branchIdentifiers`
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else {
+        query += ` AND receipt.branch == @branch_code`
+        bindVars.branch_code = branch_code
+      }
     }
     if (emp_code) {
       query += ` AND receipt.emp_code == @emp_code`
@@ -147,19 +161,31 @@ router.get('/transactions', requireAuth, async (req, res) => {
       bindVars.category = category
     }
     if (mode) {
-      // Handle Switch Over specially - it's selected as a mode but stored as transaction type
       if (mode === 'Switch Over' || mode === 'SwitchOver' || mode === 'SWITCH_OVER' || mode === 'switch_over') {
-        // For Switch Over, check transaction type fields instead of mode
         query += ` AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null)`
         bindVars.switch_over_mode = 'Switch Over'
         bindVars.switch_over_mode_alt1 = 'SwitchOver'
         bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
         bindVars.switch_over_mode_alt3 = 'switch_over'
       } else {
-        // For other modes (SIP, SWP, STP, Lump Sum), filter by mode field
         query += ` AND receipt.mode == @mode`
         bindVars.mode = mode
       }
+    }
+    if (search && String(search).trim()) {
+      const s = String(search).trim()
+      query += ` AND (
+        LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true)
+        OR (receipt.investor != null && (
+          LIKE(receipt.investor.name, CONCAT("%", @search, "%"), true)
+          OR LIKE(receipt.investor.id, CONCAT("%", @search, "%"), true)
+          OR LIKE(receipt.investor.pan, CONCAT("%", @search, "%"), true)
+        ))
+        OR LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true)
+        OR LIKE(receipt.investor_id, CONCAT("%", @search, "%"), true)
+        OR LIKE(receipt.pan, CONCAT("%", @search, "%"), true)
+      )`
+      bindVars.search = s
     }
 
     query += `
@@ -171,13 +197,18 @@ router.get('/transactions', requireAuth, async (req, res) => {
         emp_code: receipt.emp_code,
         investor_id: (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id,
         investor_name: (receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name,
+        pan: (receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan,
         product_category: (receipt.product != null && receipt.product.category != null) ? receipt.product.category : receipt.product_category,
+        scheme_name: (receipt.product != null && receipt.product.name != null) ? receipt.product.name : receipt.scheme_name,
+        folio_policy_no: receipt.folio_policy_no,
         investment_amount: (receipt.transaction != null && receipt.transaction.amount != null) ? receipt.transaction.amount : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? receipt.product_details.fd.deposit.amount : receipt.investment_amount,
         cc: receipt.collection_credit || receipt.cc || 0,
         si: receipt.service_income || receipt.si || 0,
         status: receipt.status || 'Pending',
         transaction_type: receipt.transaction_type || receipt.txn_type || null,
         mode: (receipt.transaction != null && receipt.transaction.mode != null) ? receipt.transaction.mode : receipt.mode || null,
+        switch_from: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.from_scheme_name : null,
+        switch_to: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.to_scheme_name : null,
         payment: receipt.payment || null,
         transaction_details: receipt.transaction_details || null
       }
@@ -186,19 +217,17 @@ router.get('/transactions', requireAuth, async (req, res) => {
     const rows = await q(query, bindVars)
 
     const headers = [
-      'Receipt ID', 'Date', 'Branch', 'Employee Code',
-      'Investor ID', 'Investor Name', 'Product Category',
+      'Receipt ID', 'Receipt Date', 'Branch', 'Employee Code',
+      'Investor ID', 'Investor Name', 'PAN', 'Product Category',
+      'Scheme / Product', 'Folio / Policy No',
       'Investment Amount', 'CC', 'SI', 'Status',
-      'Transaction Type', 'Mode',
+      'Transaction Type', 'Mode', 'Switch From', 'Switch To',
       'Entry Mode', 'Channel', 'Reference No', 'Txn Date',
       'Instrument Type', 'Instrument No', 'Instrument Date',
       'Bank Name', 'Bank Branch', 'Txn Account Last4', 'Txn Notes'
     ]
 
-    const csvRows = [headers.join(',')]
-
-    rows.forEach(r => {
-      // Prefer receipt.payment (stored format); fallback to legacy transaction_details
+    const buildRowArray = (r) => {
       const payment = r.payment || {}
       const legacy = r.transaction_details || {}
       const entryMode = payment.entry_mode ?? legacy.entry_mode ?? ''
@@ -212,22 +241,26 @@ router.get('/transactions', requireAuth, async (req, res) => {
       const bankBranch = payment.instrument?.bank?.branch ?? legacy.bank_branch ?? ''
       const accountLast4 = payment.account_last4 ?? legacy.account_last4 ?? ''
       const notes = payment.notes ?? legacy.notes ?? ''
-
-      const row = [
+      const siVal = req.user.role === 'admin' ? (r.si || 0) : ''
+      return [
         r.receipt_id,
         r.date || '',
-        `"${r.branch || ''}"`,
+        r.branch || '',
         r.emp_code || '',
         r.investor_id || '',
-        `"${r.investor_name || ''}"`,
+        r.investor_name || '',
+        r.pan || '',
         r.product_category || '',
+        r.scheme_name || '',
+        r.folio_policy_no || '',
         r.investment_amount || 0,
         r.cc || 0,
-        // Hide SI for non-admins
-        req.user.role === 'admin' ? (r.si || 0) : '',
+        siVal,
         r.status || 'Pending',
         r.transaction_type || '',
         r.mode || '',
+        r.switch_from || '',
+        r.switch_to || '',
         entryMode,
         channel,
         referenceNo,
@@ -235,19 +268,35 @@ router.get('/transactions', requireAuth, async (req, res) => {
         instrumentType,
         instrumentNo,
         instrumentDate,
-        `"${bankName}"`,
-        `"${bankBranch}"`,
+        bankName,
+        bankBranch,
         accountLast4,
-        `"${notes}"`
+        notes
       ]
-      csvRows.push(row.join(','))
+    }
+
+    const outFmt = String(format).toLowerCase() === 'xlsx' ? 'xlsx' : 'csv'
+    const stamp = new Date().toISOString().split('T')[0]
+
+    if (outFmt === 'xlsx') {
+      const workbook = new ExcelJS.Workbook()
+      const sheet = workbook.addWorksheet('Transactions')
+      sheet.addRow(headers)
+      rows.forEach(r => sheet.addRow(buildRowArray(r)))
+      const buf = await workbook.xlsx.writeBuffer()
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      res.setHeader('Content-Disposition', `attachment; filename="transactions_${stamp}.xlsx"`)
+      res.send(Buffer.from(buf))
+      return
+    }
+
+    const csvLines = [headers.map(escapeCsvField).join(',')]
+    rows.forEach(r => {
+      csvLines.push(buildRowArray(r).map(escapeCsvField).join(','))
     })
-
-    const csv = csvRows.join('\n')
-
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="transactions_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', `attachment; filename="transactions_${stamp}.csv"`)
+    res.send('\uFEFF' + csvLines.join('\n'))
   } catch (error) {
     console.error('CSV transaction export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export transactions' })

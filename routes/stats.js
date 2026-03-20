@@ -1,5 +1,5 @@
 import express from 'express'
-import { q, getUserBranch, normalizeBranchName, getBranchIdentifiersForFilter } from '../config/database.js'
+import { q, getUserBranch, normalizeBranchName, getBranchIdentifiersForFilter, getBranchMonthlyTargetForIdentifiers } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 
 const router = express.Router()
@@ -355,35 +355,44 @@ router.get('/summary', requireAuth, async (req, res) => {
     response.service_income_earned = Number(totalSI)
   }
   
-  // Monthly target: personal view = current user's target; branch view = sum of branch users' targets
-  const isPersonalView = req.user.role === 'employee' || (req.user.role === 'admin' && emp_code && (viewMode === 'personal' || !viewMode))
-  const isBranchView = viewMode === 'branch' || req.user.role === 'manager' || req.user.role === 'branch'
-  if (isPersonalView) {
-    const userTarget = await q(`
-      FOR user IN users FILTER user._key == @id LIMIT 1 RETURN user.monthly_target
-    `, { id: req.user.sub })
-    response.monthly_target = userTarget[0] != null ? Number(userTarget[0]) : null
-  } else if (isBranchView) {
-    let branchIdentifiers = []
-    if (req.user.role === 'admin' && viewMode === 'branch') {
-      const ub = await getUserBranch(req.user.sub)
-      branchIdentifiers = await getBranchIdentifiersForFilter(ub)
-    } else {
+  // Branch monthly target (single value on branches collection) for the viewer's branch context
+  if (!(req.user.role === 'admin' && viewMode === 'all')) {
+    let branchRef = null
+    if (req.user.role === 'branch') {
+      branchRef = req.user.branch_code || req.user.branch || null
+    } else if (req.user.role === 'employee' || req.user.role === 'manager') {
       const me = await q(`
         FOR user IN users FILTER user._key == @id LIMIT 1 RETURN { branch_code: user.branch_code, branch: user.branch }
       `, { id: req.user.sub })
-      branchIdentifiers = me[0] ? await getBranchIdentifiersForFilter(me[0].branch_code || me[0].branch) : []
+      branchRef = me[0] ? (me[0].branch_code || me[0].branch) : null
+      if (!branchRef && req.user.role === 'manager') branchRef = await getUserBranch(req.user.sub)
+    } else if (req.user.role === 'admin') {
+      if (viewMode === 'branch') {
+        branchRef = await getUserBranch(req.user.sub)
+      } else {
+        const qEmp = emp_code
+        if (qEmp) {
+          if (req.user.emp_code === qEmp) {
+            branchRef = await getUserBranch(req.user.sub)
+          } else {
+            const rows = await q(`
+              FOR user IN users FILTER user.emp_code == @e LIMIT 1
+              RETURN { branch_code: user.branch_code, branch: user.branch }
+            `, { e: qEmp })
+            branchRef = rows[0] ? (rows[0].branch_code || rows[0].branch) : null
+          }
+        } else {
+          branchRef = await getUserBranch(req.user.sub)
+        }
+      }
     }
-    if (branchIdentifiers.length > 0) {
-      const usersInBranch = await q(`
-        FOR user IN users
-        FILTER user.is_active == true
-        FILTER user.branch_code IN @codes OR user.branch IN @codes
-        RETURN user.monthly_target
-      `, { codes: branchIdentifiers })
-      response.branch_target = (usersInBranch || []).reduce((s, t) => s + (t != null ? Number(t) : 0), 0) || null
-    } else {
-      response.branch_target = null
+
+    if (branchRef) {
+      const branchIdentifiers = await getBranchIdentifiersForFilter(branchRef)
+      if (branchIdentifiers.length > 0) {
+        const t = await getBranchMonthlyTargetForIdentifiers(branchIdentifiers)
+        response.branch_target = t != null ? t : null
+      }
     }
   }
   
@@ -732,26 +741,45 @@ router.get('/branches', requireAuth, async (req, res) => {
     `
     
     const branchStats = await q(branchStatsQuery, bindVars)
-    
-    // Get employee count and total_target (sum of monthly_target) per branch
+
     const employeeStatsQuery = `
       FOR user IN users
-      FILTER user.is_active == true AND user.branch != null
-      COLLECT branch = user.branch
-      AGGREGATE employee_count = LENGTH(1), total_target = SUM(user.monthly_target != null ? user.monthly_target : 0)
-      RETURN { branch, employee_count, total_target }
+        FILTER user.is_active == true AND user.branch != null
+        COLLECT branch = user.branch WITH COUNT INTO employee_count
+        RETURN { branch, employee_count }
     `
-    
     const employeeStats = await q(employeeStatsQuery)
-    
-    // Merge branch and employee statistics
-    const mergedStats = branchStats.map(branch => {
-      const employeeData = employeeStats.find(emp => emp.branch === branch.branch)
+
+    const branchDocs = await q(`
+      FOR b IN branches
+        RETURN { key: b._key, code: b.branch_code, name: b.branch_name, monthly_target: b.monthly_target }
+    `)
+
+    const numOrNull = (v) => {
+      if (v == null || v === '') return null
+      const n = Number(v)
+      return Number.isFinite(n) ? n : null
+    }
+    const monthlyTargetForReceiptBranch = (receiptBranch) => {
+      if (receiptBranch == null || receiptBranch === '') return null
+      const s = String(receiptBranch).trim()
+      const lower = s.toLowerCase()
+      for (const b of branchDocs) {
+        if (b.key != null && String(b.key).trim() === s) return numOrNull(b.monthly_target)
+        if (b.code != null && String(b.code).trim().toLowerCase() === lower) return numOrNull(b.monthly_target)
+        if (b.name != null && String(b.name).trim().toLowerCase() === lower) return numOrNull(b.monthly_target)
+      }
+      return null
+    }
+
+    const mergedStats = branchStats.map((branch) => {
+      const employeeData = employeeStats.find((emp) => emp.branch === branch.branch)
+      const tgt = monthlyTargetForReceiptBranch(branch.branch)
       return {
         ...branch,
         total_employees: employeeData?.employee_count || 0,
-        total_target: employeeData?.total_target != null ? Number(employeeData.total_target) : 0,
-        commissions: branch.total_cc, // Alias for backward compatibility
+        total_target: tgt != null ? tgt : 0,
+        commissions: branch.total_cc,
         collection_credit: branch.total_cc
       }
     })

@@ -163,6 +163,21 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
               const siPercent = parseFloat(scheme.si || 0)
               collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
               serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
+
+              // Switch Over: earn CC on the switch only when target scheme CC% is higher than source scheme CC%
+              const fromCode = d.switch_from_scheme_code
+              if (fromCode && schemeCodeForCcSi && String(fromCode) !== String(schemeCodeForCcSi)) {
+                const srcRows = await q(`
+                  FOR s IN mf_schemes
+                    FILTER s.scheme_code == @code
+                    LIMIT 1
+                    RETURN TO_NUMBER(s.cc || 0)
+                `, { code: fromCode })
+                const srcCcPct = srcRows.length ? parseFloat(srcRows[0]) : 0
+                if (!(ccPercent > srcCcPct)) {
+                  collectionCredit = 0
+                }
+              }
             }
           }
         } else if (productCategory === 'FD' && d.fd_issuer_key && d.fd_scheme_id) {
@@ -1053,9 +1068,9 @@ router.get('/summary', requireAuth, async (req, res) => {
       }
     }
 
-    // Search filter (investor name, investor ID, or receipt number)
+    // Search filter (investor name, ID, PAN, or receipt number)
     if (search) {
-      filterConditions.push('(LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true) OR (receipt.investor != null && (LIKE(receipt.investor.name, CONCAT("%", @search, "%"), true) || LIKE(receipt.investor.id, CONCAT("%", @search, "%"), true))) OR LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true) OR LIKE(receipt.investor_id, CONCAT("%", @search, "%"), true))')
+      filterConditions.push('(LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true) OR (receipt.investor != null && (LIKE(receipt.investor.name, CONCAT("%", @search, "%"), true) || LIKE(receipt.investor.id, CONCAT("%", @search, "%"), true) || LIKE(receipt.investor.pan, CONCAT("%", @search, "%"), true))) OR LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true) OR LIKE(receipt.investor_id, CONCAT("%", @search, "%"), true) OR LIKE(receipt.pan, CONCAT("%", @search, "%"), true))')
       bindVars.search = search
     }
 
@@ -1261,10 +1276,10 @@ router.get('/', requireAuth, async (req, res) => {
       }
     }
 
-    // Search filter (investor name/ID or receipt ID)
+    // Search filter (investor name, ID, PAN, or receipt number)
     if (search && search.trim().length > 0) {
       const searchTerm = `%${search.trim()}%`
-      filterConditions.push('(receipt.receipt_no LIKE @search OR (receipt.investor != null && (receipt.investor.name LIKE @search OR receipt.investor.id LIKE @search)) OR receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search)')
+      filterConditions.push('(receipt.receipt_no LIKE @search OR (receipt.investor != null && (receipt.investor.name LIKE @search OR receipt.investor.id LIKE @search OR receipt.investor.pan LIKE @search)) OR receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search OR receipt.pan LIKE @search)')
       bindVars.search = searchTerm
     }
 
@@ -1427,10 +1442,10 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
       bindVars.issuer = `%${issuer}%`
     }
 
-    // Search filter (investor name/ID or receipt ID)
+    // Search filter (investor name, ID, PAN, or receipt number)
     if (search && search.trim().length > 0) {
       const searchTerm = `%${search.trim()}%`
-      filterConditions.push('(receipt.receipt_no LIKE @search OR (receipt.investor != null && (receipt.investor.name LIKE @search OR receipt.investor.id LIKE @search)) OR receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search)')
+      filterConditions.push('(receipt.receipt_no LIKE @search OR (receipt.investor != null && (receipt.investor.name LIKE @search OR receipt.investor.id LIKE @search OR receipt.investor.pan LIKE @search)) OR receipt.investor_name LIKE @search OR receipt.investor_id LIKE @search OR receipt.pan LIKE @search)')
       bindVars.search = searchTerm
     }
 
@@ -1562,6 +1577,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
     'instrument_type','instrument_no','instrument_date','bank_name','bank_branch','fdr_demat_policy',
     'renewal_due_date','maturity_amount','renewal_amount','issuer_company','issuer_category','product_category',
     'collection_credit','cc','service_income','si', // Allow manual updates to CC/SI if needed
+    'switch_from_scheme_code','switch_from_scheme_name','switch_to_scheme_code','switch_to_scheme_name','switch_type','switch_value',
     'transaction_details','entry_mode','transaction_channel','transaction_reference_no','txn_date','account_last4','transaction_notes',
     'fd_transaction_type', // Fresh or Renewal for FD receipts
     'rejection_remark','rejected_at','rejected_by' // Rejection fields for failed transactions

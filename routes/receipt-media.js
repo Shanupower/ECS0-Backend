@@ -1,11 +1,46 @@
 import express from 'express'
 import fs from 'fs'
 import path from 'path'
-import { q } from '../config/database.js'
+import { q, getBranchIdentifiersForFilter } from '../config/database.js'
 import { requireAuth } from '../middleware/auth.js'
 import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
 
 const router = express.Router()
+
+async function branchesOverlap(receiptBranch, user) {
+  if (!receiptBranch) return false
+  const userBranch = user.branch_code || user.branch
+  if (!userBranch) return false
+  const recIds = await getBranchIdentifiersForFilter(receiptBranch)
+  const userIds = await getBranchIdentifiersForFilter(userBranch)
+  if (recIds.length && userIds.length) {
+    return recIds.some(rid => userIds.includes(rid))
+  }
+  return String(receiptBranch).trim().toLowerCase() === String(userBranch).trim().toLowerCase()
+}
+
+/** Admin, creator, same emp_code, or same branch (branch/manager/employee) */
+async function canAccessReceiptMedia(req, receipt) {
+  if (req.user.role === 'admin') return true
+  if (receipt.user_id != null && String(receipt.user_id) === String(req.user.sub)) return true
+  if (receipt.emp_code && req.user.emp_code &&
+      String(receipt.emp_code).trim().toLowerCase() === String(req.user.emp_code).trim().toLowerCase()) {
+    return true
+  }
+  const role = req.user.role
+  if ((role === 'branch' || role === 'manager' || role === 'employee') && receipt.branch) {
+    return branchesOverlap(receipt.branch, req.user)
+  }
+  return false
+}
+
+const receiptMetaReturn = `{
+      id: receipt._key,
+      user_id: receipt.user_id,
+      emp_code: receipt.emp_code,
+      branch: receipt.branch,
+      files: receipt.files
+    }`
 
 // Upload media for receipt
 router.post('/:id/media', requireAuth, uploadMultiple, async (req, res) => {
@@ -17,14 +52,14 @@ router.post('/:id/media', requireAuth, uploadMultiple, async (req, res) => {
       FOR receipt IN receipts
       FILTER receipt._key == @id
       LIMIT 1
-      RETURN { id: receipt._key, user_id: receipt.user_id, files: receipt.files }
+      RETURN ${receiptMetaReturn}
     `, { id: receiptId })
     if (!receiptRows.length) {
       return res.status(404).json({ error: 'receipt_not_found' })
     }
     
     const receipt = receiptRows[0]
-    if (!(req.user.role === 'admin' || String(receipt.user_id) === String(req.user.sub))) {
+    if (!(await canAccessReceiptMedia(req, receipt))) {
       return res.status(403).json({ error: 'forbidden' })
     }
     
@@ -92,14 +127,14 @@ router.get('/:id/media', requireAuth, async (req, res) => {
       FOR receipt IN receipts
       FILTER receipt._key == @id
       LIMIT 1
-      RETURN { id: receipt._key, user_id: receipt.user_id, files: receipt.files }
+      RETURN ${receiptMetaReturn}
     `, { id: receiptId })
     if (!receiptRows.length) {
       return res.status(404).json({ error: 'receipt_not_found' })
     }
     
     const receipt = receiptRows[0]
-    if (!(req.user.role === 'admin' || String(receipt.user_id) === String(req.user.sub))) {
+    if (!(await canAccessReceiptMedia(req, receipt))) {
       return res.status(403).json({ error: 'forbidden' })
     }
     
@@ -149,14 +184,14 @@ router.get('/:id/media/:mediaId', requireAuth, async (req, res) => {
       FOR receipt IN receipts
       FILTER receipt._key == @id
       LIMIT 1
-      RETURN { id: receipt._key, user_id: receipt.user_id, files: receipt.files }
+      RETURN ${receiptMetaReturn}
     `, { id: receiptId })
     if (!receiptRows.length) {
       return res.status(404).json({ error: 'receipt_not_found' })
     }
     
     const receipt = receiptRows[0]
-    if (!(req.user.role === 'admin' || String(receipt.user_id) === String(req.user.sub))) {
+    if (!(await canAccessReceiptMedia(req, receipt))) {
       return res.status(403).json({ error: 'forbidden' })
     }
     
@@ -209,14 +244,14 @@ router.delete('/:id/media/:mediaId', requireAuth, async (req, res) => {
       FOR receipt IN receipts
       FILTER receipt._key == @id
       LIMIT 1
-      RETURN { id: receipt._key, user_id: receipt.user_id, files: receipt.files }
+      RETURN ${receiptMetaReturn}
     `, { id: receiptId })
     if (!receiptRows.length) {
       return res.status(404).json({ error: 'receipt_not_found' })
     }
     
     const receipt = receiptRows[0]
-    if (!(req.user.role === 'admin' || String(receipt.user_id) === String(req.user.sub))) {
+    if (!(await canAccessReceiptMedia(req, receipt))) {
       return res.status(403).json({ error: 'forbidden' })
     }
     

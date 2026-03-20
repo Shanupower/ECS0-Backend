@@ -70,6 +70,32 @@ export const getBranchIdentifiersForFilter = async (userBranch) => {
   }
 }
 
+/** `monthly_target` from the branches document matching any of the given identifiers (key, code, or name). */
+export const getBranchMonthlyTargetForIdentifiers = async (identifiers) => {
+  if (!identifiers || !identifiers.length) return null
+  const codes = [...new Set(identifiers.filter(Boolean).map((x) => String(x).trim()))]
+  if (!codes.length) return null
+  try {
+    const rows = await q(
+      `
+      FOR b IN branches
+        FILTER b._key IN @codes
+           OR b.branch_code IN @codes
+           OR b.branch_name IN @codes
+        LIMIT 1
+        RETURN b.monthly_target
+    `,
+      { codes }
+    )
+    if (!rows.length || rows[0] == null || rows[0] === '') return null
+    const n = Number(rows[0])
+    return Number.isFinite(n) ? n : null
+  } catch (e) {
+    console.error('getBranchMonthlyTargetForIdentifiers error:', e)
+    return null
+  }
+}
+
 // Helper function to resolve user's branch (name or code) to canonical branch key (branches._key)
 // Used for filtering customers by customer.branches[]
 export const getCanonicalBranchKey = async (userBranch) => {

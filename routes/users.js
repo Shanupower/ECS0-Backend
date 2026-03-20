@@ -53,7 +53,6 @@ router.get('/me', requireAuth, async (req, res) => {
     last_login_at: user.last_login_at,
     created_at: user.created_at,
     must_change_password: !!mustChangePassword,
-    monthly_target: user.monthly_target != null ? Number(user.monthly_target) : null,
     dashboard_widgets: Array.isArray(user.dashboard_widgets) ? user.dashboard_widgets : null
   })
 })
@@ -113,7 +112,6 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
       is_active: user.is_active,
       last_login_at: user.last_login_at,
       created_at: user.created_at,
-      monthly_target: user.monthly_target != null ? user.monthly_target : null,
       dashboard_widgets: IS_ARRAY(user.dashboard_widgets) ? user.dashboard_widgets : null
     }
   `)
@@ -215,7 +213,6 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       }
     }
     
-    const { monthly_target } = req.body || {}
     const userDoc = {
       emp_code: empCodeValidation.value,
       name: nameValidation.value,
@@ -225,8 +222,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       role,
       password_hash: hash,
       is_active: true,
-      created_at: new Date().toISOString(),
-      monthly_target: monthly_target !== undefined && monthly_target !== '' && monthly_target != null ? Number(monthly_target) : null
+      created_at: new Date().toISOString()
     }
     const result = await getCollection('users').save(userDoc)
     res.status(201).json({ id: result._key })
@@ -238,14 +234,13 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
 // Update user (admin only)
 router.patch('/:id', requireAuth, requireRole('admin'), async (req, res) => {
   const id = req.params.id
-  const { name, email, branch, role, is_active, monthly_target, dashboard_widgets } = req.body || {}
+  const { name, email, branch, role, is_active, dashboard_widgets } = req.body || {}
   const updates = {}
   
   if (name !== undefined) updates.name = name
   if (email !== undefined) updates.email = email
   if (role !== undefined) updates.role = role
   if (is_active !== undefined) updates.is_active = is_active
-  if (monthly_target !== undefined) updates.monthly_target = monthly_target === '' || monthly_target === null ? null : Number(monthly_target)
   if (dashboard_widgets !== undefined) {
     if (dashboard_widgets === null) {
       updates.dashboard_widgets = null

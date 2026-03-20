@@ -111,12 +111,14 @@ async function migrateUsers(branchLookup) {
   })
 }
 
+const CUSTOMER_UPDATE_BATCH_SIZE = 200
+
 async function migrateCustomers(branchLookup) {
   console.log('=== Migrating customers.relationship_manager to branches[] canonical codes ===')
 
   const customers = await q(`
     FOR c IN customers
-      RETURN { _key: c._key, relationship_manager: c.relationship_manager, relationship_manager_display: c.relationship_manager_display }
+      RETURN { _key: c._key, relationship_manager: c.relationship_manager, relationship_manager_display: c.relationship_manager_display, branches: c.branches }
   `)
 
   const custColl = getCollection('customers')
@@ -127,6 +129,27 @@ async function migrateCustomers(branchLookup) {
     unchangedNonEmpty: 0,
     unchangedExamples: [],
     unknown: new Set()
+  }
+
+  /** @type {{ _key: string, branches: string[], relationship_manager: string | string[] }[]} */
+  const updateBatch = []
+
+  const flushBatch = async () => {
+    if (updateBatch.length === 0) return
+    if (DRY_RUN) {
+      updateBatch.length = 0
+      return
+    }
+    await Promise.all(
+      updateBatch.map(({ _key, branches, relationship_manager }) =>
+        custColl.update(_key, {
+          branches,
+          relationship_manager: relationship_manager
+        })
+      )
+    )
+    console.log(`  ... updated batch of ${updateBatch.length} customers (total changed so far: ${stats.changed})`)
+    updateBatch.length = 0
   }
 
   for (const c of customers) {
@@ -193,20 +216,30 @@ async function migrateCustomers(branchLookup) {
     }
 
     stats.changed++
-    console.log(
-      `[CUSTOMER] ${c._key}: ${JSON.stringify(prev)} -> ${JSON.stringify(
-        canonicalBranches
-      )}`
-    )
+    if (stats.changed <= 30) {
+      console.log(
+        `[CUSTOMER] ${c._key}: ${JSON.stringify(prev)} -> ${JSON.stringify(
+          canonicalBranches
+        )}`
+      )
+    }
+
+    const relationship_manager =
+      canonicalBranches.length === 1 ? canonicalBranches[0] : canonicalBranches
 
     if (!DRY_RUN) {
-      await custColl.update(c._key, {
+      updateBatch.push({
+        _key: c._key,
         branches: canonicalBranches,
-        relationship_manager:
-          canonicalBranches.length === 1 ? canonicalBranches[0] : canonicalBranches
+        relationship_manager
       })
+      if (updateBatch.length >= CUSTOMER_UPDATE_BATCH_SIZE) {
+        await flushBatch()
+      }
     }
   }
+
+  await flushBatch()
 
   console.log('Customer migration stats:', {
     total: stats.total,
