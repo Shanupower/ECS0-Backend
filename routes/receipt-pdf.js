@@ -57,34 +57,93 @@ export function generateReceiptPDF(receipt) {
     try {
       let y = margin
 
-      const field = (label, value, x, currentY, lw = 140, vw = contentWidth - 140) => {
+      const field = (label, value, x, currentY, lw = 120, vw = contentWidth - 120) => {
         if (currentY >= maxY) return currentY
         const v = value != null && value !== '' && value !== 'N/A' ? String(value) : null
         if (!v) return currentY
-        const h = Math.max(10, Math.ceil(doc.fontSize(8).heightOfString(v, { width: vw }) / 9) * 9 + 2)
-        if (currentY + h > maxY) return currentY
-        doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text(label + ':', x, currentY, { width: lw })
-        doc.fontSize(8).font('Helvetica').fillColor('#111827').text(v, x + lw, currentY, { width: vw, lineGap: 1 })
-        return currentY + h
+        const textH = 16
+        if (currentY + textH > maxY) return currentY
+        doc.fontSize(7).font('Helvetica-Bold').fillColor('#6B7280').text(label.toUpperCase(), x, currentY, { width: lw })
+        doc.fontSize(8.5).font('Helvetica').fillColor('#111827')
+          .text(v, x + lw, currentY - 1, { width: vw, height: 14, ellipsis: true, lineBreak: true })
+        return currentY + textH
       }
 
       const amountField = (label, value, x, currentY) => {
         if (currentY + 16 > maxY || value == null || value === '') return currentY
-        doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text(label + ':', x, currentY, { width: 140 })
-        doc.fontSize(10).font('Helvetica-Bold').fillColor('#DC2626').text(fmtINR(value), x + 140, currentY - 1, { width: contentWidth - 140 })
+        doc.fontSize(7).font('Helvetica-Bold').fillColor('#6B7280').text(label.toUpperCase(), x, currentY, { width: 120 })
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text(fmtINR(value), x + 120, currentY - 1, { width: contentWidth - 120 })
         return currentY + 16
       }
 
-      const sectionLine = (currentY) => {
-        if (currentY + 6 > maxY) return currentY
-        doc.moveTo(margin, currentY).lineTo(contentRight, currentY).strokeColor('#E5E7EB').lineWidth(0.5).stroke()
-        return currentY + 6
+      const sectionTitle = (title, currentY) => {
+        if (currentY + 18 > maxY) return currentY
+        doc.rect(margin, currentY, contentWidth, 16).fillColor('#F3F4F6').fill()
+        doc.rect(margin, currentY, contentWidth, 16).strokeColor('#D1D5DB').lineWidth(0.8).stroke()
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text(title, margin + 8, currentY + 4)
+        return currentY + 22
       }
 
-      const sectionTitle = (title, currentY) => {
-        if (currentY + 14 > maxY) return currentY
-        doc.fontSize(9).font('Helvetica-Bold').fillColor('#111827').text(title, margin, currentY)
-        return currentY + 12
+      const sectionBottomLine = (currentY) => {
+        if (currentY + 8 > maxY) return currentY
+        doc.moveTo(margin, currentY).lineTo(contentRight, currentY).strokeColor('#E5E7EB').lineWidth(0.8).stroke()
+        return currentY + 8
+      }
+
+      const drawKpiRow = (cards, currentY) => {
+        const validCards = cards.filter((c) => c?.value != null && c?.value !== '')
+        if (!validCards.length) return currentY
+        const gap = 6
+        const cardW = (contentWidth - (gap * (validCards.length - 1))) / validCards.length
+        const cardH = 34
+        validCards.forEach((c, idx) => {
+          const x = margin + idx * (cardW + gap)
+          doc.rect(x, currentY, cardW, cardH).fillColor('#F3F4F6').fill()
+          doc.rect(x, currentY, cardW, cardH).strokeColor('#D1D5DB').lineWidth(0.8).stroke()
+          doc.fontSize(7).font('Helvetica-Bold').fillColor('#6B7280').text(c.label.toUpperCase(), x + 6, currentY + 5, { width: cardW - 12 })
+          doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#111827').text(c.value, x + 6, currentY + 15, { width: cardW - 12 })
+        })
+        return currentY + cardH + 8
+      }
+
+      const drawInlineTriplet = (items, currentY) => {
+        const row = (items || []).slice(0, 3)
+        while (row.length < 3) row.push({ label: '', value: null })
+        const hasAnyValue = row.some((i) => i?.value != null && i?.value !== '')
+        if (!hasAnyValue) return currentY
+        const gap = 8
+        const colW = (contentWidth - gap * 2) / 3
+        let maxBottom = currentY
+        for (let i = 0; i < 3; i++) {
+          const item = row[i]
+          const x = margin + i * (colW + gap)
+          if (item?.label) {
+            doc.fontSize(7).font('Helvetica-Bold').fillColor('#6B7280').text(item.label.toUpperCase(), x, currentY, { width: colW })
+          }
+          if (item?.value != null && item?.value !== '') {
+            doc.fontSize(8.5).font('Helvetica').fillColor('#111827')
+              .text(String(item.value), x, currentY + 9, { width: colW, height: 20, ellipsis: true, lineBreak: true })
+          }
+          maxBottom = Math.max(maxBottom, currentY + 29)
+        }
+        return maxBottom + 7
+      }
+
+      const drawSectionBox = (startY, endY) => {
+        const h = Math.max(0, endY - startY)
+        if (h <= 0) return
+        doc.rect(margin, startY, contentWidth, h).strokeColor('#D1D5DB').lineWidth(0.8).stroke()
+      }
+
+      const drawKeyValueRows = (entries, currentY) => {
+        const normalized = (entries || [])
+          .filter((e) => e && e.value != null && e.value !== '')
+          .map((e) => ({ label: String(e.label || ''), value: e.value }))
+        let yPos = currentY
+        for (let i = 0; i < normalized.length; i += 3) {
+          yPos = drawInlineTriplet(normalized.slice(i, i + 3), yPos)
+        }
+        return yPos
       }
 
       // ─── HEADER ───
@@ -93,30 +152,27 @@ export function generateReceiptPDF(receipt) {
       try {
         if (fs.existsSync(logoPath)) {
           const img = doc.openImage(logoPath)
-          logoH = 70 * (img.height / img.width)
-          doc.image(logoPath, margin, y, { width: 70 })
+          logoH = 140 * (img.height / img.width)
+          doc.image(logoPath, margin, y, { width: 140 })
         }
       } catch { /* skip logo */ }
 
-      const boxW = 150, boxH = 44, boxX = contentRight - boxW
-      doc.rect(boxX, y, boxW, boxH).fillColor('#FEF2F2').fill()
-      doc.rect(boxX, y, boxW, boxH).strokeColor('#DC2626').lineWidth(0.8).stroke()
+      const boxW = 200, boxH = 44, boxX = contentRight - boxW
+      doc.rect(margin, y - 8, contentWidth, 8).fillColor('#0E5BD7').fill()
+      doc.rect(margin, y - 2, contentWidth * 0.33, 2).fillColor('#DC2626').fill()
+      doc.rect(boxX, y, boxW, boxH).fillColor('#F9FAFB').fill()
+      doc.rect(boxX, y, boxW, boxH).strokeColor('#D1D5DB').lineWidth(0.8).stroke()
       const dateStr = receipt.date ? fmtDate(receipt.date) : fmtDate(new Date())
       const receiptNo = String(receipt.receipt_no || receipt.receiptNo || '')
-      doc.fontSize(6.5).font('Helvetica').fillColor('#6B7280').text('Date', boxX + 5, y + 5)
-      doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#111827').text(dateStr, boxX + 5, y + 13)
-      doc.fontSize(6.5).font('Helvetica').fillColor('#6B7280').text('Receipt No', boxX + 5, y + 25)
-      doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#DC2626').text(receiptNo, boxX + 5, y + 33, { width: boxW - 10 })
-      y += Math.max(logoH, boxH) + 8
+      doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#6B7280').text('RECEIPT DATE', boxX + 8, y + 6)
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text(dateStr, boxX + 8, y + 15)
+      doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#6B7280').text('RECEIPT NO', boxX + 8, y + 28)
+      doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#111827').text(receiptNo, boxX + 78, y + 28, { width: boxW - 86 })
+      y += Math.max(logoH, boxH) + 10
 
-      doc.moveTo(margin, y).lineTo(contentRight, y).strokeColor('#DC2626').lineWidth(1.5).stroke()
-      y += 8
-
-      // Banner
-      doc.rect(margin, y, contentWidth, 16).fillColor('#FEF2F2').fill()
-      doc.rect(margin, y, contentWidth, 16).strokeColor('#DC2626').lineWidth(1).stroke()
-      doc.fontSize(10).font('Helvetica-Bold').fillColor('#DC2626').text('ACKNOWLEDGEMENT RECEIPT', margin, y + 3, { align: 'center', width: contentWidth })
-      y += 22
+      doc.rect(contentRight - 150, y - 2, 150, 18).fillColor('#0E5BD7').fill()
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#FFFFFF').text('ACKNOWLEDGEMENT RECEIPT', contentRight - 150, y + 3, { width: 150, align: 'center' })
+      y += 20
 
       // ─── Resolve all fields once ───
       const empName = val(receipt.employee?.name, receipt.employee_name, receipt.employeeName)
@@ -155,41 +211,71 @@ export function generateReceiptPDF(receipt) {
       const misc = pd.misc || null
       const pmt = receipt.payment || {}
 
+      // ─── Header KPI row ───
+      const fdDepositAmt = val(fd?.deposit?.amount, receipt.fd_deposit_amount, txn.amount, receipt.investment_amount, receipt.investmentAmount)
+      const fdMaturityAmt = val(fd?.maturity?.amount, receipt.fd_maturity_amount)
+      const fdMaturityDate = val(fd?.maturity?.date, receipt.fd_maturity_date)
+      y = drawKpiRow([
+        { label: 'Deposit Amount', value: fdDepositAmt != null ? fmtINR(fdDepositAmt) : null },
+        { label: 'Maturity Amount', value: fdMaturityAmt != null ? fmtINR(fdMaturityAmt) : null },
+        { label: 'Maturity Date', value: fdMaturityDate ? fmtDate(fdMaturityDate) : null }
+      ], y)
+
       // ─── 1. EMPLOYEE DETAILS ───
       y = sectionTitle('Employee Details', y)
-      if (empName) y = field('Name', empName, margin, y)
-      if (empCode) y = field('Code', empCode, margin, y)
-      if (empBranch) y = field('Branch', empBranch, margin, y)
-      y += 4
+      const empBodyStart = y - 4
+      y = drawInlineTriplet([
+        { label: 'Employee Name', value: empName },
+        { label: 'Employee Code', value: empCode },
+        { label: 'Branch', value: empBranch }
+      ], y)
+      drawSectionBox(empBodyStart, y + 2)
+      y = sectionBottomLine(y)
 
       // ─── 2. INVESTOR DETAILS ───
-      y = sectionLine(y)
       y = sectionTitle('Investor Details', y)
-      if (invId) y = field('ID', invId, margin, y)
-      if (invName) y = field('Name', invName, margin, y)
+      const invBodyStart = y - 4
+      y = drawInlineTriplet([
+        { label: 'Investor ID', value: invId },
+        { label: 'Investor Name', value: invName },
+        { label: 'PIN', value: invPin }
+      ], y)
       if (invAddr) y = field('Address', invAddr, margin, y)
-      if (invPin) y = field('PIN', invPin, margin, y)
-      if (invPan) y = field('PAN', invPan, margin, y)
-      if (invMobile) y = field('Mobile', invMobile, margin, y)
-      if (invEmail) y = field('Email', invEmail, margin, y)
-      y += 4
+      y = drawInlineTriplet([
+        { label: 'PAN', value: invPan },
+        { label: 'Mobile', value: invMobile },
+        { label: 'Email', value: invEmail }
+      ], y)
+      drawSectionBox(invBodyStart, y + 2)
+      y = sectionBottomLine(y)
 
       // ─── 3. INVESTMENT DETAILS ───
-      y = sectionLine(y)
       y = sectionTitle('Investment Details', y)
+      const invstBodyStart = y - 4
 
       // Product type badge
       if (y + 16 <= maxY) {
-        doc.rect(margin, y, contentWidth, 14).fillColor('#FEF2F2').fill()
-        doc.rect(margin, y, contentWidth, 14).strokeColor('#DC2626').lineWidth(0.8).stroke()
-        doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#DC2626').text(catLabel, margin + 8, y + 3)
+        doc.rect(margin, y, contentWidth, 14).fillColor('#FFFFFF').fill()
+        doc.rect(margin, y, contentWidth, 14).strokeColor('#D1D5DB').lineWidth(0.8).stroke()
+        doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#111827').text(`Product: ${catLabel}`, margin + 8, y + 3)
         y += 18
       }
 
       // ── MF ──
       if (isMF) {
-        const mode = val(txn.mode, receipt.mode)
         const txnType = val(txn.type, receipt.txn_type, receipt.transaction_type, receipt.txnType) || 'Fresh'
+        const legacyMode = val(txn.mode, receipt.mode)
+        const normalizeTxnTypeToDisplayMode = (raw) => {
+          const v = String(raw || '').trim()
+          if (!v) return ''
+          const upper = v.toUpperCase()
+          if (upper === 'SWITCHOVER' || upper === 'SWITCH_OVER') return 'Switch Over'
+          if (v === 'Switch Over') return 'Switch Over'
+          if (v === 'Lumpsum' || v === 'LumpSum' || v === 'Lump Sum') return 'Lump Sum'
+          return v // SIP / SWP / STP
+        }
+        const modeRaw = (txnType && txnType !== 'Fresh') ? txnType : legacyMode
+        const mode = normalizeTxnTypeToDisplayMode(modeRaw)
         const amcName = val(mf?.amc?.name, receipt.amc_name)
         const schemeName = val(mf?.scheme?.name, receipt.scheme_name, receipt.schemeName, receipt.product?.name)
         const nfo = receipt.scheme_is_nfo || mf?.scheme?.is_nfo
@@ -202,39 +288,49 @@ export function generateReceiptPDF(receipt) {
         const investAmt = val(txn.amount, receipt.investment_amount, receipt.investmentAmount)
         const amcCat = val(receipt.mf_amc_category, mf?.amc_category)
 
-        y = field('Product Type', catLabel, margin, y)
-        y = field('Transaction', txnType, margin, y)
-        if (mode) y = field('Mode', mode, margin, y)
-        if (investAmt != null) y = amountField('Amount', investAmt, margin, y)
-        if (folioNo) y = field('Folio / Policy No', folioNo, margin, y)
+        const mfEntries = [
+          { label: 'Product Type', value: catLabel },
+          { label: 'Transaction Type', value: txnType },
+          { label: 'Mode', value: mode },
+          { label: 'Amount', value: investAmt != null ? fmtINR(investAmt) : null },
+          { label: 'Folio / Policy No', value: folioNo }
+        ]
 
-        // Scheme display: for Switch Over show "From → To"
+        // Scheme display
+        // - Switch Over: show Source Scheme + Target Scheme
+        // - Others: show Scheme
         const switchFrom = val(txn.switch_over?.from_scheme_name, receipt.switch_from_scheme_name)
         const switchTo = val(txn.switch_over?.to_scheme_name, receipt.switch_to_scheme_name, schemeName)
-        if (txnType === 'Switch Over' && switchFrom && switchTo) {
-          y = field('Scheme', `${switchFrom}  →  ${switchTo}`, margin, y, 140, contentWidth - 140)
+        if (txnType === 'Switch Over') {
+          const sourceDisplay = switchFrom ? (switchFrom) : null
+          const targetDisplay = switchTo ? (switchTo) : null
+          if (sourceDisplay) mfEntries.push({ label: 'Source Scheme', value: sourceDisplay })
+          if (targetDisplay) mfEntries.push({ label: 'Target Scheme', value: targetDisplay })
+          if (!sourceDisplay && !targetDisplay && schemeName) {
+            mfEntries.push({ label: 'Scheme', value: schemeName + (nfo ? ' [NFO]' : '') })
+          }
         } else if (schemeName) {
-          y = field('Scheme', schemeName + (nfo ? ' [NFO]' : ''), margin, y, 140, contentWidth - 140)
+          mfEntries.push({ label: 'Scheme', value: schemeName + (nfo ? ' [NFO]' : '') })
         }
         if (sOption) {
           let optTxt = sOption
           if (sOption === 'IDCW_PAYOUT') optTxt = 'IDCW - Payout'
           else if (sOption === 'IDCW_REINVEST') optTxt = 'IDCW - Reinvestment'
-          y = field('Option', optTxt, margin, y)
+          mfEntries.push({ label: 'Option', value: optTxt })
         }
 
         // MF detail sub-section
-        if (amcName) y = field('AMC', amcName, margin, y)
-        if (amcCat && amcCat !== 'MF') y = field('AMC Category', amcCat, margin, y)
+        if (amcName) mfEntries.push({ label: 'AMC', value: amcName })
+        if (amcCat && amcCat !== 'MF') mfEntries.push({ label: 'AMC Category', value: amcCat })
         if (sCategory) {
           const catStr = sSubCat ? `${sCategory} / ${sSubCat}` : sCategory
-          y = field('Category', catStr, margin, y)
+          mfEntries.push({ label: 'Category', value: catStr })
         }
         if (sPlan || sType) {
           const planType = [sPlan, sType].filter(Boolean).join(', ')
-          y = field('Plan & Type', planType, margin, y)
+          mfEntries.push({ label: 'Plan & Type', value: planType })
         }
-        if (folioNo) y = field('Folio Number', folioNo, margin, y)
+        if (folioNo) mfEntries.push({ label: 'Folio Number', value: folioNo })
 
         // SIP
         const sip = txn.sip || {}
@@ -243,23 +339,24 @@ export function generateReceiptPDF(receipt) {
         const sipEnd = val(sip.end_date, receipt.sip_end_date)
         const sipPerp = sip.is_perpetual || receipt.sip_is_perpetual
         if (sipFreq || sipStart) {
-          if (sipFreq) y = field('SIP Frequency', sipFreq, margin, y)
-          if (sipStart) y = field('Start Date', fmtDate(sipStart), margin, y)
-          if (sipEnd) y = field('End Date', fmtDate(sipEnd), margin, y)
-          else if (sipPerp) y = field('Type', 'Perpetual (40 years)', margin, y)
+          if (sipFreq) mfEntries.push({ label: 'SIP Frequency', value: sipFreq })
+          if (sipStart) mfEntries.push({ label: 'SIP Start Date', value: fmtDate(sipStart) })
+          if (sipEnd) mfEntries.push({ label: 'SIP End Date', value: fmtDate(sipEnd) })
+          else if (sipPerp) mfEntries.push({ label: 'SIP Type', value: 'Perpetual (40 years)' })
         }
 
         // STP
         const stp = txn.stp || {}
-        const stpTarget = val(stp.from_scheme_name, receipt.stp_target_scheme_name)
+        const stpTarget = val(stp.to_scheme_name, receipt.stp_target_scheme_name)
         const stpFreq = val(stp.frequency, receipt.stp_frequency)
         const stpStart = val(stp.start_date, receipt.stp_start_date)
         const stpAmt = val(stp.amount, receipt.stp_amount)
         if (stpTarget || stpFreq) {
-          if (stpTarget) y = field('Transfer to Scheme', stpTarget, margin, y, 140, contentWidth - 140)
-          if (stpFreq) y = field('STP Frequency', stpFreq, margin, y)
-          if (stpStart) y = field('Start Date', fmtDate(stpStart), margin, y)
-          if (stpAmt != null) y = amountField('Transfer Amount', stpAmt, margin, y)
+          if (stpTarget) mfEntries.push({ label: 'STP Target Scheme', value: stpTarget })
+          if (schemeName) mfEntries.push({ label: 'STP Source Scheme', value: schemeName + (nfo ? ' [NFO]' : '') })
+          if (stpFreq) mfEntries.push({ label: 'STP Frequency', value: stpFreq })
+          if (stpStart) mfEntries.push({ label: 'STP Start Date', value: fmtDate(stpStart) })
+          if (stpAmt != null) mfEntries.push({ label: 'STP Transfer Amount', value: fmtINR(stpAmt) })
         }
 
         // SWP
@@ -268,9 +365,9 @@ export function generateReceiptPDF(receipt) {
         const swpStart = val(swp.start_date, receipt.swp_start_date)
         const swpAmt = val(swp.amount, receipt.swp_amount)
         if (swpFreq || swpStart) {
-          if (swpFreq) y = field('SWP Frequency', swpFreq, margin, y)
-          if (swpStart) y = field('Start Date', fmtDate(swpStart), margin, y)
-          if (swpAmt != null) y = amountField('Withdrawal Amount', swpAmt, margin, y)
+          if (swpFreq) mfEntries.push({ label: 'SWP Frequency', value: swpFreq })
+          if (swpStart) mfEntries.push({ label: 'SWP Start Date', value: fmtDate(swpStart) })
+          if (swpAmt != null) mfEntries.push({ label: 'SWP Withdrawal Amount', value: fmtINR(swpAmt) })
         }
 
         // Switch Over value
@@ -278,11 +375,13 @@ export function generateReceiptPDF(receipt) {
           const sw = txn.switch_over || {}
           const swType = val(sw.type, receipt.switch_type)
           const swVal = val(sw.value, receipt.switch_value)
-          if (swType) y = field('Switch Type', swType, margin, y)
+          if (swType) mfEntries.push({ label: 'Switch Type', value: swType })
           if (swVal != null) {
-            y = field('Switch Value', swType === 'Amount' ? fmtINR(swVal) : `${swVal} units`, margin, y)
+            mfEntries.push({ label: 'Switch Value', value: swType === 'Amount' ? fmtINR(swVal) : `${swVal} units` })
           }
         }
+
+        y = drawKeyValueRows(mfEntries, y)
       }
 
       // ── FD / GOVT_FD ──
@@ -301,22 +400,37 @@ export function generateReceiptPDF(receipt) {
         const renewType = val(fd?.application?.renewal?.investment_type, receipt.fd_renewal_investment_type)
         const renewAmt = val(fd?.application?.renewal?.additional_amount, receipt.fd_renewal_additional_amount)
 
-        if (issuerName) y = field('Issuer', issuerName + (issuerType ? ` (${issuerType})` : ''), margin, y)
-        if (schemeName) y = field('Scheme', schemeName, margin, y)
-        if (depositAmt != null) y = amountField('Deposit Amount', depositAmt, margin, y)
-        if (tenure) y = field('Tenure', `${tenure} months (${Math.floor(tenure / 12)} years)`, margin, y)
-        if (payoutFreq) y = field('Payout Frequency', payoutFreq, margin, y)
-        if (rate) y = field('Interest Rate', `${Number(rate).toFixed(2)}% p.a.`, margin, y)
-        if (maturityAmt != null) y = field('Maturity Amount', fmtINR(maturityAmt), margin, y)
-        if (maturityDate) y = field('Maturity Date', fmtDate(maturityDate), margin, y)
-        if (appNo) y = field('Application / FD Number', appNo, margin, y)
-        y = field('Transaction Type', fdTxnType, margin, y)
+        y = drawInlineTriplet([
+          { label: 'Product', value: 'Fixed Deposit' },
+          { label: 'Issuer', value: issuerName ? issuerName + (issuerType ? ` (${issuerType})` : '') : null },
+          { label: 'Scheme', value: schemeName }
+        ], y)
+        y = drawInlineTriplet([
+          { label: 'Tenure', value: tenure ? `${tenure} months (${Math.floor(tenure / 12)} years)` : null },
+          { label: 'Payout Frequency', value: payoutFreq },
+          { label: 'Interest Rate', value: rate ? `${Number(rate).toFixed(2)}% p.a.` : null }
+        ], y)
+
+        y = drawInlineTriplet([
+          { label: 'Deposit Amount', value: depositAmt != null ? fmtINR(depositAmt) : null },
+          { label: 'Maturity Amount', value: maturityAmt != null ? fmtINR(maturityAmt) : null },
+          { label: 'Maturity Date', value: maturityDate ? fmtDate(maturityDate) : null }
+        ], y)
+        y = drawInlineTriplet([
+          { label: 'Application / FD Number', value: appNo },
+          { label: 'Transaction Type', value: fdTxnType },
+          { label: 'Renewal Investment', value: null }
+        ], y)
         if (fdTxnType === 'Renewal' && renewType) {
           let txt = renewType === 'same' ? 'Same Amount'
             : renewType === 'increased' ? 'Increased Amount' + (renewAmt ? ` (Additional: ${fmtINR(renewAmt)})` : '')
             : renewType === 'decreased' ? 'Decreased Amount' + (renewAmt ? ` (Withdrawal: ${fmtINR(renewAmt)})` : '')
             : renewType
-          y = field('Renewal Investment', txt, margin, y)
+          y = drawInlineTriplet([
+            { label: 'Renewal Investment', value: txt },
+            { label: '', value: null },
+            { label: '', value: null }
+          ], y)
         }
       }
 
@@ -334,16 +448,18 @@ export function generateReceiptPDF(receipt) {
         const bondTxnType = val(bond?.transaction?.type, receipt.bond_transaction_type, receipt.txn_type, receipt.transaction_type)
         const isin = val(bond?.scheme?.isin, receipt.bond_isin)
 
-        if (issuer) y = field('Issuer', issuer + (issuerType ? ` (${issuerType})` : ''), margin, y)
-        if (scheme) y = field('Scheme', scheme, margin, y)
-        if (amt != null) y = amountField('Amount', amt, margin, y)
-        if (coupon != null) y = field('Coupon Rate', `${Number(coupon).toFixed(2)}% p.a.`, margin, y)
-        if (faceVal != null) y = field('Face Value', fmtINR(faceVal, 0), margin, y)
-        if (issueDate) y = field('Issue Date', fmtDate(issueDate), margin, y)
-        if (matDate) y = field('Maturity / Renewal Due', fmtDate(matDate), margin, y)
-        if (appNo) y = field('Application Number', appNo, margin, y)
-        if (bondTxnType) y = field('Transaction Type', bondTxnType, margin, y)
-        if (isin) y = field('ISIN', isin, margin, y)
+        y = drawKeyValueRows([
+          { label: 'Issuer', value: issuer ? issuer + (issuerType ? ` (${issuerType})` : '') : null },
+          { label: 'Scheme', value: scheme },
+          { label: 'Amount', value: amt != null ? fmtINR(amt) : null },
+          { label: 'Coupon Rate', value: coupon != null ? `${Number(coupon).toFixed(2)}% p.a.` : null },
+          { label: 'Face Value', value: faceVal != null ? fmtINR(faceVal, 0) : null },
+          { label: 'Issue Date', value: issueDate ? fmtDate(issueDate) : null },
+          { label: 'Maturity / Renewal Due', value: matDate ? fmtDate(matDate) : null },
+          { label: 'Application Number', value: appNo },
+          { label: 'Transaction Type', value: bondTxnType },
+          { label: 'ISIN', value: isin }
+        ], y)
       }
 
       // ── INSURANCE ──
@@ -359,29 +475,34 @@ export function generateReceiptPDF(receipt) {
         const matDate = val(ins?.coverage?.maturity_date, receipt.insurance_maturity_date)
         const insTxnType = val(receipt.fd_transaction_type, receipt.txn_type, ins?.policy?.type) || 'Fresh'
 
-        if (issuer) y = field('Issuer', issuer, margin, y)
-        if (product) y = field('Product', product, margin, y)
-        if (premAmt != null) y = amountField('Premium Amount', premAmt, margin, y)
-        if (policyNo) y = field('Policy Number', policyNo, margin, y)
-        if (sumAssured != null) y = field('Sum Assured', fmtINR(sumAssured, 0), margin, y)
-        if (policyTerm) y = field('Policy Term', `${policyTerm} years`, margin, y)
-        if (premFreq) y = field('Premium Frequency', premFreq, margin, y)
-        if (startDate) y = field('Date of Issue', fmtDate(startDate), margin, y)
-        if (matDate) y = field('Maturity Date', fmtDate(matDate), margin, y)
-        y = field('Transaction Type', insTxnType, margin, y)
+        y = drawKeyValueRows([
+          { label: 'Issuer', value: issuer },
+          { label: 'Product', value: product },
+          { label: 'Premium Amount', value: premAmt != null ? fmtINR(premAmt) : null },
+          { label: 'Policy Number', value: policyNo },
+          { label: 'Sum Assured', value: sumAssured != null ? fmtINR(sumAssured, 0) : null },
+          { label: 'Policy Term', value: policyTerm ? `${policyTerm} years` : null },
+          { label: 'Premium Frequency', value: premFreq },
+          { label: 'Date of Issue', value: startDate ? fmtDate(startDate) : null },
+          { label: 'Maturity Date', value: matDate ? fmtDate(matDate) : null },
+          { label: 'Transaction Type', value: insTxnType }
+        ], y)
       }
 
       // ── MISC ──
       if (isMISC) {
         const svcName = val(misc?.service_name, receipt.service_name, receipt.serviceName)
         const svcPrice = val(misc?.service_price, receipt.service_price, receipt.servicePrice)
-        if (svcName) y = field('Service Name', svcName, margin, y)
-        if (svcPrice != null) y = amountField('Service Price', svcPrice, margin, y)
+        y = drawKeyValueRows([
+          { label: 'Service Name', value: svcName },
+          { label: 'Service Price', value: svcPrice != null ? fmtINR(svcPrice) : null }
+        ], y)
       }
 
       // CC / SI omitted from acknowledgement PDF (internal-only metrics)
 
-      y += 4
+      drawSectionBox(invstBodyStart, y + 2)
+      y = sectionBottomLine(y)
 
       // ─── 4. PAYMENT / TRANSACTION DETAILS ───
       const entryMode = val(pmt.entry_mode, receipt.entry_mode, receipt.transactionType)
@@ -397,59 +518,50 @@ export function generateReceiptPDF(receipt) {
 
       const hasPayment = entryMode || channel || refNo || bankName || instNo || notes
       if (hasPayment) {
-        y = sectionLine(y)
         y = sectionTitle('Payment / Transaction Details', y)
+        const payBodyStart = y - 4
 
         const mode = entryMode || (bankName ? 'Offline' : (notes || (channel && channel !== 'Cheque') ? 'Others' : 'Online'))
         const modeLabel = mode === 'Online' ? 'Online Payment'
           : mode === 'Offline' ? 'Offline Payment (Cheque / Demand Draft)'
           : mode === 'Others' ? 'Other Payment Method' : mode
-        y = field('Payment Type', modeLabel, margin, y)
+        y = drawInlineTriplet([
+          { label: 'Payment Type', value: modeLabel },
+          { label: mode === 'Online' ? 'Reference / Transaction Number' : 'Cheque / Instrument Number', value: mode === 'Online' ? (refNo || channel) : (instNo || refNo) },
+          { label: 'Date', value: (instDate || txnDate) ? fmtDate(instDate || txnDate) : null }
+        ], y)
 
-        if (mode === 'Online') {
-          if (refNo || channel) y = field('Reference / Transaction Number', refNo || channel, margin, y)
-        }
-        if (mode === 'Offline' || bankName || instNo) {
-          if (instNo || refNo) y = field('Cheque / Instrument Number', instNo || refNo, margin, y)
-          const payDate = instDate || txnDate
-          if (payDate) y = field('Date', fmtDate(payDate), margin, y)
-          if (bankName) y = field('Bank', bankName, margin, y)
-          if (bankBranch) y = field('Branch', bankBranch, margin, y)
-        }
-        if (mode === 'Others') {
-          if (notes || channel) y = field('Details', notes || channel, margin, y)
-        }
-        if (txnDate && mode !== 'Offline') {
-          y = field('Transaction Date', fmtDate(txnDate), margin, y)
-        }
+        y = drawInlineTriplet([
+          { label: 'Bank', value: bankName },
+          { label: 'Branch', value: bankBranch },
+          { label: mode === 'Others' ? 'Details' : 'Transaction Date', value: mode === 'Others' ? (notes || channel) : (txnDate && mode !== 'Offline' ? fmtDate(txnDate) : null) }
+        ], y)
+
         if (notes && mode !== 'Others') {
-          y = field('Notes', notes, margin, y)
+          y = drawInlineTriplet([
+            { label: 'Notes', value: notes },
+            { label: '', value: null },
+            { label: '', value: null }
+          ], y)
         }
+        drawSectionBox(payBodyStart, y + 2)
       }
 
-      y += 4
+      y = sectionBottomLine(y)
 
       // ─── FOOTER ───
-      if (y + 60 <= maxY) {
-        y = sectionLine(y)
-        doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#111827').text('Terms and Conditions:', margin, y)
+      if (y + 58 <= maxY) {
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#111827').text('Important Note', margin, y)
         y += 8
-        doc.fontSize(6.5).font('Helvetica').fillColor('#374151')
-          .text('This receipt is proof of payment towards the specified investment and does not guarantee returns. Investments are subject to market risks; please read the scheme details carefully before investing. For queries, contact your branch manager or visit our website.', margin + 4, y, { width: contentWidth - 8, lineGap: 1 })
-        y += 16
-        if (y + 26 <= maxY) {
-          doc.rect(margin, y, contentWidth, 18).fillColor('#FEF2F2').fill()
-          doc.rect(margin, y, contentWidth, 18).strokeColor('#DC2626').lineWidth(1).stroke()
-          doc.fontSize(8).font('Helvetica-Bold').fillColor('#DC2626')
-            .text('Thank you for choosing ECS Financial. We acknowledge the receipt of your payment and truly appreciate your trust.', margin + 8, y + 4, { align: 'center', width: contentWidth - 16 })
-          y += 22
-          doc.moveTo(margin, y).lineTo(contentRight, y).strokeColor('#DC2626').lineWidth(0.8).stroke()
-          y += 8
-          if (y + 8 <= maxY) {
-            doc.fontSize(7).font('Helvetica').fillColor('#374151').text('Authorized Signature', margin, y)
-            doc.fontSize(7).font('Helvetica').fillColor('#374151').text('Company Stamp', contentRight - 80, y)
-          }
-        }
+        doc.rect(margin, y, contentWidth, 22).fillColor('#FFFBEB').fill()
+        doc.rect(margin, y, contentWidth, 22).strokeColor('#F59E0B').lineWidth(0.8).stroke()
+        doc.fontSize(7).font('Helvetica').fillColor('#374151')
+          .text('This acknowledgement confirms receipt of payment towards the above investment application. It does not constitute a guarantee of returns. Please verify the investor and transaction details carefully and retain this receipt for your records.', margin + 8, y + 5, { width: contentWidth - 16, lineGap: 1 })
+        y += 30
+        doc.moveTo(margin, y).lineTo(contentRight, y).strokeColor('#D1D5DB').lineWidth(0.8).stroke()
+        y += 18
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text('Investor Signature', margin + 8, y)
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#374151').text('Authorized Signature / Company Stamp', contentRight - 195, y)
       }
 
       doc.end()

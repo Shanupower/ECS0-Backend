@@ -1,0 +1,85 @@
+ECS CHANGE NOTES - 2026-03-24
+
+Scope:
+- Backend repo: /Users/admin/ECS0-Backend (changes being committed/pushed now)
+- Frontend repo: /Users/admin/ECS -Workspace/ECS0 (uncommitted changes summary for team visibility)
+
+==================================================
+BACKEND - CURRENT WORK (COMMIT/PUSH)
+==================================================
+
+Modified files:
+- routes/branches.js
+- routes/export.js
+- routes/receipt-pdf.js
+- routes/receipts.js
+- scripts/migrate-receipts-legacy-to-nested.js
+- scripts/migrate-mf-clear-mode-and-backfill-txn-type.js (new)
+
+Key backend updates:
+1) Receipt transaction/data normalization
+   - Ongoing alignment toward nested receipt structures.
+   - Transaction type/mode consistency updates.
+
+2) Migration scripts
+   - Added migration for MF mode cleanup + txn type backfill.
+   - Updated legacy-to-nested receipt migration script.
+
+3) Route updates
+   - Branch/export/receipt routes updated to align with the newer receipt and transaction structure.
+
+4) Receipt PDF redesign and layout standardization
+   - Acknowledgement receipt visual redesign to match new reference format.
+   - Converted sections to boxed/tile style for cleaner readability.
+   - Standardized field layout/spacing to avoid mixed line-by-line blocks.
+   - Payment details switched to tile-style layout.
+   - Investment details switched to tile-style for all major product categories:
+     - MF: SIP, STP, SWP, Switch Over
+     - FD / Govt FD
+     - Bond/NCD
+     - Insurance
+     - Misc
+   - Removed header text: "ECS Financial Services (India) Pvt. Ltd."
+   - Increased logo size by 100% (double width).
+   - Reduced spillover risk that previously caused extra pages.
+
+==================================================
+FRONTEND - UNCOMMITTED SUMMARY (NOT PUSHED HERE)
+==================================================
+
+Source files modified:
+- src/components/MultiStepReceipt.jsx
+- src/components/PrintReceipt.jsx
+- src/components/receipt-steps/StepFDDetails.jsx
+- src/components/receipt-steps/StepFinal.jsx
+- src/components/receipt-steps/StepInsuranceDetails.jsx
+- src/components/receipt-steps/StepNCDBondDetails.jsx
+- src/components/receipt-steps/StepProduct.jsx
+- src/components/receipt-steps/StepTransactionDetails.jsx
+- src/components/ui/DatePickerInput.jsx
+- src/pages/BranchDashboard.jsx
+- src/pages/DashboardPage.jsx
+- src/pages/ReceiptViewPage.jsx
+- src/pages/TransactionsPage.jsx
+- src/utils/receiptNormalizer.js
+
+Generated/dependency artifacts currently modified:
+- dist/index.html
+- node_modules/.package-lock.json
+- node_modules/.vite/deps/*
+- node_modules/csstype/*
+
+Frontend highlights:
+- Active updates across receipt wizard/steps, receipt rendering, dashboards, and transaction flows.
+- Data normalization and transaction-step handling likely aligned with backend receipt shape changes.
+
+==================================================
+TEAM HANDOFF NOTES
+==================================================
+
+- Backend commit includes functional + PDF presentation updates and migration support.
+- Frontend has substantial uncommitted work including source changes and generated artifacts.
+- Recommend splitting upcoming frontend commits into:
+  1) source feature/fix changes
+  2) build/dependency artifact updates (if needed)
+

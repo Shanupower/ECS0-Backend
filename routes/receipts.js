@@ -74,8 +74,13 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       if (!d.investmentAmount && !d.investment_amount && !d.amount) {
         return res.status(400).json({ error: 'validation_error', detail: 'Investment amount is required for Mutual Funds' })
       }
-      if (!d.mode) {
-        return res.status(400).json({ error: 'validation_error', detail: 'Mode (Lump Sum/SIP/STP/SWP) is required for Mutual Funds' })
+      // mode is legacy; prefer txn_type but keep backward compatibility
+      const hasLegacyMode = !!(d.mode || d.mode_type || d.investment_mode)
+      const hasTxnType =
+        !!(d.txn_type || d.txnType || d.transaction_type || d.transactionType) ||
+        !!d.type // sometimes provided as generic transaction type
+      if (!hasLegacyMode && !hasTxnType) {
+        return res.status(400).json({ error: 'validation_error', detail: 'txn_type (or legacy mode) is required for Mutual Funds' })
       }
     } else if (productCategory === 'INS') {
       // Insurance validations
@@ -351,10 +356,32 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       has_existing_folio: d.has_existing_folio !== undefined ? d.has_existing_folio : (d.hasExistingFolio !== undefined ? d.hasExistingFolio : null)
     }
     
+    const txnTypeForMode =
+      d.txnType || d.txn_type || d.transaction_type || d.transactionType || null
+
+    const deriveModeFromTxnType = (raw) => {
+      const v = String(raw || '').trim()
+      if (!v) return null
+      const upper = v.toUpperCase()
+
+      // Switch Over
+      if (upper === 'SWITCHOVER' || v === 'Switch Over') return 'Switch Over'
+
+      // Lump Sum (normalize Lumpsum -> Lump Sum)
+      if (v === 'Lumpsum' || v === 'LumpSum' || v === 'Lump Sum') return 'Lump Sum'
+      if (upper === 'LUMPSUM') return 'Lump Sum'
+
+      // SIP / SWP / STP
+      if (v === 'SIP' || v === 'SWP' || v === 'STP') return v
+
+      return v
+    }
+
     // Transaction Details (mode is MF-only; FD/INS/BOND do not use mode)
     const transaction = {
       type: d.txnType || d.txn_type || d.fd_transaction_type || d.transaction_type || 'Fresh',
-      mode: productCategory === 'MF' ? (d.mode || null) : null,
+      // `mode` is deprecated. MF behaviour is determined via `txn_type` (+ sip/swp/stp frequency fields).
+      mode: null,
       amount: investmentAmount || null,
       units_or_amount: d.unitsOrAmount || d.units_or_amount || null,
       date: date || null,
@@ -386,10 +413,11 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     // STP Details
     if (transaction.mode === 'STP' || d.stp_frequency) {
       transaction.stp = {
-        from_scheme_code: d.stp_target_scheme_code || null, // Note: STP uses target scheme
-        from_scheme_name: d.stp_target_scheme_name || null,
-        to_scheme_code: d.scheme_code || null,
-        to_scheme_name: d.schemeName || d.scheme_name || null,
+        // Source = selected receipt scheme, Target = selected STP target scheme
+        from_scheme_code: d.scheme_code || null,
+        from_scheme_name: d.schemeName || d.scheme_name || null,
+        to_scheme_code: d.stp_target_scheme_code || null,
+        to_scheme_name: d.stp_target_scheme_name || null,
         frequency: d.stp_frequency || null,
         start_date: d.stp_start_date || null,
         amount: d.stp_amount || null,
@@ -1013,6 +1041,7 @@ router.get('/summary', requireAuth, async (req, res) => {
       category,
       status,
       mode,
+      txn_type,
       emp_code,
       branch_code,
       search,
@@ -1044,10 +1073,58 @@ router.get('/summary', requireAuth, async (req, res) => {
       bindVars.status = status
     }
 
-    // Mode filter (for MF)
-    if (mode) {
-      filterConditions.push('receipt.mode == @mode')
-      bindVars.mode = mode
+    // MF mode filter (prefer txn_type; legacy fallback to receipt.mode)
+    const normalizeTxnTypeFromMode = (m) => {
+      const v = String(m || '').trim()
+      if (!v) return ''
+      if (v === 'Lump Sum') return 'Lumpsum'
+      if (v === 'Switch Over') return 'Switch Over'
+      if (v === 'Lumpsum') return 'Lumpsum'
+      return v // SIP / SWP / STP
+    }
+
+    const normalizeModeFallbackFromTxnType = (t) => {
+      const v = String(t || '').trim()
+      if (!v) return ''
+      if (v === 'Lumpsum') return 'Lump Sum'
+      if (v === 'Switch Over') return 'Switch Over'
+      return v
+    }
+
+    const isSwitchOverValue = (v) => {
+      const s = String(v || '').trim().toLowerCase()
+      return s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
+    }
+
+    if (txn_type) {
+      const normalizedTxnType = normalizeTxnTypeFromMode(txn_type) || txn_type
+      if (isSwitchOverValue(normalizedTxnType)) {
+        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
+        bindVars.switch_over_mode = 'Switch Over'
+        bindVars.switch_over_mode_alt1 = 'SwitchOver'
+        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
+        bindVars.switch_over_mode_alt3 = 'switch_over'
+        bindVars.legacy_switch_over_mode = 'Switch Over'
+      } else {
+        filterConditions.push('(receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)')
+        bindVars.txn_type = normalizedTxnType
+        bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
+      }
+    } else if (mode) {
+      const mappedTxnType = normalizeTxnTypeFromMode(mode)
+      if (isSwitchOverValue(mappedTxnType) || isSwitchOverValue(mode)) {
+        // Legacy "Switch Over" stored in receipt.mode; still match against txn_type where available.
+        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
+        bindVars.switch_over_mode = 'Switch Over'
+        bindVars.switch_over_mode_alt1 = 'SwitchOver'
+        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
+        bindVars.switch_over_mode_alt3 = 'switch_over'
+        bindVars.legacy_switch_over_mode = mode
+      } else {
+        filterConditions.push('(receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)')
+        bindVars.mapped_txn_type = mappedTxnType
+        bindVars.mode_legacy = mode
+      }
     }
 
     // Employee code filter
@@ -1244,19 +1321,57 @@ router.get('/', requireAuth, async (req, res) => {
       }
       bindVars.status = status
     }
-    if (mode) {
-      // Handle Switch Over specially - it's selected as a mode but stored as transaction type
-      if (mode === 'Switch Over' || mode === 'SwitchOver' || mode === 'SWITCH_OVER' || mode === 'switch_over') {
-        // For Switch Over, check transaction type fields instead of mode
-        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null)')
+    // MF mode filtering: prefer txn_type; legacy fallback to receipt.mode.
+    // Note: frontend sends "mode" label values like "Lump Sum"/"Switch Over" but backend stores txn_type like "Lumpsum"/"Switch Over".
+    const normalizeTxnTypeFromMode = (m) => {
+      const v = String(m || '').trim()
+      if (!v) return ''
+      if (v === 'Lump Sum') return 'Lumpsum'
+      if (v === 'Switch Over') return 'Switch Over'
+      return v
+    }
+
+    const normalizeModeFallbackFromTxnType = (t) => {
+      const v = String(t || '').trim()
+      if (!v) return ''
+      if (v === 'Lumpsum') return 'Lump Sum'
+      if (v === 'Switch Over') return 'Switch Over'
+      return v
+    }
+
+    const isSwitchOverValue = (v) => {
+      const s = String(v || '').trim().toLowerCase()
+      return s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
+    }
+
+    if (txn_type) {
+      const normalizedTxnType = normalizeTxnTypeFromMode(txn_type) || txn_type
+      if (isSwitchOverValue(normalizedTxnType)) {
+        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
         bindVars.switch_over_mode = 'Switch Over'
         bindVars.switch_over_mode_alt1 = 'SwitchOver'
         bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
         bindVars.switch_over_mode_alt3 = 'switch_over'
+        bindVars.legacy_switch_over_mode = 'Switch Over'
       } else {
-        // For other modes (SIP, SWP, STP, Lump Sum), filter by mode field
-        filterConditions.push('receipt.mode == @mode')
-        bindVars.mode = mode
+        filterConditions.push('(receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)')
+        bindVars.txn_type = normalizedTxnType
+        bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
+      }
+    } else if (mode) {
+      // Legacy: "mode" selected in UI but stored as receipt.mode
+      const mappedTxnType = normalizeTxnTypeFromMode(mode)
+      if (isSwitchOverValue(mode) || isSwitchOverValue(mappedTxnType)) {
+        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
+        bindVars.switch_over_mode = 'Switch Over'
+        bindVars.switch_over_mode_alt1 = 'SwitchOver'
+        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
+        bindVars.switch_over_mode_alt3 = 'switch_over'
+        bindVars.legacy_switch_over_mode = mode
+      } else {
+        filterConditions.push('(receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)')
+        bindVars.mapped_txn_type = mappedTxnType
+        bindVars.mode_legacy = mode
       }
     }
     if (issuer) {
@@ -1556,11 +1671,12 @@ router.patch('/:id', requireAuth, async (req, res) => {
     FOR receipt IN receipts
     FILTER receipt._key == @id
     LIMIT 1
-    RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status }
+    RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status, product_category: receipt.product_category }
   `, { id })
   if (!own.length) return res.status(404).json({ error: 'not_found' })
   
   const currentStatus = own[0].status || 'Pending'
+  const receiptProductCategory = own[0].product_category
   const isOwner = String(own[0].user_id) === String(req.user.sub)
   const isAdmin = req.user.role === 'admin'
   const isPending = currentStatus === 'Pending'
@@ -1586,6 +1702,8 @@ router.patch('/:id', requireAuth, async (req, res) => {
   const updates = {}
   for (const k of allowed) {
     if (Object.prototype.hasOwnProperty.call(d, k)) {
+      // `mode` is deprecated; ignore any client-sent updates to it.
+      if (k === 'mode') continue
       updates[k] = d[k]
     }
   }

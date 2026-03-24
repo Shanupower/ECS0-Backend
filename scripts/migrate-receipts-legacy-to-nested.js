@@ -78,7 +78,8 @@ function buildTransaction(receipt) {
     ...existing,
     amount: amount ?? existing.amount,
     type: receipt.txn_type ?? receipt.transaction_type ?? existing.type ?? 'Fresh',
-    mode: receipt.mode ?? existing.mode ?? null,
+    // `mode` is deprecated; do not copy it into nested transaction.
+    mode: null,
     date: receipt.date ?? existing.date ?? null,
     from_text: receipt.from_text ?? receipt.from ?? existing.from_text ?? null,
     to_text: receipt.to_text ?? receipt.to ?? existing.to_text ?? null,

@@ -40,7 +40,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
         investor_email: (receipt.investor != null && receipt.investor.email != null) ? receipt.investor.email : receipt.email,
         amount: (receipt.transaction != null && receipt.transaction.amount != null) ? receipt.transaction.amount : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? receipt.product_details.fd.deposit.amount : receipt.investment_amount,
         category: (receipt.product != null && receipt.product.category != null) ? receipt.product.category : receipt.product_category,
-        payment_method: (receipt.transaction != null && receipt.transaction.mode != null) ? receipt.transaction.mode : receipt.mode,
+        payment_method: receipt.txn_type || receipt.mode,
         branch_code: receipt.branch,
         branch_name: receipt.branch,
         created_by: receipt.user_id,
@@ -62,6 +62,15 @@ router.get('/receipts', requireAuth, async (req, res) => {
     ]
     
     const csvRows = [headers.join(',')]
+
+    const normalizeTxnTypeToModeDisplay = (raw) => {
+      const v = String(raw || '').trim()
+      if (!v) return ''
+      const upper = v.toUpperCase()
+      if (v === 'Lump Sum' || v === 'Lumpsum' || v === 'LumpSum' || upper === 'LUMPSUM') return 'Lump Sum'
+      if (v === 'Switch Over' || upper === 'SWITCH_OVER' || v === 'SwitchOver' || upper === 'SWITCHOVER') return 'Switch Over'
+      return v // SIP / SWP / STP or anything else
+    }
     
     receipts.forEach(receipt => {
       const row = [
@@ -73,7 +82,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
         receipt.investor_email,
         receipt.amount,
         receipt.category,
-        receipt.payment_method,
+        normalizeTxnTypeToModeDisplay(receipt.payment_method),
         receipt.branch_code,
         `"${receipt.branch_name}"`,
         receipt.created_by,
@@ -116,6 +125,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
       status,
       category,
       mode,
+      txn_type,
       search,
       format = 'csv'
     } = req.query
@@ -160,16 +170,55 @@ router.get('/transactions', requireAuth, async (req, res) => {
       query += ` AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)`
       bindVars.category = category
     }
-    if (mode) {
-      if (mode === 'Switch Over' || mode === 'SwitchOver' || mode === 'SWITCH_OVER' || mode === 'switch_over') {
-        query += ` AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null)`
+    const normalizeModeToTxnType = (m) => {
+      const v = String(m || '').trim()
+      if (!v) return ''
+      if (v === 'Lump Sum') return 'Lumpsum'
+      if (v === 'Switch Over') return 'Switch Over'
+      return v
+    }
+
+    const isSwitchOverValue = (v) => {
+      const s = String(v || '').trim().toLowerCase()
+      return s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
+    }
+
+    const normalizeModeFallbackFromTxnType = (t) => {
+      const v = String(t || '').trim()
+      if (!v) return ''
+      if (v === 'Lumpsum') return 'Lump Sum'
+      if (v === 'Switch Over') return 'Switch Over'
+      return v
+    }
+
+    if (txn_type) {
+      const normalizedTxnType = normalizeModeToTxnType(txn_type) || txn_type
+      if (isSwitchOverValue(normalizedTxnType)) {
+        query += ` AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)`
         bindVars.switch_over_mode = 'Switch Over'
         bindVars.switch_over_mode_alt1 = 'SwitchOver'
         bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
         bindVars.switch_over_mode_alt3 = 'switch_over'
+        bindVars.legacy_switch_over_mode = 'Switch Over'
       } else {
-        query += ` AND receipt.mode == @mode`
-        bindVars.mode = mode
+        query += ` AND (receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)`
+        bindVars.txn_type = normalizedTxnType
+        bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
+      }
+    } else if (mode) {
+      if (mode === 'Switch Over' || mode === 'SwitchOver' || mode === 'SWITCH_OVER' || mode === 'switch_over') {
+        query += ` AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)`
+        bindVars.switch_over_mode = 'Switch Over'
+        bindVars.switch_over_mode_alt1 = 'SwitchOver'
+        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
+        bindVars.switch_over_mode_alt3 = 'switch_over'
+        bindVars.legacy_switch_over_mode = mode
+      } else {
+        // Legacy filter by receipt.mode (and also allow txn_type if present)
+        const mappedTxnType = normalizeModeToTxnType(mode)
+        query += ` AND (receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)`
+        bindVars.mapped_txn_type = mappedTxnType
+        bindVars.mode_legacy = mode
       }
     }
     if (search && String(search).trim()) {
@@ -206,7 +255,8 @@ router.get('/transactions', requireAuth, async (req, res) => {
         si: receipt.service_income || receipt.si || 0,
         status: receipt.status || 'Pending',
         transaction_type: receipt.transaction_type || receipt.txn_type || null,
-        mode: (receipt.transaction != null && receipt.transaction.mode != null) ? receipt.transaction.mode : receipt.mode || null,
+        // Prefer txn_type for MF mode display; fallback to legacy receipt.mode
+        mode: receipt.txn_type || receipt.mode || null,
         switch_from: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.from_scheme_name : null,
         switch_to: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.to_scheme_name : null,
         payment: receipt.payment || null,
@@ -242,6 +292,12 @@ router.get('/transactions', requireAuth, async (req, res) => {
       const accountLast4 = payment.account_last4 ?? legacy.account_last4 ?? ''
       const notes = payment.notes ?? legacy.notes ?? ''
       const siVal = req.user.role === 'admin' ? (r.si || 0) : ''
+
+      const rawMode = String(r.mode || '').trim()
+      const modeDisplay =
+        rawMode === 'Lumpsum' || rawMode === 'LumpSum' || rawMode === 'Lump Sum' ? 'Lump Sum' :
+        (rawMode === 'Switch Over' || rawMode === 'SwitchOver' || rawMode === 'SWITCH_OVER' || rawMode === 'switch_over' ? 'Switch Over' : rawMode)
+
       return [
         r.receipt_id,
         r.date || '',
@@ -258,7 +314,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
         siVal,
         r.status || 'Pending',
         r.transaction_type || '',
-        r.mode || '',
+        modeDisplay || '',
         r.switch_from || '',
         r.switch_to || '',
         entryMode,

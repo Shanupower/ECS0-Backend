@@ -195,6 +195,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       to,
       category,
       mode,
+      txn_type,
       includeDeleted = '0'
     } = req.query
     
@@ -241,10 +242,56 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       bindVars.category = category
     }
     
-    // Mode filter
-    if (mode) {
-      filterClause += ' AND receipt.mode == @mode'
-      bindVars.mode = mode
+    // MF mode filter: prefer txn_type; legacy fallback to receipt.mode.
+    const normalizeTxnTypeFromMode = (m) => {
+      const v = String(m || '').trim()
+      if (!v) return ''
+      if (v === 'Lump Sum') return 'Lumpsum'
+      if (v === 'Switch Over') return 'Switch Over'
+      return v
+    }
+
+    const normalizeModeFallbackFromTxnType = (t) => {
+      const v = String(t || '').trim()
+      if (!v) return ''
+      if (v === 'Lumpsum') return 'Lump Sum'
+      if (v === 'Switch Over') return 'Switch Over'
+      return v
+    }
+
+    const isSwitchOverValue = (v) => {
+      const s = String(v || '').trim().toLowerCase()
+      return s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
+    }
+
+    if (txn_type) {
+      const normalizedTxnType = normalizeTxnTypeFromMode(txn_type) || txn_type
+      if (isSwitchOverValue(normalizedTxnType)) {
+        filterClause += ' AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)'
+        bindVars.switch_over_mode = 'Switch Over'
+        bindVars.switch_over_mode_alt1 = 'SwitchOver'
+        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
+        bindVars.switch_over_mode_alt3 = 'switch_over'
+        bindVars.legacy_switch_over_mode = 'Switch Over'
+      } else {
+        filterClause += ' AND (receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)'
+        bindVars.txn_type = normalizedTxnType
+        bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
+      }
+    } else if (mode) {
+      const mappedTxnType = normalizeTxnTypeFromMode(mode)
+      if (isSwitchOverValue(mode) || isSwitchOverValue(mappedTxnType)) {
+        filterClause += ' AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)'
+        bindVars.switch_over_mode = 'Switch Over'
+        bindVars.switch_over_mode_alt1 = 'SwitchOver'
+        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
+        bindVars.switch_over_mode_alt3 = 'switch_over'
+        bindVars.legacy_switch_over_mode = mode
+      } else {
+        filterClause += ' AND (receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)'
+        bindVars.mapped_txn_type = mappedTxnType
+        bindVars.mode_legacy = mode
+      }
     }
     
     // Deleted filter
