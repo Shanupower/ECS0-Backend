@@ -6,6 +6,38 @@ import { uploadCsv } from '../middleware/upload.js'
 
 const router = express.Router()
 
+async function buildBranchNameResolver() {
+  const branches = await q(`
+    FOR branch IN branches
+    RETURN {
+      key: branch._key,
+      code: branch.branch_code,
+      name: branch.branch_name
+    }
+  `)
+
+  const index = new Map()
+  const put = (k, name) => {
+    const key = String(k || '').trim().toLowerCase()
+    if (!key || !name) return
+    if (!index.has(key)) index.set(key, String(name))
+  }
+
+  branches.forEach((b) => {
+    put(b.key, b.name)
+    put(b.code, b.name)
+    put(b.name, b.name)
+  })
+
+  return (rawBranch) => {
+    const raw = String(rawBranch || '').trim()
+    if (!raw) return ''
+    const mapped = index.get(raw.toLowerCase())
+    if (mapped) return mapped
+    return normalizeBranchName(raw) || raw
+  }
+}
+
 // Export receipts to CSV
 router.get('/receipts', requireAuth, async (req, res) => {
   try {
@@ -53,6 +85,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
     `
     
     const receipts = await q(query, bindVars)
+    const resolveBranchName = await buildBranchNameResolver()
     
     // Convert to CSV
     const headers = [
@@ -84,7 +117,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
         receipt.category,
         normalizeTxnTypeToModeDisplay(receipt.payment_method),
         receipt.branch_code,
-        `"${receipt.branch_name}"`,
+        `"${resolveBranchName(receipt.branch_name || receipt.branch_code).replace(/"/g, '""')}"`,
         receipt.created_by,
         receipt.created_at,
         receipt.status,
@@ -265,6 +298,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
     `
 
     const rows = await q(query, bindVars)
+    const resolveBranchName = await buildBranchNameResolver()
 
     const headers = [
       'Receipt ID', 'Receipt Date', 'Branch', 'Employee Code',
@@ -301,7 +335,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
       return [
         r.receipt_id,
         r.date || '',
-        r.branch || '',
+        resolveBranchName(r.branch || ''),
         r.emp_code || '',
         r.investor_id || '',
         r.investor_name || '',
@@ -331,8 +365,55 @@ router.get('/transactions', requireAuth, async (req, res) => {
       ]
     }
 
-    const outFmt = String(format).toLowerCase() === 'xlsx' ? 'xlsx' : 'csv'
+    const fmt = String(format || '').toLowerCase()
+    const outFmt = fmt === 'xlsx' ? 'xlsx' : (fmt === 'json' ? 'json' : 'csv')
     const stamp = new Date().toISOString().split('T')[0]
+
+    if (outFmt === 'json') {
+      const data = rows.map(r => {
+        const payment = r.payment || {}
+        const legacy = r.transaction_details || {}
+        const rawMode = String(r.mode || '').trim()
+        const modeDisplay =
+          rawMode === 'Lumpsum' || rawMode === 'LumpSum' || rawMode === 'Lump Sum' ? 'Lump Sum' :
+          (rawMode === 'Switch Over' || rawMode === 'SwitchOver' || rawMode === 'SWITCH_OVER' || rawMode === 'switch_over' ? 'Switch Over' : rawMode)
+        return {
+          receipt_id: r.receipt_id || '',
+          date: r.date || '',
+          branch: resolveBranchName(r.branch || ''),
+          emp_code: r.emp_code || '',
+          investor_id: r.investor_id || '',
+          investor_name: r.investor_name || '',
+          pan: r.pan || '',
+          product_category: r.product_category || '',
+          scheme_name: r.scheme_name || '',
+          folio_policy_no: r.folio_policy_no || '',
+          investment_amount: r.investment_amount || 0,
+          cc: r.cc || 0,
+          si: req.user.role === 'admin' ? (r.si || 0) : null,
+          status: r.status || 'Pending',
+          transaction_type: r.transaction_type || '',
+          mode: modeDisplay || '',
+          switch_from: r.switch_from || '',
+          switch_to: r.switch_to || '',
+          entry_mode: payment.entry_mode ?? legacy.entry_mode ?? '',
+          channel: payment.channel ?? legacy.channel ?? '',
+          reference_no: payment.reference_no ?? legacy.reference_no ?? '',
+          txn_date: payment.transaction_date ?? legacy.txn_date ?? '',
+          instrument_type: payment.instrument?.type ?? '',
+          instrument_no: payment.instrument?.number ?? '',
+          instrument_date: payment.instrument?.date ?? '',
+          bank_name: payment.instrument?.bank?.name ?? legacy.bank_name ?? '',
+          bank_branch: payment.instrument?.bank?.branch ?? legacy.bank_branch ?? '',
+          account_last4: payment.account_last4 ?? legacy.account_last4 ?? '',
+          notes: payment.notes ?? legacy.notes ?? ''
+        }
+      })
+      res.setHeader('Content-Type', 'application/json; charset=utf-8')
+      res.setHeader('Cache-Control', 'no-store')
+      res.json({ items: data, total: data.length })
+      return
+    }
 
     if (outFmt === 'xlsx') {
       const workbook = new ExcelJS.Workbook()

@@ -217,7 +217,7 @@ export function generateReceiptPDF(receipt) {
       const fdMaturityDate = val(fd?.maturity?.date, receipt.fd_maturity_date)
       y = drawKpiRow([
         { label: 'Deposit Amount', value: fdDepositAmt != null ? fmtINR(fdDepositAmt) : null },
-        { label: 'Maturity Amount', value: fdMaturityAmt != null ? fmtINR(fdMaturityAmt) : null },
+        { label: '', value: null },
         { label: 'Maturity Date', value: fdMaturityDate ? fmtDate(fdMaturityDate) : null }
       ], y)
 
@@ -298,9 +298,12 @@ export function generateReceiptPDF(receipt) {
 
         // Scheme display
         // - Switch Over: show Source Scheme + Target Scheme
+        // - STP: show Source Scheme + Target Scheme
         // - Others: show Scheme
         const switchFrom = val(txn.switch_over?.from_scheme_name, receipt.switch_from_scheme_name)
         const switchTo = val(txn.switch_over?.to_scheme_name, receipt.switch_to_scheme_name, schemeName)
+        const isSTP = String(txnType || '').trim().toUpperCase() === 'STP'
+        const stpTargetForTop = val(txn.stp?.to_scheme_name, receipt.stp_target_scheme_name)
         if (txnType === 'Switch Over') {
           const sourceDisplay = switchFrom ? (switchFrom) : null
           const targetDisplay = switchTo ? (switchTo) : null
@@ -309,6 +312,14 @@ export function generateReceiptPDF(receipt) {
           if (!sourceDisplay && !targetDisplay && schemeName) {
             mfEntries.push({ label: 'Scheme', value: schemeName + (nfo ? ' [NFO]' : '') })
           }
+        } else if (isSTP) {
+          // For STP, DB stores:
+          // - `scheme` (scheme_name) as the source scheme
+          // - `stp_target_scheme_name` as the target scheme
+          const sourceDisplay = schemeName ? (schemeName + (nfo ? ' [NFO]' : '')) : null
+          const targetDisplay = stpTargetForTop ? stpTargetForTop : null
+          if (sourceDisplay) mfEntries.push({ label: 'Source Scheme', value: sourceDisplay })
+          if (targetDisplay) mfEntries.push({ label: 'Target Scheme', value: targetDisplay })
         } else if (schemeName) {
           mfEntries.push({ label: 'Scheme', value: schemeName + (nfo ? ' [NFO]' : '') })
         }
@@ -347,13 +358,10 @@ export function generateReceiptPDF(receipt) {
 
         // STP
         const stp = txn.stp || {}
-        const stpTarget = val(stp.to_scheme_name, receipt.stp_target_scheme_name)
         const stpFreq = val(stp.frequency, receipt.stp_frequency)
         const stpStart = val(stp.start_date, receipt.stp_start_date)
         const stpAmt = val(stp.amount, receipt.stp_amount)
-        if (stpTarget || stpFreq) {
-          if (stpTarget) mfEntries.push({ label: 'STP Target Scheme', value: stpTarget })
-          if (schemeName) mfEntries.push({ label: 'STP Source Scheme', value: schemeName + (nfo ? ' [NFO]' : '') })
+        if (stpFreq || stpStart || stpAmt != null) {
           if (stpFreq) mfEntries.push({ label: 'STP Frequency', value: stpFreq })
           if (stpStart) mfEntries.push({ label: 'STP Start Date', value: fmtDate(stpStart) })
           if (stpAmt != null) mfEntries.push({ label: 'STP Transfer Amount', value: fmtINR(stpAmt) })
@@ -393,7 +401,6 @@ export function generateReceiptPDF(receipt) {
         const tenure = val(fd?.deposit?.tenure_months, receipt.fd_tenure_months)
         const payoutFreq = val(fd?.deposit?.payout_frequency, receipt.fd_payout_frequency)
         const rate = val(fd?.rates?.locked_interest_rate_pa, receipt.fd_locked_interest_rate_pa)
-        const maturityAmt = val(fd?.maturity?.amount, receipt.fd_maturity_amount)
         const maturityDate = val(fd?.maturity?.date, receipt.fd_maturity_date)
         const appNo = val(fd?.application?.number, receipt.fd_application_number)
         const fdTxnType = val(fd?.application?.transaction_type, receipt.fd_transaction_type, receipt.txn_type) || 'Fresh'
@@ -413,7 +420,7 @@ export function generateReceiptPDF(receipt) {
 
         y = drawInlineTriplet([
           { label: 'Deposit Amount', value: depositAmt != null ? fmtINR(depositAmt) : null },
-          { label: 'Maturity Amount', value: maturityAmt != null ? fmtINR(maturityAmt) : null },
+          { label: '', value: null },
           { label: 'Maturity Date', value: maturityDate ? fmtDate(maturityDate) : null }
         ], y)
         y = drawInlineTriplet([

@@ -1287,6 +1287,8 @@ router.get('/', requireAuth, async (req, res) => {
     const sortDir = String(sortDirRaw || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC'
     const allowedSort = new Set(['created_at', 'date', 'amount', 'receipt_no'])
     const orderBy = allowedSort.has(sortCol) ? sortCol : 'created_at'
+    const effectiveAmountExpr = '((TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0))'
+    const orderExpr = orderBy === 'amount' ? effectiveAmountExpr : `receipt.${orderBy}`
 
     const numLimit = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
     const numPage  = Math.max(1, parseInt(page, 10) || 1)
@@ -1445,7 +1447,7 @@ router.get('/', requireAuth, async (req, res) => {
     const query = `
       FOR receipt IN receipts
       ${filterClause}
-      SORT receipt.${orderBy} ${sortDir}
+      SORT ${orderExpr} ${sortDir}
       LIMIT ${numOffset}, ${numLimit}
       RETURN MERGE(receipt, {
         media_count: LENGTH(receipt.files || [])
@@ -1511,6 +1513,8 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
     const sortDir = String(sortDirRaw || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC'
     const allowedSort = new Set(['created_at', 'date', 'amount', 'receipt_no'])
     const orderBy = allowedSort.has(sortCol) ? sortCol : 'created_at'
+    const effectiveAmountExpr = '((TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0))'
+    const orderExpr = orderBy === 'amount' ? effectiveAmountExpr : `receipt.${orderBy}`
 
     const numLimit = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
     const numPage  = Math.max(1, parseInt(page, 10) || 1)
@@ -1574,7 +1578,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
     const query = `
       FOR receipt IN receipts
       ${filterClause}
-      SORT receipt.${orderBy} ${sortDir}
+      SORT ${orderExpr} ${sortDir}
       LIMIT ${numOffset}, ${numLimit}
       RETURN MERGE(receipt, {
         media_count: LENGTH(receipt.files || [])
@@ -1671,12 +1675,13 @@ router.patch('/:id', requireAuth, async (req, res) => {
     FOR receipt IN receipts
     FILTER receipt._key == @id
     LIMIT 1
-    RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status, product_category: receipt.product_category }
+    RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status, product_category: receipt.product_category, receipt }
   `, { id })
   if (!own.length) return res.status(404).json({ error: 'not_found' })
   
   const currentStatus = own[0].status || 'Pending'
   const receiptProductCategory = own[0].product_category
+  const existingReceipt = own[0].receipt || {}
   const isOwner = String(own[0].user_id) === String(req.user.sub)
   const isAdmin = req.user.role === 'admin'
   const isPending = currentStatus === 'Pending'
@@ -1695,6 +1700,8 @@ router.patch('/:id', requireAuth, async (req, res) => {
     'collection_credit','cc','service_income','si', // Allow manual updates to CC/SI if needed
     'switch_from_scheme_code','switch_from_scheme_name','switch_to_scheme_code','switch_to_scheme_name','switch_type','switch_value',
     'transaction_details','entry_mode','transaction_channel','transaction_reference_no','txn_date','account_last4','transaction_notes',
+    'insurance_date_of_issue','insurance_renewal_date','insurance_policy_period',
+    'fd_maturity_date','bond_issue_date','bond_maturity_date',
     'fd_transaction_type', // Fresh or Renewal for FD receipts
     'rejection_remark','rejected_at','rejected_by' // Rejection fields for failed transactions
   ]
@@ -1724,6 +1731,104 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
   }
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no_updates' })
+
+  // Keep nested structures in sync with edited flat fields so edits are visible everywhere.
+  const hasOwn = (k) => Object.prototype.hasOwnProperty.call(d, k)
+
+  if (hasOwn('investment_amount')) {
+    const numericAmount = Number(d.investment_amount)
+    updates.investment_amount = Number.isFinite(numericAmount) ? numericAmount : d.investment_amount
+    const currentTxn = (existingReceipt.transaction && typeof existingReceipt.transaction === 'object') ? existingReceipt.transaction : {}
+    updates.transaction = {
+      ...currentTxn,
+      amount: Number.isFinite(numericAmount) ? numericAmount : d.investment_amount
+    }
+  }
+
+  if (hasOwn('txn_type')) {
+    const currentTxn = (updates.transaction && typeof updates.transaction === 'object')
+      ? updates.transaction
+      : ((existingReceipt.transaction && typeof existingReceipt.transaction === 'object') ? existingReceipt.transaction : {})
+    updates.transaction = {
+      ...currentTxn,
+      type: d.txn_type ?? null
+    }
+  }
+
+  if (hasOwn('scheme_name')) {
+    const currentProduct = (existingReceipt.product && typeof existingReceipt.product === 'object') ? existingReceipt.product : {}
+    updates.product = {
+      ...currentProduct,
+      name: d.scheme_name ?? null
+    }
+  }
+
+  const paymentFieldTouched = [
+    'entry_mode',
+    'transaction_channel',
+    'transaction_reference_no',
+    'txn_date',
+    'instrument_type',
+    'instrument_no',
+    'instrument_date',
+    'bank_name',
+    'bank_branch',
+    'transaction_notes',
+    'account_last4'
+  ].some(hasOwn)
+
+  if (paymentFieldTouched) {
+    const currentPayment = (existingReceipt.payment && typeof existingReceipt.payment === 'object') ? existingReceipt.payment : {}
+    const currentInstrument = (currentPayment.instrument && typeof currentPayment.instrument === 'object') ? currentPayment.instrument : {}
+    const currentBank = (currentInstrument.bank && typeof currentInstrument.bank === 'object') ? currentInstrument.bank : {}
+
+    updates.payment = {
+      ...currentPayment,
+      entry_mode: hasOwn('entry_mode') ? (d.entry_mode || null) : (currentPayment.entry_mode ?? null),
+      channel: hasOwn('transaction_channel') ? (d.transaction_channel || null) : (currentPayment.channel ?? null),
+      reference_no: hasOwn('transaction_reference_no') ? (d.transaction_reference_no || null) : (currentPayment.reference_no ?? null),
+      transaction_date: hasOwn('txn_date') ? (d.txn_date || null) : (currentPayment.transaction_date ?? null),
+      account_last4: hasOwn('account_last4') ? (d.account_last4 || null) : (currentPayment.account_last4 ?? null),
+      notes: hasOwn('transaction_notes') ? (d.transaction_notes || null) : (currentPayment.notes ?? null),
+      instrument: {
+        ...currentInstrument,
+        type: hasOwn('instrument_type') ? (d.instrument_type || null) : (currentInstrument.type ?? null),
+        number: hasOwn('instrument_no') ? (d.instrument_no || null) : (currentInstrument.number ?? null),
+        date: hasOwn('instrument_date') ? (d.instrument_date || null) : (currentInstrument.date ?? null),
+        bank: {
+          ...currentBank,
+          name: hasOwn('bank_name') ? (d.bank_name || null) : (currentBank.name ?? null),
+          branch: hasOwn('bank_branch') ? (d.bank_branch || null) : (currentBank.branch ?? null)
+        }
+      }
+    }
+  }
+
+  if (hasOwn('insurance_renewal_date')) {
+    // Keep legacy/common renewal field in sync for views that read renewal_due_date.
+    updates.renewal_due_date = d.insurance_renewal_date || null
+  }
+
+  if (hasOwn('fd_maturity_date')) {
+    const currentFdDetails = (existingReceipt.fd_details && typeof existingReceipt.fd_details === 'object') ? existingReceipt.fd_details : {}
+    updates.fd_details = {
+      ...currentFdDetails,
+      maturity_date: d.fd_maturity_date || null
+    }
+  }
+
+  if (hasOwn('bond_issue_date') || hasOwn('bond_maturity_date')) {
+    const currentBondDetails = (existingReceipt.bond_details && typeof existingReceipt.bond_details === 'object') ? existingReceipt.bond_details : {}
+    updates.bond_details = {
+      ...currentBondDetails,
+      issue_date: hasOwn('bond_issue_date') ? (d.bond_issue_date || null) : (currentBondDetails.issue_date ?? null),
+      maturity_date: hasOwn('bond_maturity_date') ? (d.bond_maturity_date || null) : (currentBondDetails.maturity_date ?? null)
+    }
+    if (hasOwn('bond_maturity_date')) {
+      // Keep common renewal field aligned for legacy consumers.
+      updates.renewal_due_date = d.bond_maturity_date || null
+    }
+  }
   
   await q(`
     FOR receipt IN receipts

@@ -645,6 +645,15 @@ router.get('/', requireAuth, async (req, res) => {
            OR LOWER(customer.pan) LIKE LOWER(@search)
            OR LOWER(customer.email) LIKE LOWER(@search)
            OR LOWER(customer.mobile) LIKE LOWER(@search)
+           OR (
+             FOR minor IN (customer.minors != null ? customer.minors : [])
+             FILTER (
+               LOWER(minor.name) LIKE LOWER(@search)
+               OR LOWER(minor.investor_id) LIKE LOWER(@search)
+               OR LOWER(minor.pan) LIKE LOWER(@search)
+             )
+             RETURN true
+           )[0] == true
       `
       
       if (filterClause) {
@@ -652,7 +661,17 @@ router.get('/', requireAuth, async (req, res) => {
            OR LOWER(customer.investor_id) LIKE LOWER(@search)
            OR LOWER(customer.pan) LIKE LOWER(@search)
            OR LOWER(customer.email) LIKE LOWER(@search)
-           OR LOWER(customer.mobile) LIKE LOWER(@search))`
+           OR LOWER(customer.mobile) LIKE LOWER(@search)
+           OR (
+             FOR minor IN (customer.minors != null ? customer.minors : [])
+             FILTER (
+               LOWER(minor.name) LIKE LOWER(@search)
+               OR LOWER(minor.investor_id) LIKE LOWER(@search)
+               OR LOWER(minor.pan) LIKE LOWER(@search)
+             )
+             RETURN true
+           )[0] == true
+        )`
       } else {
         filterClause = searchFilter
       }

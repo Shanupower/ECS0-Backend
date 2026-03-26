@@ -94,12 +94,13 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
     const branch = branchQuery[0]
     const branchIdentifiers = [branch._key, branch.branch_code, branch.branch_name].filter(Boolean).map(String)
     
-    // Build date filter
+    // Build date filter (fallback to created_at date when receipt.date is missing)
     let dateFilter = ''
     let bindVars = {}
+    const receiptDateExpr = '(receipt.date != null && receipt.date != "" ? receipt.date : SUBSTRING(receipt.created_at, 0, 10))'
     
     if (from && to) {
-      dateFilter = 'FILTER receipt.date >= @from AND receipt.date <= @to'
+      dateFilter = `FILTER ${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`
       bindVars.from = from
       bindVars.to = to
     }
@@ -221,6 +222,8 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     const sortDir = String(sortDirRaw || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC'
     const allowedSort = new Set(['created_at', 'date', 'amount', 'receipt_no'])
     const orderBy = allowedSort.has(sortCol) ? sortCol : 'created_at'
+    const effectiveAmountExpr = '((TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0))'
+    const orderExpr = orderBy === 'amount' ? effectiveAmountExpr : `receipt.${orderBy}`
     
     const numLimit = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
     const numPage = Math.max(1, parseInt(page, 10) || 1)
@@ -229,9 +232,10 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     let filterClause = 'FILTER receipt.branch IN @branchIdentifiers'
     let bindVars = { branchIdentifiers }
     
-    // Date filter
+    // Date filter (fallback to created_at date when receipt.date is missing)
+    const receiptDateExpr = '(receipt.date != null && receipt.date != "" ? receipt.date : SUBSTRING(receipt.created_at, 0, 10))'
     if (from && to && !isNaN(Date.parse(from)) && !isNaN(Date.parse(to))) {
-      filterClause += ' AND receipt.date >= @from AND receipt.date <= @to'
+      filterClause += ` AND ${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`
       bindVars.from = from
       bindVars.to = to
     }
@@ -302,7 +306,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     const query = `
       FOR receipt IN receipts
       ${filterClause}
-      SORT receipt.${orderBy} ${sortDir}
+      SORT ${orderExpr} ${sortDir}
       LIMIT ${numOffset}, ${numLimit}
       RETURN MERGE(receipt, {
         media_count: LENGTH(receipt.files || [])

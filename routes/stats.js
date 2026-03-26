@@ -698,8 +698,9 @@ router.get('/branches', requireAuth, async (req, res) => {
     let bindVars = {}
     let filterConditions = []
     
+    const receiptDateExpr = '(receipt.date != null && receipt.date != "" ? receipt.date : SUBSTRING(receipt.created_at, 0, 10))'
     if (from && to) {
-      filterConditions.push('receipt.date >= @from AND receipt.date <= @to')
+      filterConditions.push(`${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`)
       bindVars.from = from
       bindVars.to = to
     }
@@ -771,10 +772,43 @@ router.get('/branches', requireAuth, async (req, res) => {
       }
       return null
     }
+    const resolveBranchDoc = (receiptBranch) => {
+      if (receiptBranch == null || receiptBranch === '') return null
+      const s = String(receiptBranch).trim()
+      const lower = s.toLowerCase()
+      for (const b of branchDocs) {
+        if (b.key != null && String(b.key).trim() === s) return b
+        if (b.code != null && String(b.code).trim().toLowerCase() === lower) return b
+        if (b.name != null && String(b.name).trim().toLowerCase() === lower) return b
+      }
+      return null
+    }
 
-    const mergedStats = branchStats.map((branch) => {
-      const employeeData = employeeStats.find((emp) => emp.branch === branch.branch)
-      const tgt = monthlyTargetForReceiptBranch(branch.branch)
+    // Merge stats that belong to the same logical branch (raw branch value may be key/code/name).
+    const mergedByBranch = new Map()
+    branchStats.forEach((branch) => {
+      const branchDoc = resolveBranchDoc(branch.branch)
+      const aggregateKey = branchDoc?.key || branchDoc?.code || String(branch.branch || '').trim() || 'unknown'
+      const key = String(aggregateKey).toLowerCase()
+      const existing = mergedByBranch.get(key) || {
+        branch: branchDoc?.name || branch.branch || 'Unknown Branch',
+        branch_name: branchDoc?.name || branch.branch || 'Unknown Branch',
+        branch_code: branchDoc?.code || branch.branch || null,
+        total_receipts: 0,
+        total_investments: 0,
+        total_cc: 0,
+        total_si: 0
+      }
+      existing.total_receipts += Number(branch.total_receipts || 0)
+      existing.total_investments += Number(branch.total_investments || 0)
+      existing.total_cc += Number(branch.total_cc || 0)
+      existing.total_si += Number(branch.total_si || 0)
+      mergedByBranch.set(key, existing)
+    })
+
+    const mergedStats = Array.from(mergedByBranch.values()).map((branch) => {
+      const employeeData = employeeStats.find((emp) => String(emp.branch || '').trim().toLowerCase() === String(branch.branch_name || '').trim().toLowerCase())
+      const tgt = monthlyTargetForReceiptBranch(branch.branch_code || branch.branch_name || branch.branch)
       return {
         ...branch,
         total_employees: employeeData?.employee_count || 0,
@@ -782,7 +816,7 @@ router.get('/branches', requireAuth, async (req, res) => {
         commissions: branch.total_cc,
         collection_credit: branch.total_cc
       }
-    })
+    }).sort((a, b) => (b.total_investments || 0) - (a.total_investments || 0))
     
     const response = {
       total_branches: mergedStats.length,
@@ -811,20 +845,29 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
     
     let filterConditions = []
     let bindVars = {}
+    const receiptDateExpr = '(receipt.date != null && receipt.date != "" ? receipt.date : SUBSTRING(receipt.created_at, 0, 10))'
     
     if (from && to) {
-      filterConditions.push('receipt.date >= @from AND receipt.date <= @to')
+      filterConditions.push(`${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`)
       bindVars.from = from
       bindVars.to = to
     }
     
     if (branch_code) {
-      filterConditions.push('receipt.branch == @branch_code')
-      bindVars.branch_code = branch_code
+      const branchIdentifiers = await getBranchIdentifiersForFilter(branch_code)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else {
+        filterConditions.push('receipt.branch == @branch_code')
+        bindVars.branch_code = branch_code
+      }
     }
     
     if (includePending !== '1') {
       filterConditions.push('receipt.status == "Completed"')
+    } else {
+      filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
     }
     
     filterConditions.push('receipt.is_deleted == false')
@@ -844,10 +887,29 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
         total_cc = SUM(${CC_AQL}),
         total_si = SUM(${SI_AQL}),
         avg_investment = AVG(${INV_AMOUNT_AQL})
+      LET userDoc = FIRST(
+        FOR u IN users
+          FILTER u.emp_code == emp_code
+          LIMIT 1
+          RETURN u
+      )
+      LET resolved_employee_name = (
+        employee_name != null && employee_name != ""
+          ? employee_name
+          : (
+              userDoc != null && userDoc.name != null && userDoc.name != ""
+                ? userDoc.name
+                : (
+                    userDoc != null && userDoc.username != null && userDoc.username != ""
+                      ? userDoc.username
+                      : null
+                  )
+            )
+      )
       SORT total_investment DESC
       RETURN {
         emp_code,
-        employee_name,
+        employee_name: resolved_employee_name,
         receipt_count,
         total_investment,
         total_cc,
