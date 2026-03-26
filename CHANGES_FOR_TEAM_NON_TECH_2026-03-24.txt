@@ -1,0 +1,98 @@
+ECS UPDATE SUMMARY (NON-TECHNICAL)
+Date: 24 Mar 2026
+
+This is a business-friendly summary of all major updates currently worked on (backend + frontend), so you can share with operations, sales, support, and leadership.
+
+--------------------------------------------------
+BIG PICTURE
+--------------------------------------------------
+
+- We improved both the receipt experience and supporting internal workflows.
+- Customer-facing receipt format is now clearer and more professional.
+- Internal data flow is being standardized so reports and exports are more reliable.
+- Frontend screens used by staff (receipt flow, transaction view, dashboards) are also being actively improved.
+
+--------------------------------------------------
+CUSTOMER-FACING RECEIPT IMPROVEMENTS
+--------------------------------------------------
+
+1) Receipt PDF now has a cleaner design
+- Information is organized into clear boxed sections.
+- The page is easier to scan and verify quickly.
+- Visual format now feels more professional and standardized.
+
+2) Same receipt style now works across all key product types
+- Fixed Deposit / Government FD
+- Mutual Funds (SIP, STP, SWP, Switch Over)
+- Insurance
+- Bond/NCD
+- Misc services
+
+3) Investment and payment details are easier to read
+- Details now appear in aligned blocks instead of long line-by-line text.
+- This helps branch staff and customers validate details faster.
+
+4) Branding/header adjustments completed
+- Removed extra company name line in header as requested.
+- Logo size increased for better visibility.
+
+5) Reduced unnecessary extra-page output
+- Receipt spacing and layout were refined to avoid accidental overflow.
+
+Important note:
+- Financial values and business data shown in receipts remain the same.
+- Main change is readability, consistency, and presentation quality.
+
+--------------------------------------------------
+BACKEND BUSINESS IMPACT (UNDER THE HOOD)
+--------------------------------------------------
+
+1) Better consistency in receipt data
+- Backend receipt handling is being aligned to one consistent structure.
+- Transaction details are being standardized so different product flows behave more uniformly.
+
+2) Data migration support added/updated
+- Migration scripts were updated/added to align older records with the newer structure.
+- This reduces future reporting mismatches and maintenance issues.
+
+3) Branch/export/report alignment improvements
+- Related backend routes were updated to better match the new receipt and transaction structure.
+- Expected outcome: cleaner downstream reporting and export reliability.
+
+--------------------------------------------------
+FRONTEND WORK IN PROGRESS (STAFF-FACING SCREENS)
+--------------------------------------------------
+
+The following areas are actively updated and not fully finalized yet:
+
+1) Receipt creation and final review flow
+- Multi-step receipt flow screens are being refined.
+- Product-specific steps (FD, Insurance, Bond/NCD, transaction step) are being aligned.
+
+2) Receipt view/print experience
+- Receipt display and related components are being adjusted to stay consistent with backend improvements.
+
+3) Dashboards and transaction pages
+- Branch dashboard, main dashboard, and transactions page have active improvements.
+
+4) Data normalization in UI
+- Frontend data mapping is being aligned with backend structure for more consistent display and fewer edge-case issues.
+
+--------------------------------------------------
+WHAT THIS MEANS FOR BRANCH TEAMS
+--------------------------------------------------
+
+- Faster manual verification of receipts.
+- More consistent look across different investment products.
+- Lower confusion around transaction/payment fields.
+- Better confidence that saved data, displayed data, and export/report data stay aligned.
+
+--------------------------------------------------
+WHAT TO COMMUNICATE TO LEADERSHIP
+--------------------------------------------------
+
+- This release wave is focused on quality and consistency, not just visual changes.
+- Customer documents now look more premium and standardized.
+- Internal data standardization work reduces long-term errors and support overhead.
+- Some frontend improvements are still in active progress and will be finalized in follow-up commits.
+
