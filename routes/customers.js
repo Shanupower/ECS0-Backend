@@ -720,12 +720,36 @@ router.get('/', requireAuth, async (req, res) => {
     ])
 
     const total = totalResult[0] || 0
+    const normalizedSearch = typeof search === 'string' ? search.trim().toLowerCase() : ''
+    const items = normalizedSearch
+      ? rows.map((customer) => {
+          const minors = Array.isArray(customer?.minors) ? customer.minors : []
+          const matchedMinorNames = minors
+            .filter((minor) => {
+              const name = String(minor?.name || '').toLowerCase()
+              const investorId = String(minor?.investor_id || '').toLowerCase()
+              const pan = String(minor?.pan || '').toLowerCase()
+              return (
+                name.includes(normalizedSearch) ||
+                investorId.includes(normalizedSearch) ||
+                pan.includes(normalizedSearch)
+              )
+            })
+            .map((minor) => minor?.name)
+            .filter(Boolean)
+
+          return {
+            ...customer,
+            matched_minor_names: matchedMinorNames
+          }
+        })
+      : rows
 
     res.json({ 
       page: numPage, 
       size: numLimit, 
       total, 
-      items: rows,
+      items,
       branch_filter: !isAdmin ? normalizedUserBranch : 'all',
       user_role: isAdmin ? 'admin' : 'branch_user'
     })

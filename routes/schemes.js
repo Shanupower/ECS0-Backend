@@ -76,12 +76,109 @@ function getAmcCategories(amc) {
   return [single]
 }
 
-// Resolve min_investment for a scheme: category_settings[cat] > AMC-level > null.
-function resolveMinInvestment(amc, schemeCategory) {
+// Fallback when DB has no row yet (aligned with ECS0 mf_amc_categories.js)
+/** @type {Record<string, number|null>} */
+const FALLBACK_CATEGORY_MINIMUMS = Object.freeze({
+  MF: null,
+  SIF: 10_00_000,
+  PMS: 50_00_000,
+  AIF: 1_00_00_000,
+  GIFT_CITY_FUNDS: 10_00_00_000
+})
+
+const CATEGORY_DEFAULTS_KEY = 'singleton'
+
+/** Merge stored minimums (per category id) with fallback for missing keys */
+function buildMergedMinimums(stored) {
+  const out = {}
+  for (const id of VALID_AMC_CATEGORIES) {
+    if (stored && Object.prototype.hasOwnProperty.call(stored, id)) {
+      const v = stored[id]
+      if (v === null || v === '') out[id] = null
+      else {
+        const n = Number(v)
+        out[id] = Number.isFinite(n) ? n : FALLBACK_CATEGORY_MINIMUMS[id]
+      }
+    } else {
+      out[id] = FALLBACK_CATEGORY_MINIMUMS[id]
+    }
+  }
+  return out
+}
+
+async function loadCategoryMinimums() {
+  try {
+    const coll = getCollection('mf_amc_category_defaults')
+    await coll.load()
+    const doc = await coll.document(CATEGORY_DEFAULTS_KEY)
+    return buildMergedMinimums(doc.minimums && typeof doc.minimums === 'object' ? doc.minimums : {})
+  } catch {
+    return buildMergedMinimums({})
+  }
+}
+
+async function loadRawMinimumsStored() {
+  try {
+    const coll = getCollection('mf_amc_category_defaults')
+    await coll.load()
+    const doc = await coll.document(CATEGORY_DEFAULTS_KEY)
+    return doc.minimums && typeof doc.minimums === 'object' ? { ...doc.minimums } : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Persist category minimums (partial updates merge with existing stored values, then fallbacks for never-set keys).
+ * Returns merged map for response or { error: string }.
+ */
+async function persistCategoryMinimums(bodyMinimums) {
+  if (!bodyMinimums || typeof bodyMinimums !== 'object') {
+    return { error: 'minimums object is required' }
+  }
+  const prev = await loadRawMinimumsStored()
+  const minimums = {}
+  for (const id of VALID_AMC_CATEGORIES) {
+    if (Object.prototype.hasOwnProperty.call(bodyMinimums, id)) {
+      const v = bodyMinimums[id]
+      if (v === null || v === '') minimums[id] = null
+      else {
+        const n = Number(v)
+        if (!Number.isFinite(n) || n < 0) {
+          return { error: `minimums.${id} must be a non-negative number or null` }
+        }
+        minimums[id] = n
+      }
+    } else if (Object.prototype.hasOwnProperty.call(prev, id)) {
+      const v = prev[id]
+      minimums[id] = v === null || v === '' ? null : Number(v)
+      if (minimums[id] !== null && !Number.isFinite(minimums[id])) minimums[id] = FALLBACK_CATEGORY_MINIMUMS[id]
+    } else {
+      minimums[id] = FALLBACK_CATEGORY_MINIMUMS[id]
+    }
+  }
+  const coll = getCollection('mf_amc_category_defaults')
+  try {
+    await coll.load()
+  } catch {
+    await coll.create()
+  }
+  const payload = { minimums, updated_at: new Date().toISOString() }
+  try {
+    await coll.document(CATEGORY_DEFAULTS_KEY)
+    await coll.update(CATEGORY_DEFAULTS_KEY, payload)
+  } catch {
+    await coll.save({ _key: CATEGORY_DEFAULTS_KEY, ...payload })
+  }
+  return { minimums }
+}
+
+// AMC override wins; then global default for scheme/amc category. Legacy category_settings mins are ignored.
+function resolveMinInvestment(amc, schemeCategory, globalMins) {
   const cat = schemeCategory && VALID_AMC_CATEGORIES.includes(schemeCategory) ? schemeCategory : 'MF'
-  const fromSettings = amc?.category_settings?.[cat]?.min_investment
-  if (fromSettings !== undefined && fromSettings !== null) return fromSettings
   if (amc?.min_investment != null) return amc.min_investment
+  const g = globalMins?.[cat]
+  if (g != null) return g
   return null
 }
 
@@ -144,9 +241,10 @@ router.get('/amc/:amc_code', async (req, res) => {
       RETURN scheme
     `, { amc_code, today })
 
+    const globalMins = await loadCategoryMinimums()
     schemes = schemes.map(s => {
       const schemeCat = s.amc_category && VALID_AMC_CATEGORIES.includes(s.amc_category) ? s.amc_category : legacyCategory
-      const minInv = s.min_investment != null ? s.min_investment : resolveMinInvestment(amc, schemeCat)
+      const minInv = s.min_investment != null ? s.min_investment : resolveMinInvestment(amc, schemeCat, globalMins)
       return {
         ...s,
         amc_category: schemeCat,
@@ -177,11 +275,36 @@ router.get('/amc/:amc_code', async (req, res) => {
   }
 })
 
+// Global MF AMC category minimums (defaults until an AMC sets min_investment)
+router.get('/category-minimums', async (req, res) => {
+  try {
+    const minimums = await loadCategoryMinimums()
+    res.json({ minimums })
+  } catch (error) {
+    console.error('Error fetching category minimums:', error)
+    res.status(500).json({ error: 'Failed to fetch category minimums' })
+  }
+})
+
+router.put('/category-minimums', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const body = req.body?.minimums != null ? req.body.minimums : req.body
+    const result = await persistCategoryMinimums(body)
+    if (result.error) {
+      return res.status(400).json({ error: result.error })
+    }
+    res.json({ minimums: result.minimums, message: 'Category minimums updated' })
+  } catch (error) {
+    console.error('Error saving category minimums:', error)
+    res.status(500).json({ error: 'Failed to save category minimums' })
+  }
+})
+
 // Get single scheme details
 router.get('/:scheme_code', async (req, res) => {
   try {
     const { scheme_code } = req.params
-    
+
     // Automatically expire NFOs that have passed their validity date
     await expireNFOs()
     
@@ -197,7 +320,21 @@ router.get('/:scheme_code', async (req, res) => {
     }
     
     const scheme = schemes[0]
-    const out = { ...scheme, amc_category: scheme.amc_category && VALID_AMC_CATEGORIES.includes(scheme.amc_category) ? scheme.amc_category : 'MF' }
+    const amc_code = scheme.amc_code
+    const globalMins = await loadCategoryMinimums()
+    const amcRows = amc_code
+      ? await q(`FOR amc IN amcs FILTER amc.amc_code == @amc_code LIMIT 1 RETURN amc`, { amc_code })
+      : []
+    const amc = amcRows[0] || null
+    const legacyCategory = amc?.amc_category && VALID_AMC_CATEGORIES.includes(amc.amc_category) ? amc.amc_category : 'MF'
+    const schemeCat = scheme.amc_category && VALID_AMC_CATEGORIES.includes(scheme.amc_category) ? scheme.amc_category : legacyCategory
+    const minInv = scheme.min_investment != null ? scheme.min_investment : resolveMinInvestment(amc, schemeCat, globalMins)
+
+    const out = {
+      ...scheme,
+      amc_category: schemeCat,
+      min_investment: minInv
+    }
     res.json(out)
   } catch (error) {
     console.error('Error fetching scheme:', error)
@@ -223,6 +360,9 @@ router.post('/amc', requireAuth, requireRole('admin'), async (req, res) => {
       categories = categoriesRaw.filter(c => VALID_AMC_CATEGORIES.includes(String(c).trim()))
       if (categories.length === 0) {
         return res.status(400).json({ error: 'categories must contain at least one of: ' + VALID_AMC_CATEGORIES.join(', ') })
+      }
+      if (categories.length > 1) {
+        return res.status(400).json({ error: 'Only one AMC category is allowed per AMC' })
       }
     } else {
       const single = normalizeAmcCategory(amcCategoryRaw)
@@ -279,23 +419,29 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       nav_latest,
       nav_date,
       is_nfo,
-      nfo_validity
+      nfo_validity,
+      cc,
+      si
     } = req.body
-    
-    if (!scheme_code || !scheme_name || !amc_code || !amc_name) {
-      return res.status(400).json({ error: 'scheme_code, scheme_name, amc_code, and amc_name are required' })
+
+    if (!scheme_name || !amc_code || !amc_name) {
+      return res.status(400).json({ error: 'scheme_name, amc_code, and amc_name are required' })
     }
-    
+
     const amc_category = normalizeAmcCategory(amcCategoryRaw)
-    
+
+    const needsGeneratedCode = !scheme_code || String(scheme_code).trim() === ''
+    const generatedCode = `${amc_code}_${(option || 'GROWTH')}_${Date.now()}`
+    const finalSchemeCode = needsGeneratedCode ? generatedCode : String(scheme_code).trim()
+
     // Check if scheme code already exists
     const existing = await q(`
       FOR scheme IN mf_schemes
       FILTER scheme.scheme_code == @scheme_code
       LIMIT 1
       RETURN scheme
-    `, { scheme_code })
-    
+    `, { scheme_code: finalSchemeCode })
+
     if (existing.length > 0) {
       return res.status(400).json({ error: 'Scheme code already exists' })
     }
@@ -304,10 +450,13 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
     const displayName = (option && base_name) 
       ? generateDisplayName(base_name, plan || 'REGULAR', option)
       : scheme_name
-    
+
+    const ccVal = cc !== undefined && cc !== null ? Number(cc) : null
+    const siVal = si !== undefined && si !== null ? Number(si) : null
+
     const schemesCollection = getCollection('mf_schemes')
     const result = await schemesCollection.save({
-      scheme_code,
+      scheme_code: finalSchemeCode,
       scheme_name,
       display_name: displayName,
       base_name: base_name || scheme_name,
@@ -323,6 +472,8 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       nav_date: nav_date || null,
       is_nfo: is_nfo || false,
       nfo_validity: is_nfo ? nfo_validity : null,
+      cc: Number.isFinite(ccVal) ? ccVal : null,
+      si: Number.isFinite(siVal) ? siVal : null,
       is_active: true,
       created_at: new Date().toISOString()
     })
@@ -370,13 +521,6 @@ router.post('/expand-preview', requireAuth, requireRole('admin'), async (req, re
       for (const option of options) {
         const displayName = generateDisplayName(base_name, plan, option)
 
-        // Normalize CC/SI values from variant (if provided)
-        const ccVal = variant.cc !== undefined && variant.cc !== null
-          ? Number(variant.cc)
-          : null
-        const siVal = variant.si !== undefined && variant.si !== null
-          ? Number(variant.si)
-          : null
         const comboKey = `${plan}|${option}`
         const proposedCode = proposedAmfiCodes?.[comboKey] || ''
         
@@ -458,8 +602,10 @@ router.post('/commit-variants', requireAuth, requireRole('admin'), async (req, r
     
     for (const variant of selectedVariants) {
       try {
-        const { plan, option, amfi_code, updateIfExists } = variant
-        
+        const { plan, option, amfi_code, updateIfExists, cc: ccRaw, si: siRaw } = variant
+        const ccVal = ccRaw !== undefined && ccRaw !== null ? Number(ccRaw) : null
+        const siVal = siRaw !== undefined && siRaw !== null ? Number(siRaw) : null
+
         // Validate AMFI code requirement
         if (!amfi_code && !is_nfo) {
           errors.push({
@@ -720,6 +866,9 @@ router.put('/amc/:amc_code', requireAuth, requireRole('admin'), async (req, res)
       if (categories.length === 0) {
         return res.status(400).json({ error: 'categories must contain at least one of: ' + VALID_AMC_CATEGORIES.join(', ') })
       }
+      if (categories.length > 1) {
+        return res.status(400).json({ error: 'Only one AMC category is allowed per AMC' })
+      }
       updatePayload.categories = categories
       updatePayload.amc_category = categories[0]
     } else if (amcCategoryRaw != null) {
@@ -760,7 +909,9 @@ router.put('/:scheme_code', requireAuth, requireRole('admin'), async (req, res) 
       nav_date,
       is_nfo,
       nfo_validity,
-      is_active
+      is_active,
+      cc,
+      si
     } = req.body
     
     // Build update object with only provided fields
@@ -781,6 +932,8 @@ router.put('/:scheme_code', requireAuth, requireRole('admin'), async (req, res) 
     if (is_nfo !== undefined) updateData.is_nfo = is_nfo
     if (nfo_validity !== undefined) updateData.nfo_validity = is_nfo ? nfo_validity : null
     if (is_active !== undefined) updateData.is_active = is_active
+    if (cc !== undefined) updateData.cc = cc !== null && cc !== '' ? Number(cc) : null
+    if (si !== undefined) updateData.si = si !== null && si !== '' ? Number(si) : null
     
     // Regenerate display_name if relevant fields changed
     if ((base_name !== undefined || plan !== undefined || option !== undefined)) {
