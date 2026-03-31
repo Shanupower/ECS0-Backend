@@ -17,21 +17,22 @@ jobs:
           HOST: ${{ secrets.EC2_HOST }}
           USERNAME: ${{ secrets.EC2_USER }}
           KEY: ${{ secrets.EC2_SSH_KEY }}
+          KEY_B64: ${{ secrets.EC2_SSH_KEY_B64 }}
         run: |
           sudo apt-get update
           sudo apt-get install -y openssh-client
 
           mkdir -p ~/.ssh
-          # Write key exactly as stored in secret (ensure trailing newline)
-          printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          # Prefer base64 secret to avoid newline/formatting issues.
+          if [ -n "${KEY_B64:-}" ]; then
+            printf '%s' "$KEY_B64" | tr -d '\r\n ' | base64 -d > ~/.ssh/deploy_key
+          else
+            printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          fi
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
 
           # Validate key can be parsed (fails fast with clear error)
           ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
-
-          # Safe diagnostics: confirm key boundaries (do NOT print key body)
-          head -n 1 ~/.ssh/deploy_key
-          tail -n 1 ~/.ssh/deploy_key
 
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no "$USERNAME@$HOST" "sudo -i bash -lc 'cd /root/ECS0-Project/ && git pull && rm -rf node_modules && npm i && pm2 restart 0'"
