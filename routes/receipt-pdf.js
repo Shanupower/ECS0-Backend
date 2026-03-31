@@ -39,6 +39,48 @@ function val(...sources) {
   return null
 }
 
+function hasNonEmptyContact(v) {
+  return v != null && String(v).trim() !== ''
+}
+
+/** When the receipt omits mobile, pull it from customers (single source for CRM). Returns enriched receipt + whether DB lookup added it (forces PDF regen if cached). */
+export async function enrichReceiptWithCustomerMobile(receipt) {
+  const existing = val(
+    receipt.investor?.mobile,
+    receipt.investor_mobile,
+    receipt.mobile,
+    receipt.phone,
+    receipt.phone_number,
+    receipt.phoneNumber,
+    receipt.client_phone,
+    receipt.clientPhone
+  )
+  if (hasNonEmptyContact(existing)) {
+    return { receipt, didEnrichMobile: false }
+  }
+  const rawId = val(receipt.investor?.id, receipt.investor_id, receipt.investorId)
+  if (rawId == null || String(rawId).trim() === '') {
+    return { receipt, didEnrichMobile: false }
+  }
+  const rows = await q(`
+    FOR c IN customers
+      FILTER TO_STRING(c.investor_id) == @strId
+      LIMIT 1
+      RETURN c.mobile
+  `, { strId: String(rawId).trim() })
+  const m = rows[0]
+  if (!hasNonEmptyContact(m)) {
+    return { receipt, didEnrichMobile: false }
+  }
+  const enriched = {
+    ...receipt,
+    investor: { ...(receipt.investor || {}), mobile: m },
+    mobile: m,
+    investor_mobile: m
+  }
+  return { receipt: enriched, didEnrichMobile: true }
+}
+
 export function generateReceiptPDF(receipt) {
   return new Promise((resolve, reject) => {
     const margin = 36
@@ -190,7 +232,17 @@ export function generateReceiptPDF(receipt) {
         receipt.pin_code, receipt.pinCode
       )
       const invPan = val(receipt.investor?.pan, receipt.pan)
-      const invMobile = val(receipt.investor?.mobile, receipt.investor_mobile, receipt.mobile)
+      // Client contact number (legacy receipts sometimes stored it under `phone`)
+      const invMobile = val(
+        receipt.investor?.mobile,
+        receipt.investor_mobile,
+        receipt.mobile,
+        receipt.phone,
+        receipt.phone_number,
+        receipt.phoneNumber,
+        receipt.client_phone,
+        receipt.clientPhone
+      )
       const invEmail = val(receipt.investor?.email, receipt.email)
 
       const cat = val(receipt.product?.category, receipt.product_category, receipt.productCategory) || ''
@@ -264,18 +316,6 @@ export function generateReceiptPDF(receipt) {
       // ── MF ──
       if (isMF) {
         const txnType = val(txn.type, receipt.txn_type, receipt.transaction_type, receipt.txnType) || 'Fresh'
-        const legacyMode = val(txn.mode, receipt.mode)
-        const normalizeTxnTypeToDisplayMode = (raw) => {
-          const v = String(raw || '').trim()
-          if (!v) return ''
-          const upper = v.toUpperCase()
-          if (upper === 'SWITCHOVER' || upper === 'SWITCH_OVER') return 'Switch Over'
-          if (v === 'Switch Over') return 'Switch Over'
-          if (v === 'Lumpsum' || v === 'LumpSum' || v === 'Lump Sum') return 'Lump Sum'
-          return v // SIP / SWP / STP
-        }
-        const modeRaw = (txnType && txnType !== 'Fresh') ? txnType : legacyMode
-        const mode = normalizeTxnTypeToDisplayMode(modeRaw)
         const amcName = val(mf?.amc?.name, receipt.amc_name)
         const schemeName = val(mf?.scheme?.name, receipt.scheme_name, receipt.schemeName, receipt.product?.name)
         const nfo = receipt.scheme_is_nfo || mf?.scheme?.is_nfo
@@ -291,7 +331,6 @@ export function generateReceiptPDF(receipt) {
         const mfEntries = [
           { label: 'Product Type', value: catLabel },
           { label: 'Transaction Type', value: txnType },
-          { label: 'Mode', value: mode },
           { label: 'Amount', value: investAmt != null ? fmtINR(investAmt) : null },
           { label: 'Folio / Policy No', value: folioNo }
         ]
@@ -394,6 +433,7 @@ export function generateReceiptPDF(receipt) {
 
       // ── FD / GOVT_FD ──
       if (isFD) {
+        const productLabel = catUpper === 'GOVT_FD' ? 'Government Schemes' : 'Fixed Deposit'
         const issuerName = val(fd?.issuer?.name, receipt.fd_issuer_name)
         const issuerType = val(fd?.issuer?.type, receipt.fd_issuer_type)
         const schemeName = val(fd?.scheme?.name, receipt.fd_scheme_name)
@@ -408,7 +448,7 @@ export function generateReceiptPDF(receipt) {
         const renewAmt = val(fd?.application?.renewal?.additional_amount, receipt.fd_renewal_additional_amount)
 
         y = drawInlineTriplet([
-          { label: 'Product', value: 'Fixed Deposit' },
+          { label: 'Product', value: productLabel },
           { label: 'Issuer', value: issuerName ? issuerName + (issuerType ? ` (${issuerType})` : '') : null },
           { label: 'Scheme', value: schemeName }
         ], y)
@@ -424,7 +464,7 @@ export function generateReceiptPDF(receipt) {
           { label: 'Maturity Date', value: maturityDate ? fmtDate(maturityDate) : null }
         ], y)
         y = drawInlineTriplet([
-          { label: 'Application / FD Number', value: appNo },
+          { label: catUpper === 'GOVT_FD' ? 'Application / Scheme Number' : 'Application / FD Number', value: appNo },
           { label: 'Transaction Type', value: fdTxnType },
           { label: 'Renewal Investment', value: null }
         ], y)
@@ -591,16 +631,29 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     `, { id: receiptId })
 
     if (!receiptRows.length) return res.status(404).json({ error: 'receipt_not_found' })
-    const receipt = receiptRows[0]
+    const { receipt, didEnrichMobile } = await enrichReceiptWithCustomerMobile(receiptRows[0])
 
-    if (!(req.user.role === 'admin' || String(receipt.user_id) === String(req.user.sub))) {
+    const isAdmin = req.user.role === 'admin'
+    const sameUserId = String(receipt.user_id) === String(req.user.sub)
+    const receiptEmpCode = val(receipt.emp_code, receipt.empCode, receipt.employee?.code)
+    const sameEmpCode =
+      receiptEmpCode != null &&
+      req.user.emp_code &&
+      String(receiptEmpCode).trim().toLowerCase() === String(req.user.emp_code).trim().toLowerCase()
+
+    if (!(isAdmin || sameUserId || sameEmpCode)) {
       return res.status(403).json({ error: 'forbidden' })
     }
 
     let pdfBuffer
     const forceRegenerate = req.query.force === 'true' || req.query.regenerate === 'true'
 
-    if (receipt.pdf_data && !forceRegenerate) {
+    const hasNonEmpty = (v) => v != null && String(v).trim() !== ''
+    const hasMobileAlready = [receipt.mobile, receipt.investor?.mobile, receipt.investor_mobile].some(hasNonEmpty)
+    const hasLegacyPhone = [receipt.phone, receipt.phone_number, receipt.phoneNumber, receipt.client_phone, receipt.clientPhone].some(hasNonEmpty)
+    const shouldRegenerateForLegacyPhone = hasLegacyPhone && !hasMobileAlready
+
+    if (receipt.pdf_data && !forceRegenerate && !shouldRegenerateForLegacyPhone && !didEnrichMobile) {
       pdfBuffer = Buffer.from(receipt.pdf_data, 'base64')
     } else {
       pdfBuffer = await generateReceiptPDF(receipt)
@@ -643,7 +696,8 @@ router.post('/regenerate-pdfs', requireAuth, async (req, res) => {
       const batch = receipts.slice(i, i + batchSize)
       await Promise.all(batch.map(async (receipt) => {
         try {
-          const pdfBuffer = await generateReceiptPDF(receipt)
+          const { receipt: rec } = await enrichReceiptWithCustomerMobile(receipt)
+          const pdfBuffer = await generateReceiptPDF(rec)
           await receiptsCollection.update(receipt._key || receipt.id, {
             pdf_data: pdfBuffer.toString('base64'),
             pdf_generated_at: new Date().toISOString()
@@ -676,7 +730,8 @@ router.post('/:id/generate-pdf', requireAuth, async (req, res) => {
 
     if (!receiptRows.length) return res.status(404).json({ error: 'receipt_not_found' })
 
-    const pdfBuffer = await generateReceiptPDF(receiptRows[0])
+    const { receipt: rec } = await enrichReceiptWithCustomerMobile(receiptRows[0])
+    const pdfBuffer = await generateReceiptPDF(rec)
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="Receipt-${receiptRows[0].receipt_no || receiptRows[0].receiptNo}.pdf"`)
     res.setHeader('Content-Length', pdfBuffer.length)

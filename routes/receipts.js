@@ -1109,11 +1109,12 @@ router.get('/summary', requireAuth, async (req, res) => {
         filterConditions.push('(receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)')
         bindVars.txn_type = normalizedTxnType
         bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
+        filterConditions.push('(receipt.txn_type NOT IN @exclude_switch_types AND receipt.transaction_type NOT IN @exclude_switch_types AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))')
+        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
       }
     } else if (mode) {
       const mappedTxnType = normalizeTxnTypeFromMode(mode)
       if (isSwitchOverValue(mappedTxnType) || isSwitchOverValue(mode)) {
-        // Legacy "Switch Over" stored in receipt.mode; still match against txn_type where available.
         filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
         bindVars.switch_over_mode = 'Switch Over'
         bindVars.switch_over_mode_alt1 = 'SwitchOver'
@@ -1124,6 +1125,8 @@ router.get('/summary', requireAuth, async (req, res) => {
         filterConditions.push('(receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)')
         bindVars.mapped_txn_type = mappedTxnType
         bindVars.mode_legacy = mode
+        filterConditions.push('(receipt.txn_type NOT IN @exclude_switch_types AND receipt.transaction_type NOT IN @exclude_switch_types AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))')
+        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
       }
     }
 
@@ -1356,9 +1359,15 @@ router.get('/', requireAuth, async (req, res) => {
         bindVars.switch_over_mode_alt3 = 'switch_over'
         bindVars.legacy_switch_over_mode = 'Switch Over'
       } else {
-        filterConditions.push('(receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)')
+        // MF receipts may store type in different places:
+        // - legacy: receipt.mode
+        // - newer: receipt.txn_type
+        // - current structured format: receipt.transaction.type / receipt.transaction.mode
+        filterConditions.push('(receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback OR (receipt.transaction != null AND receipt.transaction.type == @txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_fallback))')
         bindVars.txn_type = normalizedTxnType
         bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
+        filterConditions.push('((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))')
+        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
       }
     } else if (mode) {
       // Legacy: "mode" selected in UI but stored as receipt.mode
@@ -1371,9 +1380,11 @@ router.get('/', requireAuth, async (req, res) => {
         bindVars.switch_over_mode_alt3 = 'switch_over'
         bindVars.legacy_switch_over_mode = mode
       } else {
-        filterConditions.push('(receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)')
+        filterConditions.push('(receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy OR (receipt.transaction != null AND receipt.transaction.type == @mapped_txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_legacy))')
         bindVars.mapped_txn_type = mappedTxnType
         bindVars.mode_legacy = mode
+        filterConditions.push('((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))')
+        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
       }
     }
     if (issuer) {
@@ -1742,6 +1753,39 @@ router.patch('/:id', requireAuth, async (req, res) => {
     updates.transaction = {
       ...currentTxn,
       amount: Number.isFinite(numericAmount) ? numericAmount : d.investment_amount
+    }
+
+    // FD receipts: keep nested FD deposit amount in sync.
+    // Main views/records typically read `product_details.fd.deposit.amount` (-> `fd_deposit_amount` via normalizer),
+    // while the edit modal updates `investment_amount`.
+    if (receiptProductCategory === 'FD' || receiptProductCategory === 'GOVT_FD') {
+      const currentProductDetails = (existingReceipt.product_details && typeof existingReceipt.product_details === 'object')
+        ? existingReceipt.product_details
+        : {}
+      const currentFd = (currentProductDetails.fd && typeof currentProductDetails.fd === 'object')
+        ? currentProductDetails.fd
+        : {}
+      const currentDeposit = (currentFd.deposit && typeof currentFd.deposit === 'object')
+        ? currentFd.deposit
+        : {}
+
+      const fdAmount = Number.isFinite(numericAmount) ? numericAmount : d.investment_amount
+      updates.product_details = {
+        ...currentProductDetails,
+        fd: {
+          ...currentFd,
+          deposit: {
+            ...currentDeposit,
+            amount: fdAmount
+          }
+        }
+      }
+
+      // Also update legacy/flat consumers if they exist.
+      updates.fd_deposit_amount = fdAmount
+
+      // Invalidate cached PDF so next download reflects edited deposit amount.
+      updates.pdf_data = null
     }
   }
 

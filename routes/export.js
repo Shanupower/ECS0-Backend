@@ -1,6 +1,6 @@
 import express from 'express'
 import ExcelJS from 'exceljs'
-import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName } from '../config/database.js'
+import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName, getUserBranch } from '../config/database.js'
 import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.js'
 import { uploadCsv } from '../middleware/upload.js'
 
@@ -169,6 +169,37 @@ router.get('/transactions', requireAuth, async (req, res) => {
     `
     const bindVars = {}
 
+    // Enforce server-side scoping for non-admin exports.
+    // This prevents employees from downloading exports for receipts they don't own,
+    // and prevents branch users from exporting receipts outside their branch.
+    if (req.user.role === 'employee') {
+      query += ` AND (
+        receipt.user_id == @user_id
+        OR (receipt.emp_code != null AND receipt.emp_code == @emp_code)
+        OR (receipt.employee != null && receipt.employee.code == @emp_code)
+      )`
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+    } else if (req.user.role === 'branch' || req.user.role === 'manager') {
+      const userBranch = req.user.role === 'branch'
+        ? (req.user.branch_code || req.user.branch)
+        : await getUserBranch(req.user.sub)
+
+      if (userBranch) {
+        const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+        if (branchIdentifiers.length > 0) {
+          query += ` AND receipt.branch IN @branchIdentifiers`
+          bindVars.branchIdentifiers = branchIdentifiers
+        } else {
+          query += ` AND receipt.branch == @branch`
+          bindVars.branch = normalizeBranchName(userBranch) || userBranch
+        }
+      } else {
+        // No branch assigned: show no receipts (do not leak data)
+        query += ` AND 1 == 0`
+      }
+    }
+
     if (from) {
       query += ` AND receipt.date >= @from`
       bindVars.from = from
@@ -234,9 +265,11 @@ router.get('/transactions', requireAuth, async (req, res) => {
         bindVars.switch_over_mode_alt3 = 'switch_over'
         bindVars.legacy_switch_over_mode = 'Switch Over'
       } else {
-        query += ` AND (receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)`
+        query += ` AND (receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback OR (receipt.transaction != null AND receipt.transaction.type == @txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_fallback))`
         bindVars.txn_type = normalizedTxnType
         bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
+        query += ` AND ((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))`
+        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
       }
     } else if (mode) {
       if (mode === 'Switch Over' || mode === 'SwitchOver' || mode === 'SWITCH_OVER' || mode === 'switch_over') {
@@ -247,11 +280,12 @@ router.get('/transactions', requireAuth, async (req, res) => {
         bindVars.switch_over_mode_alt3 = 'switch_over'
         bindVars.legacy_switch_over_mode = mode
       } else {
-        // Legacy filter by receipt.mode (and also allow txn_type if present)
         const mappedTxnType = normalizeModeToTxnType(mode)
-        query += ` AND (receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)`
+        query += ` AND (receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy OR (receipt.transaction != null AND receipt.transaction.type == @mapped_txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_legacy))`
         bindVars.mapped_txn_type = mappedTxnType
         bindVars.mode_legacy = mode
+        query += ` AND ((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))`
+        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
       }
     }
     if (search && String(search).trim()) {
@@ -274,6 +308,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
       SORT receipt.date DESC
       RETURN {
         receipt_id: receipt._key,
+        receipt_no: receipt.receipt_no,
         date: receipt.date,
         branch: receipt.branch,
         emp_code: receipt.emp_code,
@@ -301,7 +336,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
     const resolveBranchName = await buildBranchNameResolver()
 
     const headers = [
-      'Receipt ID', 'Receipt Date', 'Branch', 'Employee Code',
+      'Receipt Number', 'Receipt Date', 'Branch', 'Employee Code',
       'Investor ID', 'Investor Name', 'PAN', 'Product Category',
       'Scheme / Product', 'Folio / Policy No',
       'Investment Amount', 'CC', 'SI', 'Status',
@@ -333,7 +368,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
         (rawMode === 'Switch Over' || rawMode === 'SwitchOver' || rawMode === 'SWITCH_OVER' || rawMode === 'switch_over' ? 'Switch Over' : rawMode)
 
       return [
-        r.receipt_id,
+        r.receipt_no || '',
         r.date || '',
         resolveBranchName(r.branch || ''),
         r.emp_code || '',
@@ -379,6 +414,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
           (rawMode === 'Switch Over' || rawMode === 'SwitchOver' || rawMode === 'SWITCH_OVER' || rawMode === 'switch_over' ? 'Switch Over' : rawMode)
         return {
           receipt_id: r.receipt_id || '',
+          receipt_number: r.receipt_no || '',
           date: r.date || '',
           branch: resolveBranchName(r.branch || ''),
           emp_code: r.emp_code || '',

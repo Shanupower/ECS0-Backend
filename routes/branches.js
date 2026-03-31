@@ -197,6 +197,11 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       category,
       mode,
       txn_type,
+      status,
+      emp_code,
+      search,
+      amount_min,
+      amount_max,
       includeDeleted = '0'
     } = req.query
     
@@ -278,9 +283,15 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
         bindVars.switch_over_mode_alt3 = 'switch_over'
         bindVars.legacy_switch_over_mode = 'Switch Over'
       } else {
-        filterClause += ' AND (receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)'
+        // MF receipts may store type in different places:
+        // - legacy: receipt.mode
+        // - newer: receipt.txn_type
+        // - current structured format: receipt.transaction.type / receipt.transaction.mode
+        filterClause += ' AND (receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback OR (receipt.transaction != null AND receipt.transaction.type == @txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_fallback))'
         bindVars.txn_type = normalizedTxnType
         bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
+        filterClause += ' AND ((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))'
+        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
       }
     } else if (mode) {
       const mappedTxnType = normalizeTxnTypeFromMode(mode)
@@ -292,15 +303,62 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
         bindVars.switch_over_mode_alt3 = 'switch_over'
         bindVars.legacy_switch_over_mode = mode
       } else {
-        filterClause += ' AND (receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)'
+        filterClause += ' AND (receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy OR (receipt.transaction != null AND receipt.transaction.type == @mapped_txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_legacy))'
         bindVars.mapped_txn_type = mappedTxnType
         bindVars.mode_legacy = mode
+        filterClause += ' AND ((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))'
+        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
       }
+    }
+
+    // Status filter
+    if (status) {
+      if (status === 'Pending') {
+        filterClause += ' AND (receipt.status == null OR receipt.status == @status)'
+      } else {
+        filterClause += ' AND receipt.status == @status'
+      }
+      bindVars.status = status
+    }
+
+    // Employee code filter (receipt.emp_code or receipt.employee.code)
+    if (emp_code) {
+      filterClause += ' AND (receipt.emp_code == @emp_code OR (receipt.employee != null && receipt.employee.code == @emp_code))'
+      bindVars.emp_code = emp_code
     }
     
     // Deleted filter
     if (includeDeleted !== '1') {
       filterClause += ' AND receipt.is_deleted == false'
+    }
+
+    // Search filter: receipt no / investor fields
+    if (search && String(search).trim()) {
+      const s = String(search).trim()
+      filterClause += ` AND (
+        LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true)
+        OR (receipt.investor != null && (
+          LIKE(receipt.investor.name, CONCAT("%", @search, "%"), true)
+          OR LIKE(receipt.investor.id, CONCAT("%", @search, "%"), true)
+          OR LIKE(receipt.investor.pan, CONCAT("%", @search, "%"), true)
+        ))
+        OR LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true)
+        OR LIKE(receipt.investor_id, CONCAT("%", @search, "%"), true)
+        OR LIKE(receipt.pan, CONCAT("%", @search, "%"), true)
+      )`
+      bindVars.search = s
+    }
+
+    // Amount range filter (best-effort numeric amount)
+    const minAmt = amount_min != null && String(amount_min).trim() !== '' ? Number(amount_min) : null
+    const maxAmt = amount_max != null && String(amount_max).trim() !== '' ? Number(amount_max) : null
+    if (minAmt != null && !Number.isNaN(minAmt)) {
+      filterClause += ` AND (${effectiveAmountExpr}) >= @amount_min`
+      bindVars.amount_min = minAmt
+    }
+    if (maxAmt != null && !Number.isNaN(maxAmt)) {
+      filterClause += ` AND (${effectiveAmountExpr}) <= @amount_max`
+      bindVars.amount_max = maxAmt
     }
     
     const query = `

@@ -41,28 +41,53 @@ router.get('/summary', requireAuth, async (req, res) => {
     filterConditions.push('receipt.date <= @to')
     bindVars.to = to
   }
-  // Filter by user_id for employees, by branch for managers/branch users, or by user_id when viewing personal data
+  // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
+  // or by the selected viewMode for supported roles.
   const viewMode = req.query.viewMode
   if (req.user.role === 'employee') {
-    // Employees: match list scope (receipts by user_id OR emp_code so list and dashboard agree)
-    filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
-    bindVars.user_id = String(req.user.sub)
-    bindVars.emp_code = req.user.emp_code || ''
-    console.log(`[Stats] EMPLOYEE FILTER APPLIED: user_id=${bindVars.user_id}, emp_code=${bindVars.emp_code}, role=${req.user.role}`)
-  } else if (req.user.role === 'manager' || req.user.role === 'branch') {
-    // Managers and branch users see only their branch's receipts
-    const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
-    const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
-    if (branchIdentifiers.length > 0) {
-      filterConditions.push('receipt.branch IN @branchIdentifiers')
-      bindVars.branchIdentifiers = branchIdentifiers
-    } else if (userBranch) {
-      const normalizedUserBranch = normalizeBranchName(userBranch)
-      filterConditions.push('receipt.branch == @branch')
-      bindVars.branch = normalizedUserBranch || userBranch
+    if (viewMode === 'branch') {
+      // Employees in "Branch" view: restrict to their branch receipts.
+      const userBranch = await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedUserBranch || userBranch
+      } else {
+        // No branch assigned: show zero receipts (do not leak all receipts)
+        filterConditions.push('1 == 0')
+      }
     } else {
-      // No branch assigned: show zero receipts (do not leak all receipts)
-      filterConditions.push('1 == 0')
+      // Employees: match list scope (receipts by user_id OR emp_code so list and dashboard agree)
+      filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+      console.log(`[Stats] EMPLOYEE FILTER APPLIED: user_id=${bindVars.user_id}, emp_code=${bindVars.emp_code}, role=${req.user.role}`)
+    }
+  } else if (req.user.role === 'manager' || req.user.role === 'branch') {
+    if (viewMode === 'personal') {
+      // Managers in "Personal" view: restrict to their own receipts.
+      filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+    } else {
+      // Managers and branch users see only their branch's receipts
+      const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedUserBranch || userBranch
+      } else {
+        // No branch assigned: show zero receipts (do not leak all receipts)
+        filterConditions.push('1 == 0')
+      }
     }
   } else if (emp_code && (viewMode === 'personal' || !viewMode)) {
     // For admins viewing personal data
@@ -91,8 +116,21 @@ router.get('/summary', requireAuth, async (req, res) => {
       }
     }
   } else if (viewMode === 'branch') {
-    // Branch view: filter by the admin's branch (match key, code, or name)
-    const userBranch = await getUserBranch(req.user.sub)
+    // Branch view:
+    // - If admin provides `emp_code`, resolve that employee's branch (so it matches
+    //   Admin "Personal" target scope).
+    // - Otherwise fall back to the admin's own branch.
+    let userBranch = null
+    if (emp_code) {
+      const empBranchRows = await q(`
+        FOR user IN users
+        FILTER user.emp_code == @emp_code
+        LIMIT 1
+        RETURN user.branch
+      `, { emp_code })
+      userBranch = empBranchRows?.[0] ?? null
+    }
+    if (!userBranch) userBranch = await getUserBranch(req.user.sub)
     const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
     if (branchIdentifiers.length > 0) {
       filterConditions.push('receipt.branch IN @branchIdentifiers')
@@ -119,8 +157,10 @@ router.get('/summary', requireAuth, async (req, res) => {
   
   // Include pending transactions if requested
   const includePending = req.query.includePending === '1'
-  
-  // Build status filter - applies to both total_receipts count and investment amounts
+
+  // Build status filter - applies to totals (counts/amounts) to keep KPIs consistent.
+  // Important: Status breakdown should remain visible for failed/rejected records even
+  // when includePending is false, so status breakdown will use a different filter below.
   let statusFilterConditions = []
   if (!includePending) {
     // Only include completed receipts when includePending is false
@@ -204,11 +244,28 @@ router.get('/summary', requireAuth, async (req, res) => {
     RETURN { date, n, amount }
   `
   
-  // Status counts: use same base + status filter so counts match includePending
+  // Status counts: include failed/rejected/cancelled categories even when includePending=false.
+  // When includePending=false we exclude only Pending/null, but still include all other statuses.
+  // This keeps the "Status breakdown" widget informative.
+  const statusCountsFilterConditions = [...filterConditions]
+  if (!includePending) {
+    statusCountsFilterConditions.push('receipt.status != "Pending" AND receipt.status != null')
+  }
+  const statusCountsFilterClause = statusCountsFilterConditions.length > 0
+    ? `FILTER ${statusCountsFilterConditions.join(' AND ')}\n`
+    : ''
+
   const statusCountsQuery = `
     FOR receipt IN receipts
-    ${allFilterClause}
-    COLLECT status = (receipt.status == "Completed" ? "Completed" : (receipt.status == "Pending" ? "Pending" : "Other"))
+    ${statusCountsFilterClause}
+    COLLECT status = (
+      receipt.status == "Completed" ? "Completed"
+      : receipt.status == "Pending" ? "Pending"
+      : receipt.status == "Failed" ? "Failed"
+      : receipt.status == "Rejected" ? "Rejected"
+      : receipt.status == "Cancelled" ? "Cancelled"
+      : (receipt.status == null ? "Pending" : "Other")
+    )
     WITH COUNT INTO count
     RETURN { status, count }
   `
@@ -226,7 +283,7 @@ router.get('/summary', requireAuth, async (req, res) => {
   const totalCC = totals[0]?.total_cc || 0
   const totalSI = totals[0]?.total_si || 0
   
-  const status_counts = { Pending: 0, Completed: 0, Other: 0 }
+  const status_counts = { Pending: 0, Completed: 0, Failed: 0, Rejected: 0, Cancelled: 0, Other: 0 }
   for (const row of statusCountsResult) {
     status_counts[row.status] = row.count
   }
@@ -415,26 +472,50 @@ router.get('/by-category', requireAuth, async (req, res) => {
     filterConditions.push('receipt.date <= @to')
     bindVars.to = to
   }
-  // Filter by user_id for employees, by branch for managers, or by user_id when viewing personal data
+  // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
+  // or by the selected viewMode for supported roles.
   const viewMode = req.query.viewMode
   if (req.user.role === 'employee') {
-    // Employees: match list scope (receipts by user_id OR emp_code so list and dashboard agree)
-    filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
-    bindVars.user_id = String(req.user.sub)
-    bindVars.emp_code = req.user.emp_code || ''
-    console.log(`[Stats] EMPLOYEE FILTER APPLIED: user_id=${bindVars.user_id}, emp_code=${bindVars.emp_code}, role=${req.user.role}`)
-  } else if (req.user.role === 'manager' || req.user.role === 'branch') {
-    const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
-    const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
-    if (branchIdentifiers.length > 0) {
-      filterConditions.push('receipt.branch IN @branchIdentifiers')
-      bindVars.branchIdentifiers = branchIdentifiers
-    } else if (userBranch) {
-      const normalizedUserBranch = normalizeBranchName(userBranch)
-      filterConditions.push('receipt.branch == @branch')
-      bindVars.branch = normalizedUserBranch || userBranch
+    if (viewMode === 'branch') {
+      // Employees in "Branch" view: restrict to their branch receipts.
+      const userBranch = await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedUserBranch || userBranch
+      } else {
+        filterConditions.push('1 == 0')
+      }
     } else {
-      filterConditions.push('1 == 0')
+      // Employees: match list scope (receipts by user_id OR emp_code so list and dashboard agree)
+      filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+      console.log(`[Stats] EMPLOYEE FILTER APPLIED: user_id=${bindVars.user_id}, emp_code=${bindVars.emp_code}, role=${req.user.role}`)
+    }
+  } else if (req.user.role === 'manager' || req.user.role === 'branch') {
+    if (viewMode === 'personal') {
+      // Managers in "Personal" view: restrict to their own receipts.
+      filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+    } else {
+      const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedUserBranch || userBranch
+      } else {
+        filterConditions.push('1 == 0')
+      }
     }
   } else if (emp_code && (viewMode === 'personal' || !viewMode)) {
     // For admins viewing personal data
@@ -529,26 +610,50 @@ router.get('/by-day', requireAuth, async (req, res) => {
     filterConditions.push('receipt.date <= @to')
     bindVars.to = to
   }
-  // Filter by user_id for employees, by branch for managers, or by user_id when viewing personal data
+  // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
+  // or by the selected viewMode for supported roles.
   const viewMode = req.query.viewMode
   if (req.user.role === 'employee') {
-    // Employees: match list scope (receipts by user_id OR emp_code so list and dashboard agree)
-    filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
-    bindVars.user_id = String(req.user.sub)
-    bindVars.emp_code = req.user.emp_code || ''
-    console.log(`[Stats] EMPLOYEE FILTER APPLIED: user_id=${bindVars.user_id}, emp_code=${bindVars.emp_code}, role=${req.user.role}`)
-  } else if (req.user.role === 'manager' || req.user.role === 'branch') {
-    const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
-    const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
-    if (branchIdentifiers.length > 0) {
-      filterConditions.push('receipt.branch IN @branchIdentifiers')
-      bindVars.branchIdentifiers = branchIdentifiers
-    } else if (userBranch) {
-      const normalizedUserBranch = normalizeBranchName(userBranch)
-      filterConditions.push('receipt.branch == @branch')
-      bindVars.branch = normalizedUserBranch || userBranch
+    if (viewMode === 'branch') {
+      // Employees in "Branch" view: restrict to their branch receipts.
+      const userBranch = await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedUserBranch || userBranch
+      } else {
+        filterConditions.push('1 == 0')
+      }
     } else {
-      filterConditions.push('1 == 0')
+      // Employees: match list scope (receipts by user_id OR emp_code so list and dashboard agree)
+      filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+      console.log(`[Stats] EMPLOYEE FILTER APPLIED: user_id=${bindVars.user_id}, emp_code=${bindVars.emp_code}, role=${req.user.role}`)
+    }
+  } else if (req.user.role === 'manager' || req.user.role === 'branch') {
+    if (viewMode === 'personal') {
+      // Managers in "Personal" view: restrict to their own receipts.
+      filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+    } else {
+      const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedUserBranch || userBranch
+      } else {
+        filterConditions.push('1 == 0')
+      }
     }
   } else if (emp_code && (viewMode === 'personal' || !viewMode)) {
     // For admins viewing personal data
@@ -635,19 +740,39 @@ router.get('/monthly-cc-si', requireAuth, async (req, res) => {
   if (from) { filterConditions.push('receipt.date >= @from'); bindVars.from = from }
   if (to) { filterConditions.push('receipt.date <= @to'); bindVars.to = to }
   if (req.user.role === 'employee') {
-    filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
-    bindVars.user_id = String(req.user.sub)
-    bindVars.emp_code = req.user.emp_code || ''
+    if (viewMode === 'branch') {
+      const userBranch = await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedUserBranch || userBranch
+      } else { filterConditions.push('1 == 0') }
+    } else {
+      filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+    }
   } else if (req.user.role === 'manager' || req.user.role === 'branch') {
-    const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
-    const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
-    if (branchIdentifiers.length > 0) {
-      filterConditions.push('receipt.branch IN @branchIdentifiers')
-      bindVars.branchIdentifiers = branchIdentifiers
-    } else if (userBranch) {
-      filterConditions.push('receipt.branch == @branch')
-      bindVars.branch = normalizeBranchName(userBranch) || userBranch
-    } else { filterConditions.push('1 == 0') }
+    if (viewMode === 'personal') {
+      filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+      bindVars.user_id = String(req.user.sub)
+      bindVars.emp_code = req.user.emp_code || ''
+    } else {
+      const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        filterConditions.push('receipt.branch IN @branchIdentifiers')
+        bindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
+        filterConditions.push('receipt.branch == @branch')
+        bindVars.branch = normalizedUserBranch || userBranch
+      } else { filterConditions.push('1 == 0') }
+    }
   } else if (emp_code && (viewMode === 'personal' || !viewMode)) {
     if (req.user.emp_code === emp_code) {
       filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')

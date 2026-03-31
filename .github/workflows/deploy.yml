@@ -1,62 +1,29 @@
-name: Deploy ECS Application
+name: Deploy ECS Backend
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    branches: [ master ]
   workflow_dispatch: # Allow manual deployment
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
-        cache: 'npm'
-        
-    - name: Install dependencies
-      run: |
-        npm install
-        cd ECS0 && npm install
-        
-    - name: Build frontend
-      run: |
-        cd ECS0 && npm run build
-        
-    - name: Deploy to server
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-      env:
-        HOST: ${{ secrets.H_host }}
-        USERNAME: ${{ secrets.H_username }}
-        KEY: ${{ secrets.H_ssh_key }}
-      run: |
-        # Install SSH client
-        sudo apt-get update
-        sudo apt-get install -y openssh-client
-        
-        # Setup SSH key
-        mkdir -p ~/.ssh
-        echo "$KEY" | tr -d '\r' > ~/.ssh/deploy_key
-        chmod 600 ~/.ssh/deploy_key
-        ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
-        
-        # Test SSH connection
-        echo "🔑 Testing SSH connection..."
-        ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USERNAME@$HOST "echo 'SSH connection successful'"
-        
-        # Deploy using the deployment script on server
-        echo "🚀 Starting deployment on server..."
-        ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USERNAME@$HOST "sudo -i /root/deploy-server.sh"
-        
-        # Verify deployment
-        echo "✅ Verifying deployment..."
-        ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no $USERNAME@$HOST "sudo -i pm2 status"
-        
-        echo "🎉 Deployment completed successfully!"
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy backend to EC2 (SSH)
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USERNAME: ${{ secrets.EC2_USER }}
+          KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client
+
+          mkdir -p ~/.ssh
+          echo "$KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no "$USERNAME@$HOST" "sudo -i bash -lc 'cd /root/ECS0-Project/ && git pull && rm -rf node_modules && npm i && pm2 restart 0'"
