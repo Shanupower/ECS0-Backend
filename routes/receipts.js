@@ -5,6 +5,7 @@ import { q, getCollection, getUserBranch, normalizeBranchName, getBranchIdentifi
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
 import { validateRequired, validatePositiveNumber, validateDate } from '../utils/validators.js'
+import { normalizeReceiptCategory } from '../utils/receipt-category.js'
 
 const router = express.Router()
 
@@ -932,7 +933,8 @@ router.get('/recent', requireAuth, async (req, res) => {
       RETURN receipt
     `, bindVars)
 
-    res.json({ items: rows })
+    const sanitized = rows.map((r) => normalizeReceiptCategory(stripSIForNonAdmin(req.user, withNormalizedDetails(r))))
+    res.json({ items: sanitized })
   } catch (error) {
     console.error('Error fetching recent receipts:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to fetch recent receipts' })
@@ -1063,8 +1065,24 @@ router.get('/summary', requireAuth, async (req, res) => {
 
     // Category filter
     if (category) {
-      filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
-      bindVars.category = category
+      if (String(category).trim().toUpperCase() === 'GOVT_FD') {
+        const issuerExpr = `LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
+          ? receipt.product_details.fd.issuer.type
+          : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))`
+        const issuerMatch = `(CONTAINS(${issuerExpr}, "govt") OR CONTAINS(${issuerExpr}, "government") OR CONTAINS(${issuerExpr}, "post office") OR CONTAINS(${issuerExpr}, "post-office") OR CONTAINS(${issuerExpr}, "postoffice"))`
+        const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
+        filterConditions.push(`(
+          ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+          OR (
+            ${categoryExpr} == "FD"
+            AND ${issuerMatch}
+          )
+        )`)
+        bindVars.category = 'GOVT_FD'
+      } else {
+        filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
+        bindVars.category = category
+      }
     }
 
     // Status filter
@@ -1186,10 +1204,16 @@ router.get('/summary', requireAuth, async (req, res) => {
       FOR receipt IN receipts
       ${filterClause}
       LET status_val = receipt.status != null ? receipt.status : "Pending"
-      LET category_val = (receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : (receipt.product_category != null && receipt.product_category != "" ? receipt.product_category : "Other")
+      LET category_raw = (receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : (receipt.product_category != null && receipt.product_category != "" ? receipt.product_category : "Other")
+      LET issuer_sig = LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
+        ? receipt.product_details.fd.issuer.type
+        : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))
+      LET is_govt_issuer = (CONTAINS(issuer_sig, "govt") OR CONTAINS(issuer_sig, "government") OR CONTAINS(issuer_sig, "post office") OR CONTAINS(issuer_sig, "post-office") OR CONTAINS(issuer_sig, "postoffice"))
+      LET category_upper = UPPER(TO_STRING(category_raw))
+      LET category_val = (category_upper == "FD" AND is_govt_issuer) ? "GOVT_FD" : category_raw
       LET inv_amount = (TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0)
       COLLECT status = status_val, category = category_val
-      AGGREGATE 
+      AGGREGATE
         total_count = LENGTH(1),
         total_investment = SUM(inv_amount),
         avg_investment = AVG(inv_amount)
@@ -1314,8 +1338,24 @@ router.get('/', requireAuth, async (req, res) => {
     }
 
     if (category) {
-      filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
-      bindVars.category = category
+      if (String(category).trim().toUpperCase() === 'GOVT_FD') {
+        const issuerExpr = `LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
+          ? receipt.product_details.fd.issuer.type
+          : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))`
+        const issuerMatch = `(CONTAINS(${issuerExpr}, "govt") OR CONTAINS(${issuerExpr}, "government") OR CONTAINS(${issuerExpr}, "post office") OR CONTAINS(${issuerExpr}, "post-office") OR CONTAINS(${issuerExpr}, "postoffice"))`
+        const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
+        filterConditions.push(`(
+          ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+          OR (
+            ${categoryExpr} == "FD"
+            AND ${issuerMatch}
+          )
+        )`)
+        bindVars.category = 'GOVT_FD'
+      } else {
+        filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
+        bindVars.category = category
+      }
     }
     if (status) {
       // Handle status filtering - treat null/undefined as 'Pending'
@@ -1482,7 +1522,7 @@ router.get('/', requireAuth, async (req, res) => {
 
     const total = totalResult[0] || 0
 
-    const sanitized = rows.map(r => stripSIForNonAdmin(req.user, withNormalizedDetails(r)))
+    const sanitized = rows.map((r) => normalizeReceiptCategory(stripSIForNonAdmin(req.user, withNormalizedDetails(r))))
 
     res.json({ page: numPage, size: numLimit, total, items: sanitized })
  
@@ -1551,8 +1591,24 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
 
     // Category filter
     if (category) {
-      filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
-      bindVars.category = category
+      if (String(category).trim().toUpperCase() === 'GOVT_FD') {
+        const issuerExpr = `LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
+          ? receipt.product_details.fd.issuer.type
+          : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))`
+        const issuerMatch = `(CONTAINS(${issuerExpr}, "govt") OR CONTAINS(${issuerExpr}, "government") OR CONTAINS(${issuerExpr}, "post office") OR CONTAINS(${issuerExpr}, "post-office") OR CONTAINS(${issuerExpr}, "postoffice"))`
+        const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
+        filterConditions.push(`(
+          ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+          OR (
+            ${categoryExpr} == "FD"
+            AND ${issuerMatch}
+          )
+        )`)
+        bindVars.category = 'GOVT_FD'
+      } else {
+        filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
+        bindVars.category = category
+      }
     }
 
     // Status filter
@@ -1613,7 +1669,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
 
     const total = totalResult[0] || 0
 
-    const sanitized = rows.map(r => stripSIForNonAdmin(req.user, withNormalizedDetails(r)))
+    const sanitized = rows.map((r) => normalizeReceiptCategory(stripSIForNonAdmin(req.user, withNormalizedDetails(r))))
 
     res.json({ page: numPage, size: numLimit, total, items: sanitized })
   } catch (err) {
@@ -1639,7 +1695,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     
     if (!receiptRows.length) return res.status(404).json({ error: 'not_found' })
     
-    const receipt = stripSIForNonAdmin(req.user, withNormalizedDetails(receiptRows[0]))
+    const receipt = normalizeReceiptCategory(stripSIForNonAdmin(req.user, withNormalizedDetails(receiptRows[0])))
     
     // Get media files if requested
     const includeMedia = req.query.include_media === 'true'

@@ -5,6 +5,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { q, getCollection } from '../config/database.js'
 import { requireAuth } from '../middleware/auth.js'
+import { normalizeReceiptCategory } from '../utils/receipt-category.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -631,7 +632,9 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     `, { id: receiptId })
 
     if (!receiptRows.length) return res.status(404).json({ error: 'receipt_not_found' })
-    const { receipt, didEnrichMobile } = await enrichReceiptWithCustomerMobile(receiptRows[0])
+    const rawReceipt = receiptRows[0]
+    const { receipt: enrichedReceipt, didEnrichMobile } = await enrichReceiptWithCustomerMobile(rawReceipt)
+    const receipt = normalizeReceiptCategory(enrichedReceipt)
 
     const isAdmin = req.user.role === 'admin'
     const sameUserId = String(receipt.user_id) === String(req.user.sub)
@@ -648,12 +651,18 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     let pdfBuffer
     const forceRegenerate = req.query.force === 'true' || req.query.regenerate === 'true'
 
+    // If normalization changes the category label (FD -> GOVT_FD), cached PDFs must be regenerated
+    // so the PDF "Product" label stays correct.
+    const rawCat = String(rawReceipt?.product?.category ?? rawReceipt?.product_category ?? '').trim().toUpperCase()
+    const normalizedCat = String(receipt?.product?.category ?? receipt?.product_category ?? '').trim().toUpperCase()
+    const shouldRegenerateForCategoryNormalization = rawCat === 'FD' && normalizedCat === 'GOVT_FD'
+
     const hasNonEmpty = (v) => v != null && String(v).trim() !== ''
     const hasMobileAlready = [receipt.mobile, receipt.investor?.mobile, receipt.investor_mobile].some(hasNonEmpty)
     const hasLegacyPhone = [receipt.phone, receipt.phone_number, receipt.phoneNumber, receipt.client_phone, receipt.clientPhone].some(hasNonEmpty)
     const shouldRegenerateForLegacyPhone = hasLegacyPhone && !hasMobileAlready
 
-    if (receipt.pdf_data && !forceRegenerate && !shouldRegenerateForLegacyPhone && !didEnrichMobile) {
+    if (receipt.pdf_data && !forceRegenerate && !shouldRegenerateForCategoryNormalization && !shouldRegenerateForLegacyPhone && !didEnrichMobile) {
       pdfBuffer = Buffer.from(receipt.pdf_data, 'base64')
     } else {
       pdfBuffer = await generateReceiptPDF(receipt)
@@ -697,7 +706,8 @@ router.post('/regenerate-pdfs', requireAuth, async (req, res) => {
       await Promise.all(batch.map(async (receipt) => {
         try {
           const { receipt: rec } = await enrichReceiptWithCustomerMobile(receipt)
-          const pdfBuffer = await generateReceiptPDF(rec)
+          const normalized = normalizeReceiptCategory(rec)
+          const pdfBuffer = await generateReceiptPDF(normalized)
           await receiptsCollection.update(receipt._key || receipt.id, {
             pdf_data: pdfBuffer.toString('base64'),
             pdf_generated_at: new Date().toISOString()
@@ -731,7 +741,8 @@ router.post('/:id/generate-pdf', requireAuth, async (req, res) => {
     if (!receiptRows.length) return res.status(404).json({ error: 'receipt_not_found' })
 
     const { receipt: rec } = await enrichReceiptWithCustomerMobile(receiptRows[0])
-    const pdfBuffer = await generateReceiptPDF(rec)
+    const normalized = normalizeReceiptCategory(rec)
+    const pdfBuffer = await generateReceiptPDF(normalized)
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="Receipt-${receiptRows[0].receipt_no || receiptRows[0].receiptNo}.pdf"`)
     res.setHeader('Content-Length', pdfBuffer.length)

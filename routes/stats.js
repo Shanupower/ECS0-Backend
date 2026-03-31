@@ -15,7 +15,21 @@ const INV_AMOUNT_AQL = `(
 )`
 
 // Category: nested product.category first, then legacy product_category, else "Other"
-const CATEGORY_AQL = `(receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : (receipt.product_category != null && receipt.product_category != "" ? receipt.product_category : "Other")`
+const CATEGORY_BASE_AQL = `(receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : (receipt.product_category != null && receipt.product_category != "" ? receipt.product_category : "Other")`
+
+// Issuer type signal for FD normalization: nested fd issuer type first, then legacy flat `fd_issuer_type`
+const FD_ISSUER_TYPE_AQL = `((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null) ? receipt.product_details.fd.issuer.type : receipt.fd_issuer_type)`
+
+// Category normalization in stats grouping: FD + Govt/Post Office issuer → GOVT_FD
+const CATEGORY_AQL = `(
+  (UPPER(TO_STRING(${CATEGORY_BASE_AQL})) == "FD" && (
+    CONTAINS(LOWER(TO_STRING(${FD_ISSUER_TYPE_AQL})), "govt") ||
+    CONTAINS(LOWER(TO_STRING(${FD_ISSUER_TYPE_AQL})), "government") ||
+    CONTAINS(LOWER(TO_STRING(${FD_ISSUER_TYPE_AQL})), "post office") ||
+    CONTAINS(LOWER(TO_STRING(${FD_ISSUER_TYPE_AQL})), "post-office") ||
+    CONTAINS(LOWER(TO_STRING(${FD_ISSUER_TYPE_AQL})), "postoffice")
+  )) ? "GOVT_FD" : ${CATEGORY_BASE_AQL}
+)`
 
 // CC per receipt: tree total (total_cc) when set, else cc_amount+additional_cc, else legacy collection_credit/cc, else calculations.collection_credit/cc
 const CC_AQL = `(TO_NUMBER(receipt.total_cc) || 0) != 0 ? (TO_NUMBER(receipt.total_cc) || 0) : ((TO_NUMBER(receipt.cc_amount) || 0) + (TO_NUMBER(receipt.additional_cc) || 0)) != 0 ? ((TO_NUMBER(receipt.cc_amount) || 0) + (TO_NUMBER(receipt.additional_cc) || 0)) : (TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0) != 0 ? (TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0) : (receipt.calculations != null && (receipt.calculations.collection_credit != null || receipt.calculations.cc != null)) ? (TO_NUMBER(receipt.calculations.collection_credit || receipt.calculations.cc || 0) || 0) : 0`

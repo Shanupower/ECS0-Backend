@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs'
 import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName, getUserBranch } from '../config/database.js'
 import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.js'
 import { uploadCsv } from '../middleware/upload.js'
+import { normalizeReceiptCategory } from '../utils/receipt-category.js'
 
 const router = express.Router()
 
@@ -72,6 +73,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
         investor_email: (receipt.investor != null && receipt.investor.email != null) ? receipt.investor.email : receipt.email,
         amount: (receipt.transaction != null && receipt.transaction.amount != null) ? receipt.transaction.amount : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? receipt.product_details.fd.deposit.amount : receipt.investment_amount,
         category: (receipt.product != null && receipt.product.category != null) ? receipt.product.category : receipt.product_category,
+        fd_issuer_type: (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null) ? receipt.product_details.fd.issuer.type : receipt.fd_issuer_type,
         payment_method: receipt.txn_type || receipt.mode,
         branch_code: receipt.branch,
         branch_name: receipt.branch,
@@ -84,7 +86,17 @@ router.get('/receipts', requireAuth, async (req, res) => {
       }
     `
     
-    const receipts = await q(query, bindVars)
+    const receiptsRaw = await q(query, bindVars)
+    const receipts = receiptsRaw.map((r) => {
+      const receiptLike = {
+        product: { category: r.category },
+        product_category: r.category,
+        fd_issuer_type: r.fd_issuer_type
+      }
+      const normalized = normalizeReceiptCategory(receiptLike)
+      const normalizedCategory = normalized?.product?.category ?? normalized?.product_category ?? r.category
+      return { ...r, category: normalizedCategory }
+    })
     const resolveBranchName = await buildBranchNameResolver()
     
     // Convert to CSV
@@ -231,8 +243,24 @@ router.get('/transactions', requireAuth, async (req, res) => {
       bindVars.status = status
     }
     if (category) {
-      query += ` AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)`
-      bindVars.category = category
+      if (String(category).trim().toUpperCase() === 'GOVT_FD') {
+        const issuerExpr = `LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
+          ? receipt.product_details.fd.issuer.type
+          : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))`
+        const issuerMatch = `(CONTAINS(${issuerExpr}, "govt") OR CONTAINS(${issuerExpr}, "government") OR CONTAINS(${issuerExpr}, "post office") OR CONTAINS(${issuerExpr}, "post-office") OR CONTAINS(${issuerExpr}, "postoffice"))`
+        const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
+        query += ` AND (
+          ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+          OR (
+            ${categoryExpr} == "FD"
+            AND ${issuerMatch}
+          )
+        )`
+        bindVars.category = 'GOVT_FD'
+      } else {
+        query += ` AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)`
+        bindVars.category = category
+      }
     }
     const normalizeModeToTxnType = (m) => {
       const v = String(m || '').trim()
@@ -316,6 +344,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
         investor_name: (receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name,
         pan: (receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan,
         product_category: (receipt.product != null && receipt.product.category != null) ? receipt.product.category : receipt.product_category,
+        fd_issuer_type: (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null) ? receipt.product_details.fd.issuer.type : receipt.fd_issuer_type,
         scheme_name: (receipt.product != null && receipt.product.name != null) ? receipt.product.name : receipt.scheme_name,
         folio_policy_no: receipt.folio_policy_no,
         investment_amount: (receipt.transaction != null && receipt.transaction.amount != null) ? receipt.transaction.amount : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? receipt.product_details.fd.deposit.amount : receipt.investment_amount,
@@ -332,7 +361,17 @@ router.get('/transactions', requireAuth, async (req, res) => {
       }
     `
 
-    const rows = await q(query, bindVars)
+    const rawRows = await q(query, bindVars)
+    const rows = rawRows.map((r) => {
+      const receiptLike = {
+        product: { category: r.product_category },
+        product_category: r.product_category,
+        fd_issuer_type: r.fd_issuer_type
+      }
+      const normalized = normalizeReceiptCategory(receiptLike)
+      const normalizedCategory = normalized?.product?.category ?? normalized?.product_category ?? r.product_category
+      return { ...r, product_category: normalizedCategory }
+    })
     const resolveBranchName = await buildBranchNameResolver()
 
     const headers = [

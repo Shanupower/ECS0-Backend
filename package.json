@@ -21,6 +21,8 @@
     "pm2:logs": "pm2 logs ecs-backend",
     "deploy": "npm run setup-db && npm run import-data && npm run pm2:start",
     "regenerate-pdfs": "node scripts/regenerate-pdfs.js",
+    "regenerate-pdfs-govt-fd": "node scripts/regenerate-pdfs-bulk-direct.js --category=GOVT_FD",
+    "migrate-govt-fd-category": "node scripts/migrate-govt-fd-category.js",
     "test": "node testing/test-runner.js",
     "test:stress": "node -e \"import('./testing/stress/load-test.js').then(m => m.runAllLoadTests())\"",
     "test:edge": "node -e \"import('./testing/edge-cases/boundary-test.js').then(m => m.runAllBoundaryTests())\"",
