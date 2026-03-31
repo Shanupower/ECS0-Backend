@@ -39,8 +39,8 @@ app.use('/uploads', express.static(uploadsDir))
 
 // Root route
 app.get('/', (req, res) => {
-  res.json({ 
-    message: 'ECS Backend API Server', 
+  res.json({
+    message: 'ECS Backend API SERVER Setup by github ci cd ',
     status: 'online',
     timestamp: new Date().toISOString(),
     version: '1.0.0'
@@ -89,5 +89,6 @@ app.get('/health', async (req, res) => {
 })
 
 app.listen(PORT, () => {
+  console.log('github ci cd works - backend')
   console.log('API listening on', PORT)
 })
