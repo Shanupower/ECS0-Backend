@@ -321,23 +321,35 @@ router.get('/summary', requireAuth, async (req, res) => {
       
       if (empUser.length > 0 && empUser[0]) {
         const empBranch = empUser[0]
-        const normalizedEmpBranch = normalizeBranchName(empBranch)
-        if (normalizedEmpBranch) {
+        const branchIdentifiers = await getBranchIdentifiersForFilter(empBranch)
+        if (branchIdentifiers.length > 0) {
           customersQuery = `
             FOR customer IN customers
-            FILTER (
-              (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-              (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-            )
+            FILTER (IS_ARRAY(customer.branches) && LENGTH(INTERSECTION(customer.branches, @branchIdentifiers)) > 0)
+               OR (customer.relationship_manager != null AND (
+                 (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @branchIdentifiers)) > 0)
+                 OR (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager IN @branchIdentifiers)
+               ))
             RETURN LENGTH(1)
           `
-          customersBindVars.userBranch = normalizedEmpBranch
+          customersBindVars.branchIdentifiers = branchIdentifiers
         } else {
-          // If no branch found, show all customers
-          customersQuery = `
-            FOR customer IN customers
-            RETURN LENGTH(1)
-          `
+          const normalizedEmpBranch = normalizeBranchName(empBranch)
+          if (normalizedEmpBranch || empBranch) {
+            const ub = normalizedEmpBranch || empBranch
+            customersQuery = `
+              FOR customer IN customers
+              FILTER customer.relationship_manager == @userBranch
+                 OR (customer.relationship_manager != null AND IS_ARRAY(customer.relationship_manager) AND @userBranch IN customer.relationship_manager)
+              RETURN LENGTH(1)
+            `
+            customersBindVars.userBranch = ub
+          } else {
+            customersQuery = `
+              FOR customer IN customers
+              RETURN LENGTH(1)
+            `
+          }
         }
       } else {
         // Employee not found, show all customers
@@ -347,17 +359,29 @@ router.get('/summary', requireAuth, async (req, res) => {
         `
       }
     } else if (customerViewMode === 'branch') {
-      // Branch view: Show all customers in admin's own branch
+      // Branch view: same scope as managers — customers linked via branches[] or relationship_manager (codes/keys/names).
       const userBranch = await getUserBranch(req.user.sub)
-      const normalizedUserBranch = normalizeBranchName(userBranch)
-      
-      if (normalizedUserBranch) {
+      const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+      if (branchIdentifiers.length > 0) {
+        customersQuery = `
+          FOR customer IN customers
+          FILTER (IS_ARRAY(customer.branches) && LENGTH(INTERSECTION(customer.branches, @branchIdentifiers)) > 0)
+             OR (customer.relationship_manager != null AND (
+               (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @branchIdentifiers)) > 0)
+               OR (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager IN @branchIdentifiers)
+             ))
+          RETURN LENGTH(1)
+        `
+        customersBindVars.branchIdentifiers = branchIdentifiers
+      } else if (userBranch) {
+        const normalizedUserBranch = normalizeBranchName(userBranch)
         customersQuery = `
           FOR customer IN customers
           FILTER customer.relationship_manager == @userBranch
+             OR (customer.relationship_manager != null AND IS_ARRAY(customer.relationship_manager) AND @userBranch IN customer.relationship_manager)
           RETURN LENGTH(1)
         `
-        customersBindVars.userBranch = normalizedUserBranch
+        customersBindVars.userBranch = normalizedUserBranch || userBranch
       } else {
         customersQuery = `
           FOR customer IN customers
@@ -957,11 +981,13 @@ router.get('/branches', requireAuth, async (req, res) => {
       }
     }).sort((a, b) => (b.total_investments || 0) - (a.total_investments || 0))
     
+    const totalMonthlyTarget = mergedStats.reduce((sum, branch) => sum + (Number(branch.total_target) || 0), 0)
     const response = {
       total_branches: mergedStats.length,
       total_investments: mergedStats.reduce((sum, branch) => sum + branch.total_investments, 0),
       total_receipts: mergedStats.reduce((sum, branch) => sum + branch.total_receipts, 0),
       total_collection_credit: mergedStats.reduce((sum, branch) => sum + branch.total_cc, 0),
+      total_monthly_target: totalMonthlyTarget,
       branches: mergedStats
     }
     
