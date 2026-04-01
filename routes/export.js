@@ -4,6 +4,7 @@ import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName, g
 import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.js'
 import { uploadCsv } from '../middleware/upload.js'
 import { normalizeReceiptCategory } from '../utils/receipt-category.js'
+import { appendExportCategoryQuery, appendMfTxnTypeToExportQuery } from '../utils/receipt-filters.js'
 
 const router = express.Router()
 
@@ -243,79 +244,9 @@ router.get('/transactions', requireAuth, async (req, res) => {
       bindVars.status = status
     }
     if (category) {
-      if (String(category).trim().toUpperCase() === 'GOVT_FD') {
-        const issuerExpr = `LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
-          ? receipt.product_details.fd.issuer.type
-          : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))`
-        const issuerMatch = `(CONTAINS(${issuerExpr}, "govt") OR CONTAINS(${issuerExpr}, "government") OR CONTAINS(${issuerExpr}, "post office") OR CONTAINS(${issuerExpr}, "post-office") OR CONTAINS(${issuerExpr}, "postoffice"))`
-        const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
-        query += ` AND (
-          ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
-          OR (
-            ${categoryExpr} == "FD"
-            AND ${issuerMatch}
-          )
-        )`
-        bindVars.category = 'GOVT_FD'
-      } else {
-        query += ` AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)`
-        bindVars.category = category
-      }
+      query = appendExportCategoryQuery(query, bindVars, category)
     }
-    const normalizeModeToTxnType = (m) => {
-      const v = String(m || '').trim()
-      if (!v) return ''
-      if (v === 'Lump Sum') return 'Lumpsum'
-      if (v === 'Switch Over') return 'Switch Over'
-      return v
-    }
-
-    const isSwitchOverValue = (v) => {
-      const s = String(v || '').trim().toLowerCase()
-      return s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
-    }
-
-    const normalizeModeFallbackFromTxnType = (t) => {
-      const v = String(t || '').trim()
-      if (!v) return ''
-      if (v === 'Lumpsum') return 'Lump Sum'
-      if (v === 'Switch Over') return 'Switch Over'
-      return v
-    }
-
-    if (txn_type) {
-      const normalizedTxnType = normalizeModeToTxnType(txn_type) || txn_type
-      if (isSwitchOverValue(normalizedTxnType)) {
-        query += ` AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)`
-        bindVars.switch_over_mode = 'Switch Over'
-        bindVars.switch_over_mode_alt1 = 'SwitchOver'
-        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
-        bindVars.switch_over_mode_alt3 = 'switch_over'
-        bindVars.legacy_switch_over_mode = 'Switch Over'
-      } else {
-        query += ` AND (receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback OR (receipt.transaction != null AND receipt.transaction.type == @txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_fallback))`
-        bindVars.txn_type = normalizedTxnType
-        bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
-        query += ` AND ((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))`
-        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
-      }
-    } else if (mode) {
-      if (mode === 'Switch Over' || mode === 'SwitchOver' || mode === 'SWITCH_OVER' || mode === 'switch_over') {
-        query += ` AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)`
-        bindVars.switch_over_mode = 'Switch Over'
-        bindVars.switch_over_mode_alt1 = 'SwitchOver'
-        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
-        bindVars.switch_over_mode_alt3 = 'switch_over'
-        bindVars.legacy_switch_over_mode = mode
-      } else {
-        const mappedTxnType = normalizeModeToTxnType(mode)
-        query += ` AND (receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy OR (receipt.transaction != null AND receipt.transaction.type == @mapped_txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_legacy))`
-        bindVars.mapped_txn_type = mappedTxnType
-        bindVars.mode_legacy = mode
-        query += ` AND ((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))`
-        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
-      }
-    }
+    query = appendMfTxnTypeToExportQuery(query, bindVars, txn_type, mode)
     if (search && String(search).trim()) {
       const s = String(search).trim()
       query += ` AND (
@@ -347,11 +278,19 @@ router.get('/transactions', requireAuth, async (req, res) => {
         fd_issuer_type: (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null) ? receipt.product_details.fd.issuer.type : receipt.fd_issuer_type,
         scheme_name: (receipt.product != null && receipt.product.name != null) ? receipt.product.name : receipt.scheme_name,
         folio_policy_no: receipt.folio_policy_no,
+        fd_application_number: (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.application != null && receipt.product_details.fd.application.number != null) ? receipt.product_details.fd.application.number : receipt.fd_application_number,
+        bond_application_number: (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.application != null && receipt.product_details.bond.application.number != null) ? receipt.product_details.bond.application.number : receipt.bond_application_number,
+        insurance_policy_number_raw: (receipt.product_details != null && receipt.product_details.insurance != null && receipt.product_details.insurance.policy != null && receipt.product_details.insurance.policy.number != null) ? receipt.product_details.insurance.policy.number : receipt.insurance_policy_number,
+        amc_name_raw: (receipt.product_details != null && receipt.product_details.mf != null && receipt.product_details.mf.amc != null && receipt.product_details.mf.amc.name != null) ? receipt.product_details.mf.amc.name : receipt.amc_name,
+        fd_issuer_name_raw: (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.name != null) ? receipt.product_details.fd.issuer.name : receipt.fd_issuer_name,
+        bond_issuer_name_raw: (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.issuer != null && receipt.product_details.bond.issuer.name != null) ? receipt.product_details.bond.issuer.name : receipt.bond_issuer_name,
+        insurance_issuer_raw: (receipt.product_details != null && receipt.product_details.insurance != null && receipt.product_details.insurance.issuer != null && receipt.product_details.insurance.issuer.name != null) ? receipt.product_details.insurance.issuer.name : receipt.issuer_company,
         investment_amount: (receipt.transaction != null && receipt.transaction.amount != null) ? receipt.transaction.amount : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? receipt.product_details.fd.deposit.amount : receipt.investment_amount,
         cc: receipt.collection_credit || receipt.cc || 0,
         si: receipt.service_income || receipt.si || 0,
         status: receipt.status || 'Pending',
         transaction_type: receipt.transaction_type || receipt.txn_type || null,
+        transaction_type_canonical: (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "") ? receipt.transaction.type : ((receipt.txn_type != null && receipt.txn_type != "") ? receipt.txn_type : ((receipt.transaction_type != null && receipt.transaction_type != "") ? receipt.transaction_type : receipt.mode)),
         // Prefer txn_type for MF mode display; fallback to legacy receipt.mode
         mode: receipt.txn_type || receipt.mode || null,
         switch_from: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.from_scheme_name : null,
@@ -374,10 +313,22 @@ router.get('/transactions', requireAuth, async (req, res) => {
     })
     const resolveBranchName = await buildBranchNameResolver()
 
+    const resolveExportIssuer = (r) => {
+      const c = String(r.product_category || '').toUpperCase()
+      if (['MF', 'SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS'].includes(c)) return r.amc_name_raw || ''
+      if (c === 'FD' || c === 'GOVT_FD') return r.fd_issuer_name_raw || ''
+      if (c === 'BOND' || c === 'NCD') return r.bond_issuer_name_raw || ''
+      if (c === 'INS') return r.insurance_issuer_raw || ''
+      return r.insurance_issuer_raw || r.bond_issuer_name_raw || r.fd_issuer_name_raw || r.amc_name_raw || ''
+    }
+
+    const resolveExportFolioApp = (r) =>
+      r.folio_policy_no || r.insurance_policy_number_raw || r.fd_application_number || r.bond_application_number || ''
+
     const headers = [
       'Receipt Number', 'Receipt Date', 'Branch', 'Employee Code',
-      'Investor ID', 'Investor Name', 'PAN', 'Product Category',
-      'Scheme / Product', 'Folio / Policy No',
+      'Investor ID', 'Investor Name', 'PAN', 'Product Category', 'Issuer',
+      'Scheme / Product', 'Folio / Policy / App No',
       'Investment Amount', 'CC', 'SI', 'Status',
       'Transaction Type', 'Mode', 'Switch From', 'Switch To',
       'Entry Mode', 'Channel', 'Reference No', 'Txn Date',
@@ -406,6 +357,8 @@ router.get('/transactions', requireAuth, async (req, res) => {
         rawMode === 'Lumpsum' || rawMode === 'LumpSum' || rawMode === 'Lump Sum' ? 'Lump Sum' :
         (rawMode === 'Switch Over' || rawMode === 'SwitchOver' || rawMode === 'SWITCH_OVER' || rawMode === 'switch_over' ? 'Switch Over' : rawMode)
 
+      const txnTypeOut = r.transaction_type_canonical || r.transaction_type || r.txn_type || ''
+
       return [
         r.receipt_no || '',
         r.date || '',
@@ -415,13 +368,14 @@ router.get('/transactions', requireAuth, async (req, res) => {
         r.investor_name || '',
         r.pan || '',
         r.product_category || '',
+        resolveExportIssuer(r),
         r.scheme_name || '',
-        r.folio_policy_no || '',
+        resolveExportFolioApp(r),
         r.investment_amount || 0,
         r.cc || 0,
         siVal,
         r.status || 'Pending',
-        r.transaction_type || '',
+        txnTypeOut,
         modeDisplay || '',
         r.switch_from || '',
         r.switch_to || '',
@@ -461,13 +415,15 @@ router.get('/transactions', requireAuth, async (req, res) => {
           investor_name: r.investor_name || '',
           pan: r.pan || '',
           product_category: r.product_category || '',
+          issuer: resolveExportIssuer(r),
           scheme_name: r.scheme_name || '',
           folio_policy_no: r.folio_policy_no || '',
+          folio_policy_app_no: resolveExportFolioApp(r),
           investment_amount: r.investment_amount || 0,
           cc: r.cc || 0,
           si: req.user.role === 'admin' ? (r.si || 0) : null,
           status: r.status || 'Pending',
-          transaction_type: r.transaction_type || '',
+          transaction_type: r.transaction_type_canonical || r.transaction_type || '',
           mode: modeDisplay || '',
           switch_from: r.switch_from || '',
           switch_to: r.switch_to || '',

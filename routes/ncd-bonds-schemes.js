@@ -26,19 +26,12 @@ function validateBusinessRules(data) {
         errors.push(`${prefix} instrument_type must be one of: ${allowedInstrumentTypes.join(', ')}`)
       }
       
-      // ISIN format validation (12 characters)
-      if (scheme.isin && scheme.isin.length !== 12) {
-        errors.push(`${prefix} ISIN must be exactly 12 characters`)
+      // ISIN optional; when provided must be exactly 12 characters (trimmed)
+      const isinTrimmed = scheme.isin != null ? String(scheme.isin).trim() : ''
+      if (isinTrimmed && isinTrimmed.length !== 12) {
+        errors.push(`${prefix} ISIN must be exactly 12 characters when provided`)
       }
       
-      // Date validations
-      if (scheme.issue_date && scheme.maturity_date) {
-        const issueDate = new Date(scheme.issue_date)
-        const maturityDate = new Date(scheme.maturity_date)
-        if (maturityDate <= issueDate) {
-          errors.push(`${prefix} maturity_date must be after issue_date`)
-        }
-      }
       
       // Coupon rate validation (0-100)
       if (scheme.coupon_rate !== undefined && (scheme.coupon_rate < 0 || scheme.coupon_rate > 100)) {
@@ -504,7 +497,7 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
             coupon_rate: scheme.coupon_rate || 0,
             face_value: scheme.face_value || 0,
             issue_date: scheme.issue_date || '',
-            maturity_date: scheme.maturity_date || '',
+            tenure_months: scheme.tenure_months ?? '',
             is_variable_rate: scheme.is_variable_rate ? 'Yes' : 'No',
             listing_status: scheme.listing_status || '',
             credit_rating: scheme.credit_rating || '',
@@ -548,7 +541,7 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       { header: 'Coupon Rate (%)', key: 'coupon_rate', width: 15 },
       { header: 'Face Value', key: 'face_value', width: 15 },
       { header: 'Issue Date', key: 'issue_date', width: 15 },
-      { header: 'Maturity Date', key: 'maturity_date', width: 15 },
+      { header: 'Tenure (Months)', key: 'tenure_months', width: 15 },
       { header: 'Variable Rate', key: 'is_variable_rate', width: 15 },
       { header: 'Listing Status', key: 'listing_status', width: 15 },
       { header: 'Credit Rating', key: 'credit_rating', width: 15 },
@@ -637,7 +630,7 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         const coupon_rate = row.getCell(9).value ? parseFloat(row.getCell(9).value) : null
         const face_value = row.getCell(10).value ? parseFloat(row.getCell(10).value) : null
         const issue_date = row.getCell(11).value?.toString()?.trim()
-        const maturity_date = row.getCell(12).value?.toString()?.trim()
+        const tenure_cell = row.getCell(12).value
         const is_variable_rate = row.getCell(13).value?.toString()?.toLowerCase()?.trim() === 'yes'
         const listing_status = row.getCell(14).value?.toString()?.trim()
         const credit_rating = row.getCell(15).value?.toString()?.trim()
@@ -674,7 +667,10 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         if (coupon_rate !== undefined && coupon_rate !== null) updateData.coupon_rate = coupon_rate
         if (face_value !== undefined && face_value !== null) updateData.face_value = face_value
         if (issue_date !== undefined && issue_date !== '') updateData.issue_date = issue_date
-        if (maturity_date !== undefined && maturity_date !== '') updateData.maturity_date = maturity_date
+        if (tenure_cell !== undefined && tenure_cell !== null && tenure_cell !== '') {
+          const n = typeof tenure_cell === 'number' ? tenure_cell : parseInt(String(tenure_cell).replace(/[^\d.-]/g, ''), 10)
+          if (Number.isFinite(n)) updateData.tenure_months = n
+        }
         if (is_variable_rate !== undefined) updateData.is_variable_rate = is_variable_rate
         if (listing_status !== undefined && listing_status !== '') updateData.listing_status = listing_status
         if (credit_rating !== undefined && credit_rating !== '') updateData.credit_rating = credit_rating

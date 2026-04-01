@@ -2,6 +2,7 @@ import express from 'express'
 import { q } from '../config/database.js'
 import { requireAuth, requireRole, requireBranchAccess } from '../middleware/auth.js'
 import { validateBranchCode, validateEmail, validateMobile, validatePIN, validateRequired } from '../utils/validators.js'
+import { appendCategoryToFilterString, appendMfTxnTypeToFilterString } from '../utils/receipt-filters.js'
 
 const router = express.Router()
 
@@ -245,70 +246,11 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       bindVars.to = to
     }
     
-    // Category filter (nested product.category or legacy product_category)
     if (category) {
-      filterClause += ' AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)'
-      bindVars.category = category
+      filterClause = appendCategoryToFilterString(filterClause, bindVars, category)
     }
-    
-    // MF mode filter: prefer txn_type; legacy fallback to receipt.mode.
-    const normalizeTxnTypeFromMode = (m) => {
-      const v = String(m || '').trim()
-      if (!v) return ''
-      if (v === 'Lump Sum') return 'Lumpsum'
-      if (v === 'Switch Over') return 'Switch Over'
-      return v
-    }
-
-    const normalizeModeFallbackFromTxnType = (t) => {
-      const v = String(t || '').trim()
-      if (!v) return ''
-      if (v === 'Lumpsum') return 'Lump Sum'
-      if (v === 'Switch Over') return 'Switch Over'
-      return v
-    }
-
-    const isSwitchOverValue = (v) => {
-      const s = String(v || '').trim().toLowerCase()
-      return s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
-    }
-
-    if (txn_type) {
-      const normalizedTxnType = normalizeTxnTypeFromMode(txn_type) || txn_type
-      if (isSwitchOverValue(normalizedTxnType)) {
-        filterClause += ' AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)'
-        bindVars.switch_over_mode = 'Switch Over'
-        bindVars.switch_over_mode_alt1 = 'SwitchOver'
-        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
-        bindVars.switch_over_mode_alt3 = 'switch_over'
-        bindVars.legacy_switch_over_mode = 'Switch Over'
-      } else {
-        // MF receipts may store type in different places:
-        // - legacy: receipt.mode
-        // - newer: receipt.txn_type
-        // - current structured format: receipt.transaction.type / receipt.transaction.mode
-        filterClause += ' AND (receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback OR (receipt.transaction != null AND receipt.transaction.type == @txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_fallback))'
-        bindVars.txn_type = normalizedTxnType
-        bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
-        filterClause += ' AND ((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))'
-        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
-      }
-    } else if (mode) {
-      const mappedTxnType = normalizeTxnTypeFromMode(mode)
-      if (isSwitchOverValue(mode) || isSwitchOverValue(mappedTxnType)) {
-        filterClause += ' AND (receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)'
-        bindVars.switch_over_mode = 'Switch Over'
-        bindVars.switch_over_mode_alt1 = 'SwitchOver'
-        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
-        bindVars.switch_over_mode_alt3 = 'switch_over'
-        bindVars.legacy_switch_over_mode = mode
-      } else {
-        filterClause += ' AND (receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy OR (receipt.transaction != null AND receipt.transaction.type == @mapped_txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_legacy))'
-        bindVars.mapped_txn_type = mappedTxnType
-        bindVars.mode_legacy = mode
-        filterClause += ' AND ((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))'
-        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
-      }
+    if (txn_type || mode) {
+      filterClause = appendMfTxnTypeToFilterString(filterClause, bindVars, txn_type, mode)
     }
 
     // Status filter

@@ -6,6 +6,10 @@ import { requireAuth, requireRole } from '../middleware/auth.js'
 import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
 import { validateRequired, validatePositiveNumber, validateDate } from '../utils/validators.js'
 import { normalizeReceiptCategory } from '../utils/receipt-category.js'
+import {
+  applyReceiptCategoryFilter,
+  applyMfTxnTypeOrModeFilter
+} from '../utils/receipt-filters.js'
 
 const router = express.Router()
 
@@ -575,7 +579,10 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
           coupon_rate: d.bond_coupon_rate || d.roi || d.roi_percent || null,
           face_value: d.bond_face_value || null,
           issue_date: d.bond_issue_date || null,
-          maturity_date: d.bond_maturity_date || d.renewalDueDate || d.renewal_due_date || null
+          maturity_date: d.bond_maturity_date || d.renewalDueDate || d.renewal_due_date || null,
+          tenure_months: d.bond_tenure_months != null && d.bond_tenure_months !== ''
+            ? Number(d.bond_tenure_months)
+            : null
         },
         transaction: {
           type: d.bond_transaction_type || d.txn_type || null,
@@ -1063,27 +1070,7 @@ router.get('/summary', requireAuth, async (req, res) => {
       bindVars.to = to
     }
 
-    // Category filter
-    if (category) {
-      if (String(category).trim().toUpperCase() === 'GOVT_FD') {
-        const issuerExpr = `LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
-          ? receipt.product_details.fd.issuer.type
-          : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))`
-        const issuerMatch = `(CONTAINS(${issuerExpr}, "govt") OR CONTAINS(${issuerExpr}, "government") OR CONTAINS(${issuerExpr}, "post office") OR CONTAINS(${issuerExpr}, "post-office") OR CONTAINS(${issuerExpr}, "postoffice"))`
-        const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
-        filterConditions.push(`(
-          ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
-          OR (
-            ${categoryExpr} == "FD"
-            AND ${issuerMatch}
-          )
-        )`)
-        bindVars.category = 'GOVT_FD'
-      } else {
-        filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
-        bindVars.category = category
-      }
-    }
+    applyReceiptCategoryFilter(filterConditions, bindVars, category)
 
     // Status filter
     if (status) {
@@ -1091,62 +1078,7 @@ router.get('/summary', requireAuth, async (req, res) => {
       bindVars.status = status
     }
 
-    // MF mode filter (prefer txn_type; legacy fallback to receipt.mode)
-    const normalizeTxnTypeFromMode = (m) => {
-      const v = String(m || '').trim()
-      if (!v) return ''
-      if (v === 'Lump Sum') return 'Lumpsum'
-      if (v === 'Switch Over') return 'Switch Over'
-      if (v === 'Lumpsum') return 'Lumpsum'
-      return v // SIP / SWP / STP
-    }
-
-    const normalizeModeFallbackFromTxnType = (t) => {
-      const v = String(t || '').trim()
-      if (!v) return ''
-      if (v === 'Lumpsum') return 'Lump Sum'
-      if (v === 'Switch Over') return 'Switch Over'
-      return v
-    }
-
-    const isSwitchOverValue = (v) => {
-      const s = String(v || '').trim().toLowerCase()
-      return s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
-    }
-
-    if (txn_type) {
-      const normalizedTxnType = normalizeTxnTypeFromMode(txn_type) || txn_type
-      if (isSwitchOverValue(normalizedTxnType)) {
-        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
-        bindVars.switch_over_mode = 'Switch Over'
-        bindVars.switch_over_mode_alt1 = 'SwitchOver'
-        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
-        bindVars.switch_over_mode_alt3 = 'switch_over'
-        bindVars.legacy_switch_over_mode = 'Switch Over'
-      } else {
-        filterConditions.push('(receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback)')
-        bindVars.txn_type = normalizedTxnType
-        bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
-        filterConditions.push('(receipt.txn_type NOT IN @exclude_switch_types AND receipt.transaction_type NOT IN @exclude_switch_types AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))')
-        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
-      }
-    } else if (mode) {
-      const mappedTxnType = normalizeTxnTypeFromMode(mode)
-      if (isSwitchOverValue(mappedTxnType) || isSwitchOverValue(mode)) {
-        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
-        bindVars.switch_over_mode = 'Switch Over'
-        bindVars.switch_over_mode_alt1 = 'SwitchOver'
-        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
-        bindVars.switch_over_mode_alt3 = 'switch_over'
-        bindVars.legacy_switch_over_mode = mode
-      } else {
-        filterConditions.push('(receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy)')
-        bindVars.mapped_txn_type = mappedTxnType
-        bindVars.mode_legacy = mode
-        filterConditions.push('(receipt.txn_type NOT IN @exclude_switch_types AND receipt.transaction_type NOT IN @exclude_switch_types AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))')
-        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
-      }
-    }
+    applyMfTxnTypeOrModeFilter(filterConditions, bindVars, txn_type, mode)
 
     // Employee code filter
     if (emp_code) {
@@ -1337,26 +1269,7 @@ router.get('/', requireAuth, async (req, res) => {
       bindVars.to = to
     }
 
-    if (category) {
-      if (String(category).trim().toUpperCase() === 'GOVT_FD') {
-        const issuerExpr = `LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
-          ? receipt.product_details.fd.issuer.type
-          : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))`
-        const issuerMatch = `(CONTAINS(${issuerExpr}, "govt") OR CONTAINS(${issuerExpr}, "government") OR CONTAINS(${issuerExpr}, "post office") OR CONTAINS(${issuerExpr}, "post-office") OR CONTAINS(${issuerExpr}, "postoffice"))`
-        const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
-        filterConditions.push(`(
-          ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
-          OR (
-            ${categoryExpr} == "FD"
-            AND ${issuerMatch}
-          )
-        )`)
-        bindVars.category = 'GOVT_FD'
-      } else {
-        filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
-        bindVars.category = category
-      }
-    }
+    applyReceiptCategoryFilter(filterConditions, bindVars, category)
     if (status) {
       // Handle status filtering - treat null/undefined as 'Pending'
       if (status === 'Pending') {
@@ -1366,67 +1279,7 @@ router.get('/', requireAuth, async (req, res) => {
       }
       bindVars.status = status
     }
-    // MF mode filtering: prefer txn_type; legacy fallback to receipt.mode.
-    // Note: frontend sends "mode" label values like "Lump Sum"/"Switch Over" but backend stores txn_type like "Lumpsum"/"Switch Over".
-    const normalizeTxnTypeFromMode = (m) => {
-      const v = String(m || '').trim()
-      if (!v) return ''
-      if (v === 'Lump Sum') return 'Lumpsum'
-      if (v === 'Switch Over') return 'Switch Over'
-      return v
-    }
-
-    const normalizeModeFallbackFromTxnType = (t) => {
-      const v = String(t || '').trim()
-      if (!v) return ''
-      if (v === 'Lumpsum') return 'Lump Sum'
-      if (v === 'Switch Over') return 'Switch Over'
-      return v
-    }
-
-    const isSwitchOverValue = (v) => {
-      const s = String(v || '').trim().toLowerCase()
-      return s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
-    }
-
-    if (txn_type) {
-      const normalizedTxnType = normalizeTxnTypeFromMode(txn_type) || txn_type
-      if (isSwitchOverValue(normalizedTxnType)) {
-        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
-        bindVars.switch_over_mode = 'Switch Over'
-        bindVars.switch_over_mode_alt1 = 'SwitchOver'
-        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
-        bindVars.switch_over_mode_alt3 = 'switch_over'
-        bindVars.legacy_switch_over_mode = 'Switch Over'
-      } else {
-        // MF receipts may store type in different places:
-        // - legacy: receipt.mode
-        // - newer: receipt.txn_type
-        // - current structured format: receipt.transaction.type / receipt.transaction.mode
-        filterConditions.push('(receipt.txn_type == @txn_type OR receipt.mode == @mode_fallback OR (receipt.transaction != null AND receipt.transaction.type == @txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_fallback))')
-        bindVars.txn_type = normalizedTxnType
-        bindVars.mode_fallback = normalizeModeFallbackFromTxnType(normalizedTxnType)
-        filterConditions.push('((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))')
-        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
-      }
-    } else if (mode) {
-      // Legacy: "mode" selected in UI but stored as receipt.mode
-      const mappedTxnType = normalizeTxnTypeFromMode(mode)
-      if (isSwitchOverValue(mode) || isSwitchOverValue(mappedTxnType)) {
-        filterConditions.push('(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode)')
-        bindVars.switch_over_mode = 'Switch Over'
-        bindVars.switch_over_mode_alt1 = 'SwitchOver'
-        bindVars.switch_over_mode_alt2 = 'SWITCH_OVER'
-        bindVars.switch_over_mode_alt3 = 'switch_over'
-        bindVars.legacy_switch_over_mode = mode
-      } else {
-        filterConditions.push('(receipt.txn_type == @mapped_txn_type OR receipt.mode == @mode_legacy OR (receipt.transaction != null AND receipt.transaction.type == @mapped_txn_type) OR (receipt.transaction != null AND receipt.transaction.mode == @mode_legacy))')
-        bindVars.mapped_txn_type = mappedTxnType
-        bindVars.mode_legacy = mode
-        filterConditions.push('((receipt.txn_type == null OR receipt.txn_type NOT IN @exclude_switch_types) AND (receipt.transaction_type == null OR receipt.transaction_type NOT IN @exclude_switch_types) AND (receipt.transaction == null OR receipt.transaction.type == null OR receipt.transaction.type NOT IN @exclude_switch_types) AND (receipt.switch_to_scheme_name == null OR receipt.switch_to_scheme_name == ""))')
-        bindVars.exclude_switch_types = ['Switch Over', 'SwitchOver', 'SWITCH_OVER', 'switch_over']
-      }
-    }
+    applyMfTxnTypeOrModeFilter(filterConditions, bindVars, txn_type, mode)
     if (issuer) {
       filterConditions.push('receipt.issuer_company LIKE @issuer')
       bindVars.issuer = `%${issuer}%`
@@ -1540,6 +1393,8 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
       to,
       category,
       status,
+      mode,
+      txn_type,
       issuer,
       search, // Search by investor name/ID or receipt ID
       page = '1',
@@ -1589,27 +1444,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
       bindVars.to = to.trim()
     }
 
-    // Category filter
-    if (category) {
-      if (String(category).trim().toUpperCase() === 'GOVT_FD') {
-        const issuerExpr = `LOWER(TO_STRING((receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.issuer != null && receipt.product_details.fd.issuer.type != null)
-          ? receipt.product_details.fd.issuer.type
-          : (receipt.fd_issuer_type != null ? receipt.fd_issuer_type : "")))`
-        const issuerMatch = `(CONTAINS(${issuerExpr}, "govt") OR CONTAINS(${issuerExpr}, "government") OR CONTAINS(${issuerExpr}, "post office") OR CONTAINS(${issuerExpr}, "post-office") OR CONTAINS(${issuerExpr}, "postoffice"))`
-        const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
-        filterConditions.push(`(
-          ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
-          OR (
-            ${categoryExpr} == "FD"
-            AND ${issuerMatch}
-          )
-        )`)
-        bindVars.category = 'GOVT_FD'
-      } else {
-        filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
-        bindVars.category = category
-      }
-    }
+    applyReceiptCategoryFilter(filterConditions, bindVars, category)
 
     // Status filter
     if (status) {
@@ -1621,6 +1456,8 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
       }
       bindVars.status = status
     }
+
+    applyMfTxnTypeOrModeFilter(filterConditions, bindVars, txn_type, mode)
 
     // Issuer filter (for issuer company)
     if (issuer) {
@@ -1766,9 +1603,10 @@ router.patch('/:id', requireAuth, async (req, res) => {
     'renewal_due_date','maturity_amount','renewal_amount','issuer_company','issuer_category','product_category',
     'collection_credit','cc','service_income','si', // Allow manual updates to CC/SI if needed
     'switch_from_scheme_code','switch_from_scheme_name','switch_to_scheme_code','switch_to_scheme_name','switch_type','switch_value',
+    'stp_target_scheme_name','stp_target_scheme_code',
     'transaction_details','entry_mode','transaction_channel','transaction_reference_no','txn_date','account_last4','transaction_notes',
     'insurance_date_of_issue','insurance_renewal_date','insurance_policy_period',
-    'fd_maturity_date','bond_issue_date','bond_maturity_date',
+    'fd_maturity_date','bond_issue_date','bond_maturity_date','bond_tenure_months',
     'fd_transaction_type', // Fresh or Renewal for FD receipts
     'rejection_remark','rejected_at','rejected_by' // Rejection fields for failed transactions
   ]
@@ -1855,6 +1693,21 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
   }
 
+  if (hasOwn('stp_target_scheme_name') || hasOwn('stp_target_scheme_code')) {
+    const baseTxn = (updates.transaction && typeof updates.transaction === 'object')
+      ? updates.transaction
+      : ((existingReceipt.transaction && typeof existingReceipt.transaction === 'object') ? existingReceipt.transaction : {})
+    const stp = (baseTxn.stp && typeof baseTxn.stp === 'object') ? baseTxn.stp : {}
+    updates.transaction = {
+      ...baseTxn,
+      stp: {
+        ...stp,
+        to_scheme_name: hasOwn('stp_target_scheme_name') ? (d.stp_target_scheme_name ?? null) : (stp.to_scheme_name ?? null),
+        to_scheme_code: hasOwn('stp_target_scheme_code') ? (d.stp_target_scheme_code ?? null) : (stp.to_scheme_code ?? null)
+      }
+    }
+  }
+
   if (hasOwn('scheme_name')) {
     const currentProduct = (existingReceipt.product && typeof existingReceipt.product === 'object') ? existingReceipt.product : {}
     updates.product = {
@@ -1909,6 +1762,22 @@ router.patch('/:id', requireAuth, async (req, res) => {
     updates.renewal_due_date = d.insurance_renewal_date || null
   }
 
+  if (receiptProductCategory === 'INS' && (hasOwn('insurance_date_of_issue') || hasOwn('insurance_renewal_date') || hasOwn('insurance_policy_period'))) {
+    const pd = { ...(existingReceipt.product_details && typeof existingReceipt.product_details === 'object' ? existingReceipt.product_details : {}) }
+    const ins = { ...(pd.insurance && typeof pd.insurance === 'object' ? pd.insurance : {}) }
+    const policy = { ...(ins.policy && typeof ins.policy === 'object' ? ins.policy : {}) }
+    const coverage = { ...(ins.coverage && typeof ins.coverage === 'object' ? ins.coverage : {}) }
+    if (hasOwn('insurance_date_of_issue')) coverage.policy_start_date = d.insurance_date_of_issue || null
+    if (hasOwn('insurance_renewal_date')) policy.renewal_date = d.insurance_renewal_date || null
+    if (hasOwn('insurance_policy_period')) {
+      policy.period = d.insurance_policy_period || null
+      const ny = Number(d.insurance_policy_period)
+      if (Number.isFinite(ny) && String(d.insurance_policy_period).trim() !== '') coverage.policy_term_years = ny
+    }
+    pd.insurance = { ...ins, policy: { ...ins.policy, ...policy }, coverage: { ...ins.coverage, ...coverage } }
+    updates.product_details = pd
+  }
+
   if (hasOwn('fd_maturity_date')) {
     const currentFdDetails = (existingReceipt.fd_details && typeof existingReceipt.fd_details === 'object') ? existingReceipt.fd_details : {}
     updates.fd_details = {
@@ -1928,6 +1797,22 @@ router.patch('/:id', requireAuth, async (req, res) => {
       // Keep common renewal field aligned for legacy consumers.
       updates.renewal_due_date = d.bond_maturity_date || null
     }
+  }
+
+  if ((receiptProductCategory === 'BOND' || receiptProductCategory === 'NCD') && hasOwn('bond_tenure_months')) {
+    const basePd =
+      updates.product_details && typeof updates.product_details === 'object'
+        ? updates.product_details
+        : (existingReceipt.product_details && typeof existingReceipt.product_details === 'object'
+          ? existingReceipt.product_details
+          : {})
+    const bond = { ...(basePd.bond && typeof basePd.bond === 'object' ? basePd.bond : {}) }
+    const instrument = { ...(bond.instrument && typeof bond.instrument === 'object' ? bond.instrument : {}) }
+    const tm = Number(d.bond_tenure_months)
+    instrument.tenure_months = Number.isFinite(tm) ? tm : null
+    updates.product_details = { ...basePd, bond: { ...bond, instrument: { ...instrument } } }
+    updates.bond_tenure_months = Number.isFinite(tm) ? tm : null
+    updates.pdf_data = null
   }
   
   await q(`

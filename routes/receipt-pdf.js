@@ -63,13 +63,23 @@ export async function enrichReceiptWithCustomerMobile(receipt) {
   if (rawId == null || String(rawId).trim() === '') {
     return { receipt, didEnrichMobile: false }
   }
+  const trimmed = String(rawId).trim()
   const rows = await q(`
     FOR c IN customers
-      FILTER TO_STRING(c.investor_id) == @strId
+      FILTER LOWER(TRIM(TO_STRING(c.investor_id))) == LOWER(TRIM(@strId))
       LIMIT 1
       RETURN c.mobile
-  `, { strId: String(rawId).trim() })
-  const m = rows[0]
+  `, { strId: trimmed })
+  let m = rows[0]
+  if (!hasNonEmptyContact(m)) {
+    const alt = await q(`
+      FOR c IN customers
+        FILTER TO_STRING(c.investor_id) == @strId
+        LIMIT 1
+        RETURN c.mobile
+    `, { strId: trimmed })
+    m = alt[0]
+  }
   if (!hasNonEmptyContact(m)) {
     return { receipt, didEnrichMobile: false }
   }
@@ -264,15 +274,24 @@ export function generateReceiptPDF(receipt) {
       const misc = pd.misc || null
       const pmt = receipt.payment || {}
 
-      // ─── Header KPI row ───
-      const fdDepositAmt = val(fd?.deposit?.amount, receipt.fd_deposit_amount, txn.amount, receipt.investment_amount, receipt.investmentAmount)
-      const fdMaturityAmt = val(fd?.maturity?.amount, receipt.fd_maturity_amount)
-      const fdMaturityDate = val(fd?.maturity?.date, receipt.fd_maturity_date)
-      y = drawKpiRow([
-        { label: 'Deposit Amount', value: fdDepositAmt != null ? fmtINR(fdDepositAmt) : null },
-        { label: '', value: null },
-        { label: 'Maturity Date', value: fdMaturityDate ? fmtDate(fdMaturityDate) : null }
-      ], y)
+      // ─── Header KPI row (FD: deposit only; other categories: primary amount) ───
+      if (isFD) {
+        const fdDepositAmt = val(fd?.deposit?.amount, receipt.fd_deposit_amount, txn.amount, receipt.investment_amount, receipt.investmentAmount)
+        y = drawKpiRow([
+          { label: 'Deposit Amount', value: fdDepositAmt != null ? fmtINR(fdDepositAmt) : null },
+          { label: '', value: null },
+          { label: '', value: null }
+        ], y)
+      } else {
+        const topAmt = val(txn.amount, receipt.investment_amount, receipt.investmentAmount, receipt.service_price, receipt.servicePrice)
+        if (topAmt != null && topAmt !== '') {
+          y = drawKpiRow([
+            { label: 'Amount', value: fmtINR(topAmt) },
+            { label: '', value: null },
+            { label: '', value: null }
+          ], y)
+        }
+      }
 
       // ─── 1. EMPLOYEE DETAILS ───
       y = sectionTitle('Employee Details', y)
@@ -328,13 +347,22 @@ export function generateReceiptPDF(receipt) {
         const folioNo = val(receipt.folio_number, receipt.folio_policy_no, receipt.folioPolicyNo, txn.folio_number)
         const investAmt = val(txn.amount, receipt.investment_amount, receipt.investmentAmount)
         const amcCat = val(receipt.mf_amc_category, mf?.amc_category)
+        const isSTP = String(txnType || '').trim().toUpperCase() === 'STP'
+        const stpOrigAmt = val(txn.stp?.original_amount, receipt.stp_original_amount)
+        const stpXferAmt = val(txn.stp?.amount, receipt.stp_amount)
 
         const mfEntries = [
           { label: 'Product Type', value: catLabel },
-          { label: 'Transaction Type', value: txnType },
-          { label: 'Amount', value: investAmt != null ? fmtINR(investAmt) : null },
-          { label: 'Folio / Policy No', value: folioNo }
+          { label: 'Transaction Type', value: txnType }
         ]
+        if (isSTP) {
+          const orig = stpOrigAmt != null && stpOrigAmt !== '' ? stpOrigAmt : investAmt
+          if (orig != null && orig !== '') mfEntries.push({ label: 'Original Investment Amount', value: fmtINR(orig) })
+          if (stpXferAmt != null && stpXferAmt !== '') mfEntries.push({ label: 'STP Transfer Amount', value: fmtINR(stpXferAmt) })
+        } else if (investAmt != null && investAmt !== '') {
+          mfEntries.push({ label: 'Amount', value: fmtINR(investAmt) })
+        }
+        mfEntries.push({ label: 'Folio / Policy No', value: folioNo })
 
         // Scheme display
         // - Switch Over: show Source Scheme + Target Scheme
@@ -342,7 +370,6 @@ export function generateReceiptPDF(receipt) {
         // - Others: show Scheme
         const switchFrom = val(txn.switch_over?.from_scheme_name, receipt.switch_from_scheme_name)
         const switchTo = val(txn.switch_over?.to_scheme_name, receipt.switch_to_scheme_name, schemeName)
-        const isSTP = String(txnType || '').trim().toUpperCase() === 'STP'
         const stpTargetForTop = val(txn.stp?.to_scheme_name, receipt.stp_target_scheme_name)
         if (txnType === 'Switch Over') {
           const sourceDisplay = switchFrom ? (switchFrom) : null
@@ -377,11 +404,6 @@ export function generateReceiptPDF(receipt) {
           const catStr = sSubCat ? `${sCategory} / ${sSubCat}` : sCategory
           mfEntries.push({ label: 'Category', value: catStr })
         }
-        if (sPlan || sType) {
-          const planType = [sPlan, sType].filter(Boolean).join(', ')
-          mfEntries.push({ label: 'Plan & Type', value: planType })
-        }
-        if (folioNo) mfEntries.push({ label: 'Folio Number', value: folioNo })
 
         // SIP
         const sip = txn.sip || {}
@@ -396,15 +418,19 @@ export function generateReceiptPDF(receipt) {
           else if (sipPerp) mfEntries.push({ label: 'SIP Type', value: 'Perpetual (40 years)' })
         }
 
-        // STP
+        // STP (frequency / start; amounts shown above for STP)
         const stp = txn.stp || {}
         const stpFreq = val(stp.frequency, receipt.stp_frequency)
         const stpStart = val(stp.start_date, receipt.stp_start_date)
-        const stpAmt = val(stp.amount, receipt.stp_amount)
-        if (stpFreq || stpStart || stpAmt != null) {
+        if (stpFreq || stpStart) {
           if (stpFreq) mfEntries.push({ label: 'STP Frequency', value: stpFreq })
           if (stpStart) mfEntries.push({ label: 'STP Start Date', value: fmtDate(stpStart) })
-          if (stpAmt != null) mfEntries.push({ label: 'STP Transfer Amount', value: fmtINR(stpAmt) })
+        }
+        if (isSTP) {
+          const ccV = receipt.collection_credit ?? receipt.cc
+          const siV = receipt.service_income ?? receipt.si
+          if (ccV != null && ccV !== '' && !isNaN(Number(ccV))) mfEntries.push({ label: 'Collection Credit (CC)', value: fmtINR(ccV) })
+          if (siV != null && siV !== '' && !isNaN(Number(siV))) mfEntries.push({ label: 'Service Income (SI)', value: fmtINR(siV) })
         }
 
         // SWP
@@ -442,11 +468,8 @@ export function generateReceiptPDF(receipt) {
         const tenure = val(fd?.deposit?.tenure_months, receipt.fd_tenure_months)
         const payoutFreq = val(fd?.deposit?.payout_frequency, receipt.fd_payout_frequency)
         const rate = val(fd?.rates?.locked_interest_rate_pa, receipt.fd_locked_interest_rate_pa)
-        const maturityDate = val(fd?.maturity?.date, receipt.fd_maturity_date)
         const appNo = val(fd?.application?.number, receipt.fd_application_number)
         const fdTxnType = val(fd?.application?.transaction_type, receipt.fd_transaction_type, receipt.txn_type) || 'Fresh'
-        const renewType = val(fd?.application?.renewal?.investment_type, receipt.fd_renewal_investment_type)
-        const renewAmt = val(fd?.application?.renewal?.additional_amount, receipt.fd_renewal_additional_amount)
 
         y = drawInlineTriplet([
           { label: 'Product', value: productLabel },
@@ -462,24 +485,13 @@ export function generateReceiptPDF(receipt) {
         y = drawInlineTriplet([
           { label: 'Deposit Amount', value: depositAmt != null ? fmtINR(depositAmt) : null },
           { label: '', value: null },
-          { label: 'Maturity Date', value: maturityDate ? fmtDate(maturityDate) : null }
+          { label: '', value: null }
         ], y)
         y = drawInlineTriplet([
           { label: catUpper === 'GOVT_FD' ? 'Application / Scheme Number' : 'Application / FD Number', value: appNo },
           { label: 'Transaction Type', value: fdTxnType },
-          { label: 'Renewal Investment', value: null }
+          { label: '', value: null }
         ], y)
-        if (fdTxnType === 'Renewal' && renewType) {
-          let txt = renewType === 'same' ? 'Same Amount'
-            : renewType === 'increased' ? 'Increased Amount' + (renewAmt ? ` (Additional: ${fmtINR(renewAmt)})` : '')
-            : renewType === 'decreased' ? 'Decreased Amount' + (renewAmt ? ` (Withdrawal: ${fmtINR(renewAmt)})` : '')
-            : renewType
-          y = drawInlineTriplet([
-            { label: 'Renewal Investment', value: txt },
-            { label: '', value: null },
-            { label: '', value: null }
-          ], y)
-        }
       }
 
       // ── BOND / NCD ──
@@ -491,23 +503,24 @@ export function generateReceiptPDF(receipt) {
         const coupon = val(bond?.instrument?.coupon_rate, receipt.bond_coupon_rate, receipt.roi, receipt.roi_percent)
         const faceVal = val(bond?.instrument?.face_value, receipt.bond_face_value)
         const issueDate = val(bond?.instrument?.issue_date, receipt.bond_issue_date)
-        const matDate = val(bond?.instrument?.maturity_date, receipt.bond_maturity_date, receipt.renewal_due_date)
+        const tenureMonths = val(bond?.instrument?.tenure_months, receipt.bond_tenure_months)
         const appNo = val(bond?.application?.number, receipt.bond_application_number)
         const bondTxnType = val(bond?.transaction?.type, receipt.bond_transaction_type, receipt.txn_type, receipt.transaction_type)
         const isin = val(bond?.scheme?.isin, receipt.bond_isin)
 
-        y = drawKeyValueRows([
+        const bondRows = [
           { label: 'Issuer', value: issuer ? issuer + (issuerType ? ` (${issuerType})` : '') : null },
           { label: 'Scheme', value: scheme },
           { label: 'Amount', value: amt != null ? fmtINR(amt) : null },
           { label: 'Coupon Rate', value: coupon != null ? `${Number(coupon).toFixed(2)}% p.a.` : null },
           { label: 'Face Value', value: faceVal != null ? fmtINR(faceVal, 0) : null },
           { label: 'Issue Date', value: issueDate ? fmtDate(issueDate) : null },
-          { label: 'Maturity / Renewal Due', value: matDate ? fmtDate(matDate) : null },
+          { label: 'Tenure (months)', value: tenureMonths != null && tenureMonths !== '' ? String(tenureMonths) : null },
           { label: 'Application Number', value: appNo },
-          { label: 'Transaction Type', value: bondTxnType },
-          { label: 'ISIN', value: isin }
-        ], y)
+          { label: 'Transaction Type', value: bondTxnType }
+        ]
+        if (isin) bondRows.push({ label: 'ISIN', value: isin })
+        y = drawKeyValueRows(bondRows, y)
       }
 
       // ── INSURANCE ──
@@ -667,10 +680,16 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     } else {
       pdfBuffer = await generateReceiptPDF(receipt)
       const receiptsCollection = getCollection('receipts')
-      await receiptsCollection.update(receiptId, {
+      const persist = {
         pdf_data: pdfBuffer.toString('base64'),
         pdf_generated_at: new Date().toISOString()
-      })
+      }
+      if (didEnrichMobile && receipt.investor?.mobile != null && String(receipt.investor.mobile).trim() !== '') {
+        persist.mobile = receipt.investor.mobile
+        persist.investor_mobile = receipt.investor.mobile
+        persist.investor = { ...(rawReceipt.investor || {}), ...receipt.investor, mobile: receipt.investor.mobile }
+      }
+      await receiptsCollection.update(receiptId, persist)
     }
 
     res.setHeader('Content-Type', 'application/pdf')
