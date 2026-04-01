@@ -83,6 +83,87 @@ router.get('/issuers', async (req, res) => {
   }
 })
 
+function normalizeBondLabel(s) {
+  return String(s ?? '')
+    .toLowerCase()
+    .replace(/[-_\s]+/g, ' ')
+    .trim()
+}
+
+function isTaxSavingCategory(category) {
+  const n = normalizeBondLabel(category)
+  return n.includes('tax') && n.includes('saving')
+}
+
+function is54ecSubCategory(subCategory) {
+  const n = normalizeBondLabel(subCategory)
+  return n.includes('54ec') || n.includes('capital gain')
+}
+
+function isSavingBondSubCategory(subCategory) {
+  const n = normalizeBondLabel(subCategory)
+  if (is54ecSubCategory(subCategory)) return false
+  return (n.includes('saving') && n.includes('bond')) || n === 'saving bonds'
+}
+
+// Flat scheme list for receipt step 4 (segment picker)
+router.get('/receipt-schemes', async (req, res) => {
+  const raw = String(req.query.segment ?? '').toLowerCase().trim()
+  const segment = raw === 'ec54' ? '54ec' : raw
+  const allowed = new Set(['ncd', '54ec', 'saving'])
+  if (!allowed.has(segment)) {
+    return res.status(400).json({ error: 'Invalid segment. Use ncd, 54ec, or saving.' })
+  }
+
+  try {
+    const issuers = await q(`
+      FOR issuer IN ncd_bond_issuers
+      FILTER issuer.is_active == true
+      RETURN issuer
+    `)
+
+    const out = []
+    for (const issuer of issuers || []) {
+      const issuerKey = issuer._key
+      const issuerType = (issuer.type || '').trim()
+      const issuerTypeLower = issuerType.toLowerCase()
+      const schemes = Array.isArray(issuer.schemes) ? issuer.schemes : []
+
+      for (const scheme of schemes) {
+        if (scheme.is_active === false) continue
+
+        let include = false
+        if (segment === 'ncd') {
+          include = issuerTypeLower === 'ncd'
+        } else if (segment === '54ec') {
+          include =
+            isTaxSavingCategory(scheme.category) && is54ecSubCategory(scheme.sub_category)
+        } else if (segment === 'saving') {
+          include =
+            isTaxSavingCategory(scheme.category) && isSavingBondSubCategory(scheme.sub_category)
+        }
+
+        if (!include) continue
+
+        out.push({
+          issuer_key: issuerKey,
+          issuer_short_name: issuer.short_name || '',
+          issuer_type: issuerType || null,
+          scheme
+        })
+      }
+    }
+
+    res.json(out)
+  } catch (error) {
+    console.error('Error fetching receipt schemes:', error)
+    if (error.errorNum === 1203 || error.message?.includes('not found') || error.message?.includes('does not exist')) {
+      return res.json([])
+    }
+    res.status(500).json({ error: 'Failed to fetch receipt schemes', details: error.message })
+  }
+})
+
 // Get single issuer with all nested schemes
 router.get('/issuer/:issuer_key', async (req, res) => {
   try {
