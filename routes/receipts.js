@@ -10,6 +10,13 @@ import {
   applyReceiptCategoryFilter,
   applyMfTxnTypeOrModeFilter
 } from '../utils/receipt-filters.js'
+import { effectiveDateExprAql } from '../utils/date-basis.js'
+
+function normalizeTenureUnit(u) {
+  const v = String(u || '').trim().toLowerCase()
+  if (v === 'day' || v === 'days') return 'days'
+  return 'months'
+}
 
 const router = express.Router()
 
@@ -109,7 +116,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       if (!hasRoi) {
         return res.status(400).json({ error: 'validation_error', detail: 'Interest rate is required for Fixed Deposit' })
       }
-      const hasPeriod = d.depositPeriodYM || d.deposit_period_ym || d.fd_tenure_months
+      const hasPeriod = d.depositPeriodYM || d.deposit_period_ym || d.fd_tenure_months || d.fd_tenure_value
       if (!hasPeriod) {
         return res.status(400).json({ error: 'validation_error', detail: 'Deposit period is required for Fixed Deposit' })
       }
@@ -209,17 +216,28 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
 
               // Try to locate matching rate slab based on tenure and payout frequency
               const slabs = Array.isArray(scheme.rate_slabs) ? scheme.rate_slabs : []
-              const tenureMonths = d.fd_tenure_months || null
+              const unit = normalizeTenureUnit(d.fd_tenure_unit)
+              const tenureValue = d.fd_tenure_value != null ? Number(d.fd_tenure_value) : (d.fd_tenure_months != null ? Number(d.fd_tenure_months) : null)
               const payoutFrequency = d.fd_payout_frequency || null
 
               let matchedSlab = null
-              if (tenureMonths && payoutFrequency && slabs.length > 0) {
-                matchedSlab = slabs.find(slab =>
-                  slab.payout_frequency_type === payoutFrequency &&
-                  slab.tenure_min_months <= tenureMonths &&
-                  slab.tenure_max_months >= tenureMonths &&
-                  (slab.is_active !== false)
-                )
+              if (tenureValue && payoutFrequency && slabs.length > 0) {
+                matchedSlab = slabs.find((slab) => {
+                  if (slab.is_active === false) return false
+                  if (slab.payout_frequency_type !== payoutFrequency) return false
+                  const slabUnit = normalizeTenureUnit(slab.tenure_unit)
+                  if (slabUnit !== unit) return false
+                  if (unit === 'days') {
+                    const min = Number(slab.tenure_min_days)
+                    const max = Number(slab.tenure_max_days)
+                    if (!Number.isFinite(min) || !Number.isFinite(max)) return false
+                    return min <= tenureValue && max >= tenureValue
+                  }
+                  const min = Number(slab.tenure_min_months)
+                  const max = Number(slab.tenure_max_months)
+                  if (!Number.isFinite(min) || !Number.isFinite(max)) return false
+                  return min <= tenureValue && max >= tenureValue
+                })
               }
 
               if (matchedSlab && (matchedSlab.cc !== undefined || matchedSlab.si !== undefined)) {
@@ -471,6 +489,8 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     
     // FD Details
     if (productCategory === 'FD') {
+      const fdTenureUnit = normalizeTenureUnit(d.fd_tenure_unit)
+      const fdTenureValue = d.fd_tenure_value != null ? Number(d.fd_tenure_value) : (d.fd_tenure_months != null ? Number(d.fd_tenure_months) : null)
       productDetails.fd = {
         issuer: {
           key: d.fd_issuer_key || null,
@@ -484,7 +504,9 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         },
         deposit: {
           amount: d.fd_deposit_amount || null,
-          tenure_months: d.fd_tenure_months || null,
+          tenure_months: fdTenureUnit === 'months' ? (d.fd_tenure_months || fdTenureValue || null) : null,
+          tenure_unit: fdTenureValue != null ? fdTenureUnit : null,
+          tenure_value: fdTenureValue != null ? fdTenureValue : null,
           payout_frequency: d.fd_payout_frequency || null,
           booking_date: d.fd_booking_date || null,
           deposit_date: d.fd_deposit_date || null
@@ -521,6 +543,10 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     
     // Insurance Details
     if (productCategory === 'INS') {
+      const policyPeriodRaw = d.insurance_policy_period ?? d.insurancePolicyPeriod ?? null
+      const policyPeriodNum = policyPeriodRaw != null && String(policyPeriodRaw).trim() !== '' ? Number(policyPeriodRaw) : null
+      const policyPeriodYears = Number.isFinite(policyPeriodNum) ? policyPeriodNum : null
+
       productDetails.insurance = {
         issuer: {
           key: d.insurance_issuer_key || null,
@@ -539,12 +565,17 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
           premium_amount: investmentAmount || d.insurance_premium_amount || null,
           premium_frequency: d.interest_frequency || d.interestFrequency || d.insurance_premium_frequency || null,
           premium_payment_term: d.insurance_premium_payment_term || null,
-          premium_payment_term_type: d.insurance_premium_payment_term_type || null
+          premium_payment_term_type: d.insurance_premium_payment_term_type || null,
+          // Persist fields used by edit modal autofill / normalizer
+          renewal_date: d.insurance_renewal_date || d.insuranceRenewalDate || null,
+          period: policyPeriodRaw
         },
         coverage: {
           sum_assured: d.insurance_sum_assured || null,
-          policy_term_years: d.insurance_policy_term_years || null,
-          policy_start_date: d.insurance_policy_start_date || null,
+          // Prefer explicit policy term; fallback to policy period (years) when provided by UI.
+          policy_term_years: d.insurance_policy_term_years || policyPeriodYears || null,
+          // UI sends `insurance_date_of_issue`; keep compatibility with `insurance_policy_start_date`
+          policy_start_date: d.insurance_policy_start_date || d.insurance_date_of_issue || d.insuranceDateOfIssue || null,
           maturity_date: d.insurance_maturity_date || null
         },
         riders: d.insurance_selected_riders ? (Array.isArray(d.insurance_selected_riders) ? d.insurance_selected_riders : [d.insurance_selected_riders]) : null,
@@ -690,7 +721,11 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       scheme_name: d.fd_scheme_name || null,
       is_cumulative: d.fd_is_cumulative || null,
       deposit_amount: d.fd_deposit_amount || null,
-      tenure_months: d.fd_tenure_months || null,
+      tenure_months: (normalizeTenureUnit(d.fd_tenure_unit) === 'months')
+        ? (d.fd_tenure_months || (d.fd_tenure_value != null ? Number(d.fd_tenure_value) : null) || null)
+        : null,
+      tenure_unit: d.fd_tenure_unit != null ? normalizeTenureUnit(d.fd_tenure_unit) : null,
+      tenure_value: d.fd_tenure_value != null ? Number(d.fd_tenure_value) : null,
       payout_frequency: d.fd_payout_frequency || null,
       base_rate_pa: d.fd_base_rate_pa || null,
       senior_citizen_bonus: d.fd_senior_citizen_bonus || null,
@@ -836,6 +871,8 @@ function withNormalizedDetails(receipt) {
       is_cumulative: normalized.fd_is_cumulative || null,
       deposit_amount: normalized.fd_deposit_amount || null,
       tenure_months: normalized.fd_tenure_months || null,
+      tenure_unit: normalized.fd_tenure_unit != null ? normalizeTenureUnit(normalized.fd_tenure_unit) : null,
+      tenure_value: normalized.fd_tenure_value != null ? Number(normalized.fd_tenure_value) : null,
       payout_frequency: normalized.fd_payout_frequency || null,
       base_rate_pa: normalized.fd_base_rate_pa || null,
       senior_citizen_bonus: normalized.fd_senior_citizen_bonus || null,
@@ -1054,19 +1091,21 @@ router.get('/summary', requireAuth, async (req, res) => {
       emp_code,
       branch_code,
       search,
-      includeDeleted = '0'
+      includeDeleted = '0',
+      date_basis
     } = req.query
 
     const bindVars = {}
     const filterConditions = ['receipt.is_deleted == false']
 
     // Date filters
+    const dateExpr = effectiveDateExprAql(date_basis)
     if (from) {
-      filterConditions.push('receipt.date >= @from')
+      filterConditions.push(`${dateExpr} >= @from`)
       bindVars.from = from
     }
     if (to) {
-      filterConditions.push('receipt.date <= @to')
+      filterConditions.push(`${dateExpr} <= @to`)
       bindVars.to = to
     }
 
@@ -1234,7 +1273,8 @@ router.get('/', requireAuth, async (req, res) => {
       emp_code,
       branch_code,
       search, // Search by investor name/ID or receipt ID
-      includeDeleted = '0'
+      includeDeleted = '0',
+      date_basis
     } = req.query
 
     // sanitize page & size
@@ -1247,7 +1287,11 @@ router.get('/', requireAuth, async (req, res) => {
     const allowedSort = new Set(['created_at', 'date', 'amount', 'receipt_no'])
     const orderBy = allowedSort.has(sortCol) ? sortCol : 'created_at'
     const effectiveAmountExpr = '((TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0))'
-    const orderExpr = orderBy === 'amount' ? effectiveAmountExpr : `receipt.${orderBy}`
+    const dateExpr = effectiveDateExprAql(date_basis)
+    const orderExpr =
+      orderBy === 'amount'
+        ? effectiveAmountExpr
+        : (orderBy === 'date' ? dateExpr : `receipt.${orderBy}`)
 
     const numLimit = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
     const numPage  = Math.max(1, parseInt(page, 10) || 1)
@@ -1264,7 +1308,7 @@ router.get('/', requireAuth, async (req, res) => {
       !isNaN(Date.parse(from)) &&
       !isNaN(Date.parse(to))
     ) {
-      filterConditions.push('receipt.date >= @from AND receipt.date <= @to')
+      filterConditions.push(`${dateExpr} >= @from AND ${dateExpr} <= @to`)
       bindVars.from = from
       bindVars.to = to
     }
@@ -1584,7 +1628,12 @@ router.patch('/:id', requireAuth, async (req, res) => {
   if (!own.length) return res.status(404).json({ error: 'not_found' })
   
   const currentStatus = own[0].status || 'Pending'
-  const receiptProductCategory = own[0].product_category
+  // Newer receipts store category under nested `product.category` (and may not have legacy `product_category`).
+  // For edit-sync logic (FD deposit amount), resolve category from either location.
+  const receiptProductCategory =
+    own[0].product_category ??
+    (own[0].receipt && typeof own[0].receipt === 'object' ? own[0].receipt.product?.category : null) ??
+    null
   const existingReceipt = own[0].receipt || {}
   const isOwner = String(own[0].user_id) === String(req.user.sub)
   const isAdmin = req.user.role === 'admin'
@@ -1652,7 +1701,13 @@ router.patch('/:id', requireAuth, async (req, res) => {
     // FD receipts: keep nested FD deposit amount in sync.
     // Main views/records typically read `product_details.fd.deposit.amount` (-> `fd_deposit_amount` via normalizer),
     // while the edit modal updates `investment_amount`.
-    if (receiptProductCategory === 'FD' || receiptProductCategory === 'GOVT_FD') {
+    const catUpper = String(receiptProductCategory || '').toUpperCase()
+    const isFdReceipt =
+      catUpper === 'FD' ||
+      catUpper === 'GOVT_FD' ||
+      (existingReceipt.product_details && typeof existingReceipt.product_details === 'object' && existingReceipt.product_details.fd != null)
+
+    if (isFdReceipt) {
       const currentProductDetails = (existingReceipt.product_details && typeof existingReceipt.product_details === 'object')
         ? existingReceipt.product_details
         : {}

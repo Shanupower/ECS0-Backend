@@ -2,7 +2,7 @@ import express from 'express'
 import bcrypt from 'bcryptjs'
 import { q, getCollection } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
-import { validateEmail, validateEmpCode, validatePassword, validateRequired } from '../utils/validators.js'
+import { validateEmail, validateEmpCode, validateMobile, validatePassword, validateRequired } from '../utils/validators.js'
 
 const router = express.Router()
 
@@ -12,6 +12,15 @@ const ALLOWED_DASHBOARD_WIDGETS = [
   'target_vs_actual', 'recent_receipts', 'status_breakdown', 'category_donut', 'monthly_cc_si',
   'top_employees', 'leads_snapshot', 'issues_snapshot', 'average_ticket', 'cc_vs_si', 'investor_heatmap'
 ]
+
+function parseOptionalNonNegativeNumber(value, fieldLabel) {
+  if (value === undefined) return { ok: true, value: undefined }
+  if (value === null || value === '') return { ok: true, value: null }
+  const n = Number(value)
+  if (!Number.isFinite(n)) return { ok: false, error: `${fieldLabel} must be a number` }
+  if (n < 0) return { ok: false, error: `${fieldLabel} cannot be negative` }
+  return { ok: true, value: n }
+}
 
 // Get current user profile
 router.get('/me', requireAuth, async (req, res) => {
@@ -53,7 +62,8 @@ router.get('/me', requireAuth, async (req, res) => {
     last_login_at: user.last_login_at,
     created_at: user.created_at,
     must_change_password: !!mustChangePassword,
-    dashboard_widgets: Array.isArray(user.dashboard_widgets) ? user.dashboard_widgets : null
+    dashboard_widgets: Array.isArray(user.dashboard_widgets) ? user.dashboard_widgets : null,
+    personal_monthly_target: user.personal_monthly_target != null ? Number(user.personal_monthly_target) : null
   })
 })
 
@@ -106,16 +116,140 @@ router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
       emp_code: user.emp_code,
       name: user.name,
       email: user.email,
+      mobile: user.mobile,
       branch: user.branch,
       branch_code: user.branch_code,
       role: user.role,
       is_active: user.is_active,
       last_login_at: user.last_login_at,
       created_at: user.created_at,
-      dashboard_widgets: IS_ARRAY(user.dashboard_widgets) ? user.dashboard_widgets : null
+      dashboard_widgets: IS_ARRAY(user.dashboard_widgets) ? user.dashboard_widgets : null,
+      personal_monthly_target: user.personal_monthly_target != null ? TO_NUMBER(user.personal_monthly_target) : null
     }
   `)
   res.json(users)
+})
+
+// Audit users with missing/invalid branch mapping (admin only)
+router.get('/branch-audit', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const rows = await q(`
+      FOR u IN users
+        LET role = u.role
+        LET branchRef = u.branch_code != null && TRIM(TO_STRING(u.branch_code)) != "" ? TRIM(TO_STRING(u.branch_code)) : (u.branch != null ? TRIM(TO_STRING(u.branch)) : "")
+        LET branchDoc = FIRST(
+          FOR b IN branches
+            FILTER b._key == branchRef
+               OR (b.branch_code != null && LOWER(TRIM(TO_STRING(b.branch_code))) == LOWER(branchRef))
+               OR (b.branch_name != null && LOWER(TRIM(TO_STRING(b.branch_name))) == LOWER(branchRef))
+            LIMIT 1
+            RETURN { key: b._key, code: b.branch_code, name: b.branch_name }
+        )
+        LET branchMissing = u.branch == null || TRIM(TO_STRING(u.branch)) == ""
+        LET hasBranchButNoCode = !branchMissing && (u.branch_code == null || TRIM(TO_STRING(u.branch_code)) == "")
+        LET invalidMapping = branchRef != "" && branchDoc == null
+        FILTER branchMissing || hasBranchButNoCode || invalidMapping
+        SORT u.emp_code ASC
+        RETURN {
+          id: u._key,
+          emp_code: u.emp_code,
+          name: u.name,
+          role,
+          is_active: u.is_active,
+          branch: u.branch,
+          branch_code: u.branch_code,
+          resolved_branch: branchDoc,
+          issues: {
+            missing_branch: branchMissing,
+            has_branch_but_no_branch_code: hasBranchButNoCode,
+            invalid_mapping: invalidMapping
+          }
+        }
+    `)
+
+    const summary = rows.reduce(
+      (acc, r) => {
+        if (r.issues?.missing_branch) acc.missing_branch++
+        if (r.issues?.has_branch_but_no_branch_code) acc.has_branch_but_no_branch_code++
+        if (r.issues?.invalid_mapping) acc.invalid_mapping++
+        acc.total++
+        return acc
+      },
+      { total: 0, missing_branch: 0, has_branch_but_no_branch_code: 0, invalid_mapping: 0 }
+    )
+
+    res.json({ summary, items: rows })
+  } catch (e) {
+    console.error('Error running branch audit:', e)
+    res.status(500).json({ error: 'server_error', detail: e.message })
+  }
+})
+
+// Attempt to backfill branch_code for users with branch but no branch_code (admin only)
+router.post('/branch-audit/fix', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const dryRun = String(req.query.dry_run || '0') === '1'
+
+    const candidates = await q(`
+      FOR u IN users
+        FILTER u.is_active == true
+          AND u.branch != null
+          AND TRIM(TO_STRING(u.branch)) != ""
+          AND (u.branch_code == null OR TRIM(TO_STRING(u.branch_code)) == "")
+        SORT u.emp_code ASC
+        RETURN { id: u._key, emp_code: u.emp_code, name: u.name, role: u.role, branch: u.branch }
+    `)
+
+    const updated = []
+    const unresolved = []
+
+    for (const u of candidates) {
+      const branchRef = String(u.branch || '').trim()
+      if (!branchRef) {
+        unresolved.push({ ...u, reason: 'missing_branch_value' })
+        continue
+      }
+
+      const branchRows = await q(
+        `
+        FOR b IN branches
+          FILTER b._key == @branchRef
+             OR (b.branch_code != null && LOWER(TRIM(TO_STRING(b.branch_code))) == LOWER(@branchRef))
+             OR (b.branch_name != null && LOWER(TRIM(TO_STRING(b.branch_name))) == LOWER(@branchRef))
+          LIMIT 1
+          RETURN { branch_code: b.branch_code, branch_name: b.branch_name, key: b._key }
+      `,
+        { branchRef }
+      )
+
+      const resolved = branchRows?.[0]
+      if (!resolved?.branch_code) {
+        unresolved.push({ ...u, reason: 'branch_not_found', attempted: branchRef })
+        continue
+      }
+
+      if (!dryRun) {
+        await getCollection('users').update(u.id, { branch_code: resolved.branch_code })
+      }
+
+      updated.push({
+        ...u,
+        branch_code: resolved.branch_code,
+        resolved_branch: resolved,
+        ...(dryRun ? { dry_run: true } : {})
+      })
+    }
+
+    res.json({
+      dry_run: dryRun,
+      summary: { candidates: candidates.length, updated: updated.length, unresolved: unresolved.length },
+      updated,
+      unresolved
+    })
+  } catch (e) {
+    console.error('Error fixing branch codes:', e)
+    res.status(500).json({ error: 'server_error', detail: e.message })
+  }
 })
 
 // Get users that the current user can assign tasks to (admin: all; manager: same branch; employee: self only)
@@ -168,7 +302,7 @@ router.get('/assignable', requireAuth, async (req, res) => {
 
 // Create new user (admin only)
 router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
-  const { emp_code, name, email, branch, role = 'employee', password } = req.body || {}
+  const { emp_code, name, email, mobile, branch, role = 'employee', password, personal_monthly_target } = req.body || {}
   
   // Validate required fields
   const nameValidation = validateRequired(name, 'Name')
@@ -195,32 +329,56 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       return res.status(400).json({ error: 'validation_error', detail: emailValidation.error })
     }
   }
+
+  const mobileValidation = validateMobile(mobile, false)
+  if (!mobileValidation.valid) {
+    return res.status(400).json({ error: 'validation_error', detail: mobileValidation.error })
+  }
+
+  const personalTargetParsed = parseOptionalNonNegativeNumber(personal_monthly_target, 'Personal monthly target')
+  if (!personalTargetParsed.ok) {
+    return res.status(400).json({ error: 'validation_error', detail: personalTargetParsed.error })
+  }
   
   const hash = await bcrypt.hash(passwordValidation.value, 10)
   try {
-    // If branch is provided, look up branch_code
+    const roleRequiresBranch = new Set(['employee', 'manager', 'branch'])
+    const normalizedRole = String(role || '').trim()
+    if (roleRequiresBranch.has(normalizedRole) && (!branch || !String(branch).trim())) {
+      return res.status(400).json({ error: 'validation_error', detail: 'Branch is required for this role' })
+    }
+
+    // If branch is provided, it must resolve to an existing branch (no silent null branch_code)
     let branchCode = null
-    if (branch) {
-      const branchQuery = await q(`
+    if (branch && String(branch).trim()) {
+      const branchQuery = await q(
+        `
         FOR b IN branches
-        FILTER b.branch_name == @branchName OR b.branch_code == @branchName
-        LIMIT 1
-        RETURN b
-      `, { branchName: branch })
-      
-      if (branchQuery.length > 0) {
-        branchCode = branchQuery[0].branch_code
+          FILTER b._key == @branchRef
+             OR (b.branch_code != null && LOWER(TRIM(TO_STRING(b.branch_code))) == LOWER(@branchRef))
+             OR (b.branch_name != null && LOWER(TRIM(TO_STRING(b.branch_name))) == LOWER(@branchRef))
+          LIMIT 1
+          RETURN { branch_code: b.branch_code, branch_name: b.branch_name }
+      `,
+        { branchRef: String(branch).trim() }
+      )
+
+      if (!branchQuery.length || !branchQuery[0]?.branch_code) {
+        return res.status(400).json({ error: 'validation_error', detail: `Invalid branch: "${String(branch).trim()}"` })
       }
+      branchCode = branchQuery[0].branch_code
     }
     
     const userDoc = {
       emp_code: empCodeValidation.value,
       name: nameValidation.value,
       email: email || null,
+      mobile: mobileValidation.value,
       branch: branch || null,
       branch_code: branchCode,
       role,
       password_hash: hash,
+      personal_monthly_target: personalTargetParsed.value === undefined ? null : personalTargetParsed.value,
       is_active: true,
       created_at: new Date().toISOString()
     }
@@ -234,11 +392,18 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
 // Update user (admin only)
 router.patch('/:id', requireAuth, requireRole('admin'), async (req, res) => {
   const id = req.params.id
-  const { name, email, branch, role, is_active, dashboard_widgets } = req.body || {}
+  const { name, email, mobile, branch, role, is_active, dashboard_widgets, personal_monthly_target } = req.body || {}
   const updates = {}
   
   if (name !== undefined) updates.name = name
   if (email !== undefined) updates.email = email
+  if (mobile !== undefined) {
+    const mobileValidation = validateMobile(mobile, false)
+    if (!mobileValidation.valid) {
+      return res.status(400).json({ error: 'validation_error', detail: mobileValidation.error })
+    }
+    updates.mobile = mobileValidation.value
+  }
   if (role !== undefined) updates.role = role
   if (is_active !== undefined) updates.is_active = is_active
   if (dashboard_widgets !== undefined) {
@@ -252,31 +417,59 @@ router.patch('/:id', requireAuth, requireRole('admin'), async (req, res) => {
       return res.status(400).json({ error: 'validation_error', detail: 'dashboard_widgets must be an array or null' })
     }
   }
+
+  const personalTargetParsed = parseOptionalNonNegativeNumber(personal_monthly_target, 'Personal monthly target')
+  if (!personalTargetParsed.ok) {
+    return res.status(400).json({ error: 'validation_error', detail: personalTargetParsed.error })
+  }
+  if (personalTargetParsed.value !== undefined) updates.personal_monthly_target = personalTargetParsed.value
   
-  // If branch is being updated, also update branch_code
-  if (branch !== undefined) {
-    updates.branch = branch
-    
-    // Look up branch_code
-    if (branch) {
+  // If branch/role is being updated, enforce role-based branch requirement and resolve branch_code
+  const roleRequiresBranch = new Set(['employee', 'manager', 'branch'])
+  if (branch !== undefined || role !== undefined) {
+    const existingRows = await q(
+      `
+      FOR u IN users
+        FILTER u._key == @id
+        LIMIT 1
+        RETURN { role: u.role, branch: u.branch }
+    `,
+      { id }
+    )
+    if (!existingRows.length) return res.status(404).json({ error: 'not_found' })
+
+    const finalRole = String((role !== undefined ? role : existingRows[0].role) || '').trim()
+    const finalBranch = branch !== undefined ? branch : existingRows[0].branch
+
+    if (branch !== undefined) updates.branch = branch
+
+    if (roleRequiresBranch.has(finalRole) && (!finalBranch || !String(finalBranch).trim())) {
+      return res.status(400).json({ error: 'validation_error', detail: 'Branch is required for this role' })
+    }
+
+    if (finalBranch && String(finalBranch).trim()) {
       try {
-        const branchQuery = await q(`
+        const branchQuery = await q(
+          `
           FOR b IN branches
-          FILTER b.branch_name == @branchName OR b.branch_code == @branchName
-          LIMIT 1
-          RETURN b
-        `, { branchName: branch })
-        
-        if (branchQuery.length > 0) {
-          updates.branch_code = branchQuery[0].branch_code
-        } else {
-          updates.branch_code = null
+            FILTER b._key == @branchRef
+               OR (b.branch_code != null && LOWER(TRIM(TO_STRING(b.branch_code))) == LOWER(@branchRef))
+               OR (b.branch_name != null && LOWER(TRIM(TO_STRING(b.branch_name))) == LOWER(@branchRef))
+            LIMIT 1
+            RETURN { branch_code: b.branch_code }
+        `,
+          { branchRef: String(finalBranch).trim() }
+        )
+        if (!branchQuery.length || !branchQuery[0]?.branch_code) {
+          return res.status(400).json({ error: 'validation_error', detail: `Invalid branch: "${String(finalBranch).trim()}"` })
         }
+        updates.branch_code = branchQuery[0].branch_code
       } catch (err) {
         console.error('Error looking up branch:', err)
-        updates.branch_code = null
+        return res.status(500).json({ error: 'server_error', detail: 'Failed to resolve branch' })
       }
     } else {
+      // Clearing branch
       updates.branch_code = null
     }
   }

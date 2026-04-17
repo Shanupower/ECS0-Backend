@@ -1,6 +1,7 @@
 import express from 'express'
 import { q, getUserBranch, normalizeBranchName, getBranchIdentifiersForFilter, getBranchMonthlyTargetForIdentifiers } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
+import { effectiveDateExprAql } from '../utils/date-basis.js'
 
 const router = express.Router()
 
@@ -39,7 +40,7 @@ const SI_AQL = `(TO_NUMBER(receipt.total_si) || 0) != 0 ? (TO_NUMBER(receipt.tot
 
 // Get summary statistics
 router.get('/summary', requireAuth, async (req, res) => {
-  const { from, to, emp_code, includeDeleted = '0' } = req.query
+  const { from, to, emp_code, includeDeleted = '0', date_basis } = req.query
   
   console.log(`[Stats Summary] Request from user: role=${req.user.role}, emp_code=${req.user.emp_code}, sub=${req.user.sub}, query emp_code=${emp_code}`)
   
@@ -47,12 +48,13 @@ router.get('/summary', requireAuth, async (req, res) => {
   let bindVars = {}
   let filterConditions = []
   
+  const dateExpr = effectiveDateExprAql(date_basis)
   if (from) { 
-    filterConditions.push('receipt.date >= @from')
+    filterConditions.push(`${dateExpr} >= @from`)
     bindVars.from = from
   }
   if (to) { 
-    filterConditions.push('receipt.date <= @to')
+    filterConditions.push(`${dateExpr} <= @to`)
     bindVars.to = to
   }
   // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
@@ -252,7 +254,7 @@ router.get('/summary', requireAuth, async (req, res) => {
   const byDayQuery = `
     FOR receipt IN receipts
     ${allFilterClause}
-    COLLECT date = receipt.date 
+    COLLECT date = ${dateExpr}
     AGGREGATE n = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL})
     SORT date ASC
     RETURN { date, n, amount }
@@ -490,24 +492,58 @@ router.get('/summary', requireAuth, async (req, res) => {
       }
     }
   }
+
+  // Personal target (optional, stored on users) for personal dashboards/reports.
+  // If not set, the client should fall back to branch_target.
+  const isPersonalScope =
+    viewMode === 'personal' ||
+    (req.user.role === 'employee' && viewMode !== 'branch') ||
+    ((req.user.role === 'manager' || req.user.role === 'branch') && viewMode === 'personal') ||
+    (req.user.role === 'admin' && emp_code && (viewMode === 'personal' || !viewMode))
+
+  if (isPersonalScope) {
+    let personalTarget = null
+    if (req.user.role === 'admin') {
+      // Admin personal view: resolve the selected employee by emp_code (including admin self).
+      const rows = await q(`
+        FOR user IN users
+          FILTER user.emp_code == @e
+          LIMIT 1
+          RETURN user.personal_monthly_target
+      `, { e: emp_code })
+      if (rows.length > 0) personalTarget = rows[0] != null ? Number(rows[0]) : null
+    } else {
+      // Non-admin personal view: resolve current user by _key.
+      const rows = await q(`
+        FOR user IN users
+          FILTER user._key == @id
+          LIMIT 1
+          RETURN user.personal_monthly_target
+      `, { id: req.user.sub })
+      if (rows.length > 0) personalTarget = rows[0] != null ? Number(rows[0]) : null
+    }
+    response.personal_target = personalTarget
+    response.effective_target = personalTarget != null ? personalTarget : (response.branch_target ?? null)
+  }
   
   res.json(response)
 })
 
 // Get statistics by category
 router.get('/by-category', requireAuth, async (req, res) => {
-  const { from, to, emp_code, includeDeleted = '0' } = req.query
+  const { from, to, emp_code, includeDeleted = '0', date_basis } = req.query
   
   let filterClause = ''
   let bindVars = {}
   let filterConditions = []
   
+  const dateExpr = effectiveDateExprAql(date_basis)
   if (from) { 
-    filterConditions.push('receipt.date >= @from')
+    filterConditions.push(`${dateExpr} >= @from`)
     bindVars.from = from
   }
   if (to) { 
-    filterConditions.push('receipt.date <= @to')
+    filterConditions.push(`${dateExpr} <= @to`)
     bindVars.to = to
   }
   // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
@@ -634,18 +670,19 @@ router.get('/by-category', requireAuth, async (req, res) => {
 
 // Get statistics by day
 router.get('/by-day', requireAuth, async (req, res) => {
-  const { from, to, emp_code, includeDeleted = '0' } = req.query
+  const { from, to, emp_code, includeDeleted = '0', date_basis } = req.query
   
   let filterClause = ''
   let bindVars = {}
   let filterConditions = []
   
+  const dateExpr = effectiveDateExprAql(date_basis)
   if (from) { 
-    filterConditions.push('receipt.date >= @from')
+    filterConditions.push(`${dateExpr} >= @from`)
     bindVars.from = from
   }
   if (to) { 
-    filterConditions.push('receipt.date <= @to')
+    filterConditions.push(`${dateExpr} <= @to`)
     bindVars.to = to
   }
   // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
@@ -759,7 +796,7 @@ router.get('/by-day', requireAuth, async (req, res) => {
   const query = `
     FOR receipt IN receipts
     ${filterClause}
-    COLLECT date = receipt.date 
+    COLLECT date = ${dateExpr}
     AGGREGATE n = LENGTH(1), amount = SUM(${amountExpr})
     SORT date ASC
     RETURN { date, n, amount }
@@ -771,12 +808,13 @@ router.get('/by-day', requireAuth, async (req, res) => {
 
 // Get monthly CC and SI trend (for dashboard widget)
 router.get('/monthly-cc-si', requireAuth, async (req, res) => {
-  const { from, to, emp_code, includeDeleted = '0' } = req.query
+  const { from, to, emp_code, includeDeleted = '0', date_basis } = req.query
   const viewMode = req.query.viewMode
   let filterConditions = []
   const bindVars = {}
-  if (from) { filterConditions.push('receipt.date >= @from'); bindVars.from = from }
-  if (to) { filterConditions.push('receipt.date <= @to'); bindVars.to = to }
+  const dateExpr = effectiveDateExprAql(date_basis)
+  if (from) { filterConditions.push(`${dateExpr} >= @from`); bindVars.from = from }
+  if (to) { filterConditions.push(`${dateExpr} <= @to`); bindVars.to = to }
   if (req.user.role === 'employee') {
     if (viewMode === 'branch') {
       const userBranch = await getUserBranch(req.user.sub)
@@ -839,7 +877,7 @@ router.get('/monthly-cc-si', requireAuth, async (req, res) => {
   if (includePending) filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
   else filterConditions.push('receipt.status == "Completed"')
   const filterClause = filterConditions.length ? `FILTER ${filterConditions.join(' AND ')}` : ''
-  const monthExpr = 'SUBSTRING(receipt.date, 0, 7)'
+  const monthExpr = `SUBSTRING(${dateExpr}, 0, 7)`
   const qry = `
     FOR receipt IN receipts
     ${filterClause}
@@ -855,13 +893,13 @@ router.get('/monthly-cc-si', requireAuth, async (req, res) => {
 // Get branch statistics
 router.get('/branches', requireAuth, async (req, res) => {
   try {
-    const { from, to, includeDeleted = '0' } = req.query
+    const { from, to, includeDeleted = '0', date_basis } = req.query
     
     let dateFilter = ''
     let bindVars = {}
     let filterConditions = []
     
-    const receiptDateExpr = '(receipt.date != null && receipt.date != "" ? receipt.date : SUBSTRING(receipt.created_at, 0, 10))'
+    const receiptDateExpr = effectiveDateExprAql(date_basis)
     if (from && to) {
       filterConditions.push(`${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`)
       bindVars.from = from
@@ -1006,11 +1044,11 @@ router.get('/branches', requireAuth, async (req, res) => {
 // Get employee performance rankings
 router.get('/employees/performance', requireAuth, async (req, res) => {
   try {
-    const { from, to, branch_code, includePending = '0' } = req.query
+    const { from, to, branch_code, includePending = '0', date_basis } = req.query
     
     let filterConditions = []
     let bindVars = {}
-    const receiptDateExpr = '(receipt.date != null && receipt.date != "" ? receipt.date : SUBSTRING(receipt.created_at, 0, 10))'
+    const receiptDateExpr = effectiveDateExprAql(date_basis)
     
     if (from && to) {
       filterConditions.push(`${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`)
@@ -1075,6 +1113,7 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
       RETURN {
         emp_code,
         employee_name: resolved_employee_name,
+        personal_target: userDoc != null && userDoc.personal_monthly_target != null ? TO_NUMBER(userDoc.personal_monthly_target) : null,
         receipt_count,
         total_investment,
         total_cc,
@@ -1093,11 +1132,12 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
 // Get investor locations by state (for India heatmap widget)
 router.get('/investor-locations', requireAuth, async (req, res) => {
   try {
-    const { from, to, branch_code, includePending = '0' } = req.query
+    const { from, to, branch_code, includePending = '0', date_basis } = req.query
     let filterConditions = ['receipt.is_deleted == false']
     const bindVars = {}
-    if (from) { filterConditions.push('receipt.date >= @from'); bindVars.from = from }
-    if (to) { filterConditions.push('receipt.date <= @to'); bindVars.to = to }
+    const dateExpr = effectiveDateExprAql(date_basis)
+    if (from) { filterConditions.push(`${dateExpr} >= @from`); bindVars.from = from }
+    if (to) { filterConditions.push(`${dateExpr} <= @to`); bindVars.to = to }
     if (includePending === '1') {
       filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
     } else {

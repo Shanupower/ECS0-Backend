@@ -36,9 +36,15 @@ export const getUserBranch = async (userId) => {
       FOR user IN users 
       FILTER user._key == @id
       LIMIT 1
-      RETURN user.branch
+      RETURN { branch_code: user.branch_code, branch: user.branch }
     `, { id: userId })
-    return users.length > 0 ? users[0] : null
+    if (!users.length || !users[0]) return null
+    const row = users[0]
+    // Prefer branch_code for stable matching; fall back to branch (name/key) when missing.
+    const branchCode = row.branch_code != null ? String(row.branch_code).trim() : ''
+    if (branchCode) return branchCode
+    const branch = row.branch != null ? String(row.branch).trim() : ''
+    return branch || null
   } catch (error) {
     console.error('Error getting user branch:', error)
     return null

@@ -14,7 +14,7 @@ const router = express.Router()
 
 const PRODUCT_TYPE_LABELS = {
   MF: 'Mutual Funds', INS: 'Insurance', FD: 'Fixed Deposit',
-  BOND: 'Bonds/NCD', NCD: 'Bonds/NCD', GOVT_FD: 'Government Schemes', MISC: 'Misc Services',
+  BOND: 'Bond', NCD: 'NCD', GOVT_FD: 'Government Schemes', MISC: 'Misc Services',
   SIF: 'SIF', PMS: 'PMS', AIF: 'AIF', GIFT_CITY_FUNDS: 'Gift City Funds'
 }
 
@@ -258,7 +258,14 @@ export function generateReceiptPDF(receipt) {
 
       const cat = val(receipt.product?.category, receipt.product_category, receipt.productCategory) || ''
       const catUpper = cat.toUpperCase()
-      const catLabel = PRODUCT_TYPE_LABELS[catUpper] || cat
+      const mfAmcCategory = val(receipt.mf_amc_category, receipt.product_details?.mf?.amc_category)
+      const mfAmcCategoryUpper = String(mfAmcCategory || '').trim().toUpperCase()
+      const mfDisplayCategoryUpper =
+        catUpper === 'MF' && ['SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS'].includes(mfAmcCategoryUpper)
+          ? mfAmcCategoryUpper
+          : null
+      const displayCatUpper = mfDisplayCategoryUpper || catUpper
+      const displayCatLabel = PRODUCT_TYPE_LABELS[displayCatUpper] || cat
       const isMF = ['MF', 'SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS'].includes(catUpper)
       const isFD = catUpper === 'FD' || catUpper === 'GOVT_FD'
       const isBond = catUpper === 'BOND' || catUpper === 'NCD'
@@ -274,37 +281,7 @@ export function generateReceiptPDF(receipt) {
       const misc = pd.misc || null
       const pmt = receipt.payment || {}
 
-      // ─── Header KPI row (FD: deposit only; other categories: primary amount) ───
-      if (isFD) {
-        const fdDepositAmt = val(fd?.deposit?.amount, receipt.fd_deposit_amount, txn.amount, receipt.investment_amount, receipt.investmentAmount)
-        y = drawKpiRow([
-          { label: 'Deposit Amount', value: fdDepositAmt != null ? fmtINR(fdDepositAmt) : null },
-          { label: '', value: null },
-          { label: '', value: null }
-        ], y)
-      } else {
-        const topAmt = val(txn.amount, receipt.investment_amount, receipt.investmentAmount, receipt.service_price, receipt.servicePrice)
-        if (topAmt != null && topAmt !== '') {
-          y = drawKpiRow([
-            { label: 'Amount', value: fmtINR(topAmt) },
-            { label: '', value: null },
-            { label: '', value: null }
-          ], y)
-        }
-      }
-
-      // ─── 1. EMPLOYEE DETAILS ───
-      y = sectionTitle('Employee Details', y)
-      const empBodyStart = y - 4
-      y = drawInlineTriplet([
-        { label: 'Employee Name', value: empName },
-        { label: 'Employee Code', value: empCode },
-        { label: 'Branch', value: empBranch }
-      ], y)
-      drawSectionBox(empBodyStart, y + 2)
-      y = sectionBottomLine(y)
-
-      // ─── 2. INVESTOR DETAILS ───
+      // ─── 1. INVESTOR DETAILS ───
       y = sectionTitle('Investor Details', y)
       const invBodyStart = y - 4
       y = drawInlineTriplet([
@@ -321,7 +298,7 @@ export function generateReceiptPDF(receipt) {
       drawSectionBox(invBodyStart, y + 2)
       y = sectionBottomLine(y)
 
-      // ─── 3. INVESTMENT DETAILS ───
+      // ─── 2. INVESTMENT DETAILS ───
       y = sectionTitle('Investment Details', y)
       const invstBodyStart = y - 4
 
@@ -329,7 +306,7 @@ export function generateReceiptPDF(receipt) {
       if (y + 16 <= maxY) {
         doc.rect(margin, y, contentWidth, 14).fillColor('#FFFFFF').fill()
         doc.rect(margin, y, contentWidth, 14).strokeColor('#D1D5DB').lineWidth(0.8).stroke()
-        doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#111827').text(`Product: ${catLabel}`, margin + 8, y + 3)
+        doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#111827').text(`Product: ${displayCatLabel}`, margin + 8, y + 3)
         y += 18
       }
 
@@ -347,12 +324,17 @@ export function generateReceiptPDF(receipt) {
         const folioNo = val(receipt.folio_number, receipt.folio_policy_no, receipt.folioPolicyNo, txn.folio_number)
         const investAmt = val(txn.amount, receipt.investment_amount, receipt.investmentAmount)
         const amcCat = val(receipt.mf_amc_category, mf?.amc_category)
+        const amcCatUpper = String(amcCat || '').trim().toUpperCase()
+        const mfDisplayLabel =
+          catUpper === 'MF' && ['SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS'].includes(amcCatUpper)
+            ? (PRODUCT_TYPE_LABELS[amcCatUpper] || amcCatUpper)
+            : displayCatLabel
         const isSTP = String(txnType || '').trim().toUpperCase() === 'STP'
         const stpOrigAmt = val(txn.stp?.original_amount, receipt.stp_original_amount)
         const stpXferAmt = val(txn.stp?.amount, receipt.stp_amount)
 
         const mfEntries = [
-          { label: 'Product Type', value: catLabel },
+          { label: 'Product Type', value: mfDisplayLabel },
           { label: 'Transaction Type', value: txnType }
         ]
         if (isSTP) {
@@ -399,7 +381,6 @@ export function generateReceiptPDF(receipt) {
 
         // MF detail sub-section
         if (amcName) mfEntries.push({ label: 'AMC', value: amcName })
-        if (amcCat && amcCat !== 'MF') mfEntries.push({ label: 'AMC Category', value: amcCat })
         if (sCategory) {
           const catStr = sSubCat ? `${sCategory} / ${sSubCat}` : sCategory
           mfEntries.push({ label: 'Category', value: catStr })
@@ -463,9 +444,31 @@ export function generateReceiptPDF(receipt) {
         const productLabel = catUpper === 'GOVT_FD' ? 'Government Schemes' : 'Fixed Deposit'
         const issuerName = val(fd?.issuer?.name, receipt.fd_issuer_name)
         const issuerType = val(fd?.issuer?.type, receipt.fd_issuer_type)
+        const issuerSig = `${issuerName || ''} ${issuerType || ''}`.trim().toLowerCase()
+        const isPostOfficeIssuer =
+          issuerSig.includes('post office') || issuerSig.includes('post-office') || issuerSig.includes('postoffice')
+        const issuerDisplay =
+          catUpper === 'GOVT_FD' && isPostOfficeIssuer
+            ? 'Post Office'
+            : (issuerName ? issuerName + (issuerType ? ` (${issuerType})` : '') : null)
         const schemeName = val(fd?.scheme?.name, receipt.fd_scheme_name)
         const depositAmt = val(fd?.deposit?.amount, receipt.fd_deposit_amount)
-        const tenure = val(fd?.deposit?.tenure_months, receipt.fd_tenure_months)
+        const tUnitRaw = val(fd?.deposit?.tenure_unit, receipt.fd_tenure_unit)
+        const tUnit = String(tUnitRaw || '').trim().toLowerCase() === 'days' ? 'days' : 'months'
+        const tenureVal = val(fd?.deposit?.tenure_value, receipt.fd_tenure_value)
+        const tenureMonths = val(fd?.deposit?.tenure_months, receipt.fd_tenure_months)
+        const tenureDisplay = (() => {
+          if (tenureVal != null && tenureVal !== '' && !isNaN(Number(tenureVal))) {
+            const n = Number(tenureVal)
+            if (tUnit === 'days') return `${n} days`
+            return `${n} months (${Math.floor(n / 12)} years)`
+          }
+          if (tenureMonths != null && tenureMonths !== '' && !isNaN(Number(tenureMonths))) {
+            const n = Number(tenureMonths)
+            return `${n} months (${Math.floor(n / 12)} years)`
+          }
+          return null
+        })()
         const payoutFreq = val(fd?.deposit?.payout_frequency, receipt.fd_payout_frequency)
         const rate = val(fd?.rates?.locked_interest_rate_pa, receipt.fd_locked_interest_rate_pa)
         const appNo = val(fd?.application?.number, receipt.fd_application_number)
@@ -473,11 +476,11 @@ export function generateReceiptPDF(receipt) {
 
         y = drawInlineTriplet([
           { label: 'Product', value: productLabel },
-          { label: 'Issuer', value: issuerName ? issuerName + (issuerType ? ` (${issuerType})` : '') : null },
+          { label: 'Issuer', value: issuerDisplay },
           { label: 'Scheme', value: schemeName }
         ], y)
         y = drawInlineTriplet([
-          { label: 'Tenure', value: tenure ? `${tenure} months (${Math.floor(tenure / 12)} years)` : null },
+          { label: 'Tenure', value: tenureDisplay },
           { label: 'Payout Frequency', value: payoutFreq },
           { label: 'Interest Rate', value: rate ? `${Number(rate).toFixed(2)}% p.a.` : null }
         ], y)
@@ -502,7 +505,6 @@ export function generateReceiptPDF(receipt) {
         const amt = val(bond?.transaction?.amount, receipt.investment_amount, receipt.investmentAmount, txn.amount)
         const coupon = val(bond?.instrument?.coupon_rate, receipt.bond_coupon_rate, receipt.roi, receipt.roi_percent)
         const faceVal = val(bond?.instrument?.face_value, receipt.bond_face_value)
-        const issueDate = val(bond?.instrument?.issue_date, receipt.bond_issue_date)
         const tenureMonths = val(bond?.instrument?.tenure_months, receipt.bond_tenure_months)
         const appNo = val(bond?.application?.number, receipt.bond_application_number)
         const bondTxnType = val(bond?.transaction?.type, receipt.bond_transaction_type, receipt.txn_type, receipt.transaction_type)
@@ -514,7 +516,6 @@ export function generateReceiptPDF(receipt) {
           { label: 'Amount', value: amt != null ? fmtINR(amt) : null },
           { label: 'Coupon Rate', value: coupon != null ? `${Number(coupon).toFixed(2)}% p.a.` : null },
           { label: 'Face Value', value: faceVal != null ? fmtINR(faceVal, 0) : null },
-          { label: 'Issue Date', value: issueDate ? fmtDate(issueDate) : null },
           { label: 'Tenure (months)', value: tenureMonths != null && tenureMonths !== '' ? String(tenureMonths) : null },
           { label: 'Application Number', value: appNo },
           { label: 'Transaction Type', value: bondTxnType }
@@ -589,7 +590,7 @@ export function generateReceiptPDF(receipt) {
         y = drawInlineTriplet([
           { label: 'Payment Type', value: modeLabel },
           { label: mode === 'Online' ? 'Reference / Transaction Number' : 'Cheque / Instrument Number', value: mode === 'Online' ? (refNo || channel) : (instNo || refNo) },
-          { label: 'Date', value: (instDate || txnDate) ? fmtDate(instDate || txnDate) : null }
+          { label: '', value: null }
         ], y)
 
         y = drawInlineTriplet([
@@ -608,6 +609,17 @@ export function generateReceiptPDF(receipt) {
         drawSectionBox(payBodyStart, y + 2)
       }
 
+      y = sectionBottomLine(y)
+
+      // ─── 4. EMPLOYEE DETAILS (moved to last, after payment) ───
+      y = sectionTitle('Employee Details', y)
+      const empBodyStart = y - 4
+      y = drawInlineTriplet([
+        { label: 'Employee Name', value: empName },
+        { label: 'Employee Code', value: empCode },
+        { label: 'Branch', value: empBranch }
+      ], y)
+      drawSectionBox(empBodyStart, y + 2)
       y = sectionBottomLine(y)
 
       // ─── FOOTER ───

@@ -12,6 +12,12 @@ const router = express.Router()
 
 function validateBusinessRules(data) {
   const errors = []
+
+  const normalizeTenureUnit = (u) => {
+    const v = String(u || '').trim().toLowerCase()
+    if (v === 'day' || v === 'days') return 'days'
+    return 'months'
+  }
   
   // Validate schemes
   if (data.schemes && Array.isArray(data.schemes)) {
@@ -39,9 +45,25 @@ function validateBusinessRules(data) {
       // Validate rate slabs
       if (scheme.rate_slabs && Array.isArray(scheme.rate_slabs)) {
         scheme.rate_slabs.forEach((slab, slabIdx) => {
-          // Slab tenure validation
-          if (slab.tenure_min_months > slab.tenure_max_months) {
-            errors.push(`Scheme ${idx + 1}, Slab ${slabIdx + 1}: tenure_min_months must be <= tenure_max_months`)
+          const unit = normalizeTenureUnit(slab.tenure_unit)
+
+          // Slab tenure validation (unit-aware; months is default)
+          if (unit === 'days') {
+            const min = slab.tenure_min_days
+            const max = slab.tenure_max_days
+            if (min == null || max == null) {
+              errors.push(`Scheme ${idx + 1}, Slab ${slabIdx + 1}: tenure_min_days and tenure_max_days are required when tenure_unit is days`)
+            } else if (min > max) {
+              errors.push(`Scheme ${idx + 1}, Slab ${slabIdx + 1}: tenure_min_days must be <= tenure_max_days`)
+            }
+          } else {
+            const min = slab.tenure_min_months
+            const max = slab.tenure_max_months
+            if (min == null || max == null) {
+              errors.push(`Scheme ${idx + 1}, Slab ${slabIdx + 1}: tenure_min_months and tenure_max_months are required when tenure_unit is months`)
+            } else if (min > max) {
+              errors.push(`Scheme ${idx + 1}, Slab ${slabIdx + 1}: tenure_min_months must be <= tenure_max_months`)
+            }
           }
           
           // Slab payout frequency must be in scheme's allowed list
@@ -187,7 +209,25 @@ router.get('/issuer/:issuer_key/scheme/:scheme_id/slabs', async (req, res) => {
 // Calculate FD interest rate
 router.post('/calculate-rate', async (req, res) => {
   try {
-    const { issuer_key, scheme_id, tenure_months, payout_frequency, senior_citizen, women, renewal } = req.body
+    const {
+      issuer_key,
+      scheme_id,
+      tenure_months,
+      tenure_unit,
+      tenure_value,
+      payout_frequency,
+      senior_citizen,
+      women,
+      renewal
+    } = req.body
+
+    const normalizedUnit = normalizeTenureUnit(tenure_unit)
+    // Backward compatibility: if only tenure_months is sent, treat as months.
+    const resolvedUnit = tenure_value != null ? normalizedUnit : 'months'
+    const resolvedValue = tenure_value != null ? Number(tenure_value) : Number(tenure_months)
+    if (!Number.isFinite(resolvedValue) || resolvedValue <= 0) {
+      return res.status(400).json({ error: 'Invalid tenure value' })
+    }
     
     const issuers = await q(`
       FOR issuer IN fd_issuers
@@ -208,12 +248,22 @@ router.post('/calculate-rate', async (req, res) => {
     
     // Find matching rate slab
     const slabs = scheme.rate_slabs || []
-    const slab = slabs.find(s => 
-      s.payout_frequency_type === payout_frequency &&
-      s.tenure_min_months <= tenure_months &&
-      s.tenure_max_months >= tenure_months &&
-      s.is_active === true
-    )
+    const slab = slabs.find(s => {
+      if (s.is_active !== true) return false
+      if (s.payout_frequency_type !== payout_frequency) return false
+      const slabUnit = normalizeTenureUnit(s.tenure_unit)
+      if (slabUnit !== resolvedUnit) return false
+      if (resolvedUnit === 'days') {
+        const min = Number(s.tenure_min_days)
+        const max = Number(s.tenure_max_days)
+        if (!Number.isFinite(min) || !Number.isFinite(max)) return false
+        return min <= resolvedValue && max >= resolvedValue
+      }
+      const min = Number(s.tenure_min_months)
+      const max = Number(s.tenure_max_months)
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return false
+      return min <= resolvedValue && max >= resolvedValue
+    })
     
     if (!slab) {
       return res.status(404).json({ error: 'No matching rate slab found' })
@@ -752,6 +802,7 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
         issuer.schemes.forEach(scheme => {
           const slabs = scheme.rate_slabs || []
           slabs.forEach(slab => {
+            const unit = normalizeTenureUnit(slab.tenure_unit)
             flattenedSlabs.push({
               issuer_key: issuer._key,
               issuer_legal_name: issuer.legal_name || '',
@@ -759,8 +810,11 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
               scheme_id: scheme.scheme_id || '',
               scheme_name: scheme.scheme_name || '',
               slab_id: slab.slab_id || '',
-              tenure_min_months: slab.tenure_min_months ?? '',
-              tenure_max_months: slab.tenure_max_months ?? '',
+              tenure_unit: unit,
+              tenure_min_months: unit === 'months' ? (slab.tenure_min_months ?? '') : '',
+              tenure_max_months: unit === 'months' ? (slab.tenure_max_months ?? '') : '',
+              tenure_min_days: unit === 'days' ? (slab.tenure_min_days ?? '') : '',
+              tenure_max_days: unit === 'days' ? (slab.tenure_max_days ?? '') : '',
               payout_frequency_type: slab.payout_frequency_type || '',
               base_interest_rate_pa: slab.base_interest_rate_pa ?? '',
               compounding_frequency: slab.compounding_frequency || '',
@@ -787,8 +841,11 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       { header: 'Scheme ID', key: 'scheme_id', width: 25, protection: { locked: true } },
       { header: 'Scheme Name', key: 'scheme_name', width: 40, protection: { locked: true } },
       { header: 'Slab ID', key: 'slab_id', width: 20, protection: { locked: true } },
+      { header: 'Tenure Unit', key: 'tenure_unit', width: 12, protection: { locked: false } },
       { header: 'Tenure Min (months)', key: 'tenure_min_months', width: 18, protection: { locked: false }, style: { numFmt: '0' } },
       { header: 'Tenure Max (months)', key: 'tenure_max_months', width: 18, protection: { locked: false }, style: { numFmt: '0' } },
+      { header: 'Tenure Min (days)', key: 'tenure_min_days', width: 16, protection: { locked: false }, style: { numFmt: '0' } },
+      { header: 'Tenure Max (days)', key: 'tenure_max_days', width: 16, protection: { locked: false }, style: { numFmt: '0' } },
       { header: 'Payout Frequency', key: 'payout_frequency_type', width: 22, protection: { locked: false } },
       { header: 'Base Interest Rate (% p.a.)', key: 'base_interest_rate_pa', width: 22, protection: { locked: false }, style: { numFmt: '0.00' } },
       { header: 'Compounding Frequency', key: 'compounding_frequency', width: 22, protection: { locked: false } },
@@ -815,11 +872,11 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
         row.getCell(col).protection = { locked: true }
         row.getCell(col).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } }
       }
-      for (let col = 7; col <= 15; col++) {
+      for (let col = 7; col <= 18; col++) {
         row.getCell(col).protection = { locked: false }
       }
-      row.getCell(14).numFmt = '0.00000'
-      row.getCell(15).numFmt = '0.00000'
+      row.getCell(17).numFmt = '0.00000'
+      row.getCell(18).numFmt = '0.00000'
     })
     
     // Protect worksheet but allow editing unlocked cells
@@ -878,9 +935,11 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
     const errors = []
     let rowNumber = 0
     
-    // Columns: 1=issuer_key, 2=issuer_legal_name, 3=issuer_short_name, 4=scheme_id, 5=scheme_name, 6=slab_id,
-    // 7=tenure_min_months, 8=tenure_max_months, 9=payout_frequency_type, 10=base_interest_rate_pa,
-    // 11=compounding_frequency, 12=effective_yield_pa, 13=notes_public_display, 14=is_active, 15=cc, 16=si
+    // Columns:
+    // 1=issuer_key, 2=issuer_legal_name, 3=issuer_short_name, 4=scheme_id, 5=scheme_name, 6=slab_id,
+    // 7=tenure_unit, 8=tenure_min_months, 9=tenure_max_months, 10=tenure_min_days, 11=tenure_max_days,
+    // 12=payout_frequency_type, 13=base_interest_rate_pa, 14=compounding_frequency, 15=effective_yield_pa,
+    // 16=notes_public_display, 17=is_active, 18=cc, 19=si
     worksheet.eachRow((row, rowNum) => {
       rowNumber = rowNum
       if (rowNum === 1) return
@@ -895,28 +954,38 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
           return
         }
         
-        const tenure_min_months = row.getCell(7).value != null ? parseInt(row.getCell(7).value) : undefined
-        const tenure_max_months = row.getCell(8).value != null ? parseInt(row.getCell(8).value) : undefined
-        const payout_frequency_type = row.getCell(9).value?.toString()?.trim()
-        const base_interest_rate_pa = row.getCell(10).value != null ? parseFloat(row.getCell(10).value) : undefined
-        const compounding_frequency = row.getCell(11).value?.toString()?.trim() || null
-        const effective_yield_pa = row.getCell(12).value != null ? parseFloat(row.getCell(12).value) : undefined
-        const notes_public_display = row.getCell(13).value?.toString()?.trim()
-        const is_active = row.getCell(14).value?.toString()?.toLowerCase()?.trim() === 'yes'
+        const tenure_unit_raw = row.getCell(7).value?.toString()?.trim()
+        const tenure_unit = normalizeTenureUnit(tenure_unit_raw)
+        const tenure_min_months = row.getCell(8).value != null ? parseInt(row.getCell(8).value) : undefined
+        const tenure_max_months = row.getCell(9).value != null ? parseInt(row.getCell(9).value) : undefined
+        const tenure_min_days = row.getCell(10).value != null ? parseInt(row.getCell(10).value) : undefined
+        const tenure_max_days = row.getCell(11).value != null ? parseInt(row.getCell(11).value) : undefined
+        const payout_frequency_type = row.getCell(12).value?.toString()?.trim()
+        const base_interest_rate_pa = row.getCell(13).value != null ? parseFloat(row.getCell(13).value) : undefined
+        const compounding_frequency = row.getCell(14).value?.toString()?.trim() || null
+        const effective_yield_pa = row.getCell(15).value != null ? parseFloat(row.getCell(15).value) : undefined
+        const notes_public_display = row.getCell(16).value?.toString()?.trim()
+        const is_active = row.getCell(17).value?.toString()?.toLowerCase()?.trim() === 'yes'
         
         let cc = 0
-        const ccValue = row.getCell(15).value
+        const ccValue = row.getCell(18).value
         if (typeof ccValue === 'number') cc = ccValue
         else if (typeof ccValue === 'string') cc = parseFloat(ccValue) || 0
         
         let si = 0
-        const siValue = row.getCell(16).value
+        const siValue = row.getCell(19).value
         if (typeof siValue === 'number') si = siValue
         else if (typeof siValue === 'string') si = parseFloat(siValue) || 0
         
         const updateData = {}
-        if (tenure_min_months !== undefined) updateData.tenure_min_months = tenure_min_months
-        if (tenure_max_months !== undefined) updateData.tenure_max_months = tenure_max_months
+        updateData.tenure_unit = tenure_unit
+        if (tenure_unit === 'days') {
+          if (tenure_min_days !== undefined) updateData.tenure_min_days = tenure_min_days
+          if (tenure_max_days !== undefined) updateData.tenure_max_days = tenure_max_days
+        } else {
+          if (tenure_min_months !== undefined) updateData.tenure_min_months = tenure_min_months
+          if (tenure_max_months !== undefined) updateData.tenure_max_months = tenure_max_months
+        }
         if (payout_frequency_type !== undefined && payout_frequency_type !== '') updateData.payout_frequency_type = payout_frequency_type
         if (base_interest_rate_pa !== undefined) updateData.base_interest_rate_pa = base_interest_rate_pa
         if (compounding_frequency !== undefined) updateData.compounding_frequency = compounding_frequency || null
