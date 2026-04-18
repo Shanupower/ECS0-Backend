@@ -10,14 +10,14 @@ const router = express.Router()
 // HELPER FUNCTIONS
 // ===================================
 
+function normalizeTenureUnit(u) {
+  const v = String(u || '').trim().toLowerCase()
+  if (v === 'day' || v === 'days') return 'days'
+  return 'months'
+}
+
 function validateBusinessRules(data) {
   const errors = []
-
-  const normalizeTenureUnit = (u) => {
-    const v = String(u || '').trim().toLowerCase()
-    if (v === 'day' || v === 'days') return 'days'
-    return 'months'
-  }
   
   // Validate schemes
   if (data.schemes && Array.isArray(data.schemes)) {
@@ -246,11 +246,19 @@ router.post('/calculate-rate', async (req, res) => {
       return res.status(404).json({ error: 'Scheme not found' })
     }
     
-    // Find matching rate slab
+    const normFreq = (x) => String(x ?? '').trim()
+    const payoutMatches = (slabFreq, reqFreq) => {
+      const a = normFreq(slabFreq)
+      const b = normFreq(reqFreq)
+      if (!a || !b) return false
+      return a === b || a.toLowerCase() === b.toLowerCase()
+    }
+
+    // Find matching rate slab (is_active: treat missing as active, same as frontend)
     const slabs = scheme.rate_slabs || []
     const slab = slabs.find(s => {
-      if (s.is_active !== true) return false
-      if (s.payout_frequency_type !== payout_frequency) return false
+      if (s.is_active === false) return false
+      if (!payoutMatches(s.payout_frequency_type, payout_frequency)) return false
       const slabUnit = normalizeTenureUnit(s.tenure_unit)
       if (slabUnit !== resolvedUnit) return false
       if (resolvedUnit === 'days') {
