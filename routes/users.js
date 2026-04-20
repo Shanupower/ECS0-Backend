@@ -22,6 +22,81 @@ function parseOptionalNonNegativeNumber(value, fieldLabel) {
   return { ok: true, value: n }
 }
 
+async function getUserBranchRefForUserId(userId) {
+  const rows = await q(
+    `
+    FOR u IN users
+      FILTER u._key == @id
+      LIMIT 1
+      RETURN { branch_code: u.branch_code, branch: u.branch }
+  `,
+    { id: userId }
+  )
+  const r = rows?.[0]
+  const branch_code = r?.branch_code != null && String(r.branch_code).trim() !== '' ? String(r.branch_code).trim() : null
+  const branch = r?.branch != null && String(r.branch).trim() !== '' ? String(r.branch).trim() : null
+  return { branch_code, branch }
+}
+
+function normalizeBranchRefForCompare(value) {
+  return String(value ?? '').trim().toLowerCase()
+}
+
+async function enforcePersonalTargetCapForBranch({ branchRef, excludeUserId, nextPersonalTarget }) {
+  // If no personal target is being set (null), nothing to cap.
+  if (nextPersonalTarget == null) return { ok: true }
+  if (!branchRef) return { ok: false, error: 'Branch is required to set a personal target' }
+
+  const branchRows = await q(
+    `
+    FOR b IN branches
+      FILTER b._key == @branchRef
+         OR (b.branch_code != null && LOWER(TRIM(TO_STRING(b.branch_code))) == LOWER(@branchRef))
+         OR (b.branch_name != null && LOWER(TRIM(TO_STRING(b.branch_name))) == LOWER(@branchRef))
+      LIMIT 1
+      RETURN { monthly_target: b.monthly_target, branch_name: b.branch_name, branch_code: b.branch_code, key: b._key }
+  `,
+    { branchRef: String(branchRef).trim() }
+  )
+  const branchDoc = branchRows?.[0]
+  const monthlyTarget = branchDoc?.monthly_target != null && branchDoc?.monthly_target !== '' ? Number(branchDoc.monthly_target) : null
+  if (monthlyTarget == null || !Number.isFinite(monthlyTarget) || monthlyTarget <= 0) {
+    return { ok: false, error: 'Branch monthly target must be set before setting personal targets' }
+  }
+
+  const identifiers = [
+    branchDoc?.key,
+    branchDoc?.branch_code,
+    branchDoc?.branch_name
+  ].filter((x) => x != null && String(x).trim() !== '').map((x) => String(x).trim())
+
+  const sumRows = await q(
+    `
+    FOR u IN users
+      FILTER u.is_active == true
+        AND u.personal_monthly_target != null
+        AND u.personal_monthly_target != ""
+        AND (@excludeId == null OR u._key != @excludeId)
+        AND (
+          (u.branch_code != null AND TO_STRING(u.branch_code) IN @ids)
+          OR (u.branch != null AND TO_STRING(u.branch) IN @ids)
+        )
+      COLLECT AGGREGATE total = SUM(TO_NUMBER(u.personal_monthly_target))
+      RETURN total
+  `,
+    { ids: identifiers, excludeId: excludeUserId ?? null }
+  )
+  const existingSum = sumRows?.length ? Number(sumRows[0]) : 0
+  const nextSum = existingSum + Number(nextPersonalTarget)
+  if (nextSum > monthlyTarget) {
+    return {
+      ok: false,
+      error: `Sum of personal targets (${nextSum}) exceeds branch monthly target (${monthlyTarget})`
+    }
+  }
+  return { ok: true }
+}
+
 // Get current user profile
 router.get('/me', requireAuth, async (req, res) => {
   const users = await q(`
@@ -106,28 +181,70 @@ router.patch('/me', requireAuth, async (req, res) => {
   }
 })
 
-// Get all users (admin only)
-router.get('/', requireAuth, requireRole('admin'), async (req, res) => {
-  const users = await q(`
-    FOR user IN users 
-    SORT user.created_at DESC
-    RETURN {
-      id: user._key,
-      emp_code: user.emp_code,
-      name: user.name,
-      email: user.email,
-      mobile: user.mobile,
-      branch: user.branch,
-      branch_code: user.branch_code,
-      role: user.role,
-      is_active: user.is_active,
-      last_login_at: user.last_login_at,
-      created_at: user.created_at,
-      dashboard_widgets: IS_ARRAY(user.dashboard_widgets) ? user.dashboard_widgets : null,
-      personal_monthly_target: user.personal_monthly_target != null ? TO_NUMBER(user.personal_monthly_target) : null
-    }
-  `)
-  res.json(users)
+// Get users
+// - Admin: all users
+// - Manager: branch-scoped (active users only) when scope=branch
+router.get('/', requireAuth, async (req, res) => {
+  const role = req.user?.role
+  const scope = String(req.query.scope || '').trim()
+
+  if (role === 'admin') {
+    const users = await q(`
+      FOR user IN users 
+      SORT user.created_at DESC
+      RETURN {
+        id: user._key,
+        emp_code: user.emp_code,
+        name: user.name,
+        email: user.email,
+        mobile: user.mobile,
+        branch: user.branch,
+        branch_code: user.branch_code,
+        role: user.role,
+        is_active: user.is_active,
+        last_login_at: user.last_login_at,
+        created_at: user.created_at,
+        dashboard_widgets: IS_ARRAY(user.dashboard_widgets) ? user.dashboard_widgets : null,
+        personal_monthly_target: user.personal_monthly_target != null ? TO_NUMBER(user.personal_monthly_target) : null
+      }
+    `)
+    return res.json(users)
+  }
+
+  if (role === 'manager' && scope === 'branch') {
+    const me = await getUserBranchRefForUserId(req.user.sub)
+    const myBranchRef = me.branch_code || me.branch
+    if (!myBranchRef) return res.json([])
+    const myBranchLower = normalizeBranchRefForCompare(myBranchRef)
+
+    const users = await q(
+      `
+      FOR user IN users
+        FILTER user.is_active == true
+        LET uBranchRef = user.branch_code != null && TRIM(TO_STRING(user.branch_code)) != "" ? TRIM(TO_STRING(user.branch_code)) : (user.branch != null ? TRIM(TO_STRING(user.branch)) : "")
+        FILTER uBranchRef != "" AND LOWER(uBranchRef) == @myBranchLower
+        SORT user.name
+        RETURN {
+          id: user._key,
+          emp_code: user.emp_code,
+          name: user.name,
+          email: user.email,
+          mobile: user.mobile,
+          branch: user.branch,
+          branch_code: user.branch_code,
+          role: user.role,
+          is_active: user.is_active,
+          last_login_at: user.last_login_at,
+          created_at: user.created_at,
+          personal_monthly_target: user.personal_monthly_target != null ? TO_NUMBER(user.personal_monthly_target) : null
+        }
+    `,
+      { myBranchLower }
+    )
+    return res.json(users)
+  }
+
+  return res.status(403).json({ error: 'forbidden' })
 })
 
 // Audit users with missing/invalid branch mapping (admin only)
@@ -368,6 +485,15 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
       }
       branchCode = branchQuery[0].branch_code
     }
+
+    const cap = await enforcePersonalTargetCapForBranch({
+      branchRef: branchCode || branch,
+      excludeUserId: null,
+      nextPersonalTarget: personalTargetParsed.value === undefined ? null : personalTargetParsed.value
+    })
+    if (!cap.ok) {
+      return res.status(400).json({ error: 'validation_error', detail: cap.error })
+    }
     
     const userDoc = {
       emp_code: empCodeValidation.value,
@@ -389,32 +515,51 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   }
 })
 
-// Update user (admin only)
-router.patch('/:id', requireAuth, requireRole('admin'), async (req, res) => {
+// Update user
+// - Admin: full update (existing behavior)\n+// - Manager: can update personal_monthly_target for active users in their own branch only
+router.patch('/:id', requireAuth, async (req, res) => {
   const id = req.params.id
   const { name, email, mobile, branch, role, is_active, dashboard_widgets, personal_monthly_target } = req.body || {}
+  const callerRole = req.user?.role
+
+  if (!(callerRole === 'admin' || callerRole === 'manager')) {
+    return res.status(403).json({ error: 'forbidden' })
+  }
+
+  if (callerRole === 'manager') {
+    // Managers are restricted: only allow updating personal_monthly_target.
+    const allowedKeys = new Set(['personal_monthly_target'])
+    const bodyKeys = Object.keys(req.body || {})
+    const invalidKeys = bodyKeys.filter((k) => !allowedKeys.has(k))
+    if (invalidKeys.length > 0) {
+      return res.status(403).json({ error: 'forbidden', detail: 'Managers can only update personal monthly target' })
+    }
+  }
+
   const updates = {}
   
-  if (name !== undefined) updates.name = name
-  if (email !== undefined) updates.email = email
-  if (mobile !== undefined) {
-    const mobileValidation = validateMobile(mobile, false)
-    if (!mobileValidation.valid) {
-      return res.status(400).json({ error: 'validation_error', detail: mobileValidation.error })
+  if (callerRole === 'admin') {
+    if (name !== undefined) updates.name = name
+    if (email !== undefined) updates.email = email
+    if (mobile !== undefined) {
+      const mobileValidation = validateMobile(mobile, false)
+      if (!mobileValidation.valid) {
+        return res.status(400).json({ error: 'validation_error', detail: mobileValidation.error })
+      }
+      updates.mobile = mobileValidation.value
     }
-    updates.mobile = mobileValidation.value
-  }
-  if (role !== undefined) updates.role = role
-  if (is_active !== undefined) updates.is_active = is_active
-  if (dashboard_widgets !== undefined) {
-    if (dashboard_widgets === null) {
-      updates.dashboard_widgets = null
-    } else if (Array.isArray(dashboard_widgets)) {
-      const invalid = dashboard_widgets.filter(w => typeof w !== 'string' || !w.trim() || !ALLOWED_DASHBOARD_WIDGETS.includes(w.trim()))
-      if (invalid.length > 0) return res.status(400).json({ error: 'validation_error', detail: `Invalid dashboard_widgets: ${invalid.join(', ')}` })
-      updates.dashboard_widgets = dashboard_widgets.map(w => w.trim())
-    } else {
-      return res.status(400).json({ error: 'validation_error', detail: 'dashboard_widgets must be an array or null' })
+    if (role !== undefined) updates.role = role
+    if (is_active !== undefined) updates.is_active = is_active
+    if (dashboard_widgets !== undefined) {
+      if (dashboard_widgets === null) {
+        updates.dashboard_widgets = null
+      } else if (Array.isArray(dashboard_widgets)) {
+        const invalid = dashboard_widgets.filter(w => typeof w !== 'string' || !w.trim() || !ALLOWED_DASHBOARD_WIDGETS.includes(w.trim()))
+        if (invalid.length > 0) return res.status(400).json({ error: 'validation_error', detail: `Invalid dashboard_widgets: ${invalid.join(', ')}` })
+        updates.dashboard_widgets = dashboard_widgets.map(w => w.trim())
+      } else {
+        return res.status(400).json({ error: 'validation_error', detail: 'dashboard_widgets must be an array or null' })
+      }
     }
   }
 
@@ -426,7 +571,7 @@ router.patch('/:id', requireAuth, requireRole('admin'), async (req, res) => {
   
   // If branch/role is being updated, enforce role-based branch requirement and resolve branch_code
   const roleRequiresBranch = new Set(['employee', 'manager', 'branch'])
-  if (branch !== undefined || role !== undefined) {
+  if (callerRole === 'admin' && (branch !== undefined || role !== undefined)) {
     const existingRows = await q(
       `
       FOR u IN users
@@ -477,6 +622,70 @@ router.patch('/:id', requireAuth, requireRole('admin'), async (req, res) => {
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no_updates' })
   
   try {
+    // Manager: ensure the target user is active and in manager's branch.
+    if (callerRole === 'manager') {
+      const [me, targetRows] = await Promise.all([
+        getUserBranchRefForUserId(req.user.sub),
+        q(
+          `
+          FOR u IN users
+            FILTER u._key == @id
+            LIMIT 1
+            RETURN { is_active: u.is_active, branch_code: u.branch_code, branch: u.branch }
+        `,
+          { id }
+        )
+      ])
+      if (!targetRows.length) return res.status(404).json({ error: 'not_found' })
+      const target = targetRows[0]
+      if (target?.is_active !== true) return res.status(403).json({ error: 'forbidden', detail: 'Target user is inactive' })
+
+      const myBranchRef = me.branch_code || me.branch
+      const targetBranchRef = (target.branch_code != null && String(target.branch_code).trim() !== '')
+        ? String(target.branch_code).trim()
+        : (target.branch != null ? String(target.branch).trim() : '')
+
+      if (!myBranchRef || !targetBranchRef || normalizeBranchRefForCompare(myBranchRef) !== normalizeBranchRefForCompare(targetBranchRef)) {
+        return res.status(403).json({ error: 'forbidden', detail: 'Managers can only update users in their branch' })
+      }
+
+      const cap = await enforcePersonalTargetCapForBranch({
+        branchRef: myBranchRef,
+        excludeUserId: id,
+        nextPersonalTarget: updates.personal_monthly_target
+      })
+      if (!cap.ok) {
+        return res.status(400).json({ error: 'validation_error', detail: cap.error })
+      }
+    }
+
+    // Admin: cap check if personal target is being set and the target user has a branch.
+    if (callerRole === 'admin' && updates.personal_monthly_target !== undefined) {
+      const targetRows = await q(
+        `
+        FOR u IN users
+          FILTER u._key == @id
+          LIMIT 1
+          RETURN { branch_code: u.branch_code, branch: u.branch }
+      `,
+        { id }
+      )
+      if (!targetRows.length) return res.status(404).json({ error: 'not_found' })
+      const target = targetRows[0]
+      const targetBranchRef = (target.branch_code != null && String(target.branch_code).trim() !== '')
+        ? String(target.branch_code).trim()
+        : (target.branch != null ? String(target.branch).trim() : null)
+
+      const cap = await enforcePersonalTargetCapForBranch({
+        branchRef: targetBranchRef,
+        excludeUserId: id,
+        nextPersonalTarget: updates.personal_monthly_target
+      })
+      if (!cap.ok) {
+        return res.status(400).json({ error: 'validation_error', detail: cap.error })
+      }
+    }
+
     await getCollection('users').update(id, updates)
     res.status(204).end()
   } catch (e) {

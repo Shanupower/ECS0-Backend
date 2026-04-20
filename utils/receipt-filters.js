@@ -73,9 +73,29 @@ export function aqlExcludeSwitchOverClause() {
  */
 export function applyReceiptCategoryFilter(filterConditions, bindVars, category) {
   if (!category) return
-  if (String(category).trim().toUpperCase() === 'GOVT_FD') {
+  const catUpper = String(category).trim().toUpperCase()
+  if (catUpper === 'GOVT_FD') {
     filterConditions.push(govtFdCategoryMatchAql())
     bindVars.category = 'GOVT_FD'
+  } else if (catUpper === 'NCD') {
+    // Option A: keep `product.category` as BOND, but allow filtering NCD via issuer.type.
+    // Match:
+    // - legacy/edge receipts that truly store category as NCD
+    // - or BOND receipts whose issuer type is NCD
+    filterConditions.push(`(
+      ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+      OR (
+        ((receipt.product != null && receipt.product.category == @bond_category) OR receipt.product_category == @bond_category)
+        AND UPPER(TO_STRING(
+          (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.issuer != null && receipt.product_details.bond.issuer.type != null)
+            ? receipt.product_details.bond.issuer.type
+            : ""
+        )) == @bond_issuer_type
+      )
+    )`)
+    bindVars.category = 'NCD'
+    bindVars.bond_category = 'BOND'
+    bindVars.bond_issuer_type = 'NCD'
   } else {
     filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
     bindVars.category = category
@@ -87,9 +107,26 @@ export function applyReceiptCategoryFilter(filterConditions, bindVars, category)
  */
 export function appendCategoryToFilterString(filterClause, bindVars, category) {
   if (!category) return filterClause
-  if (String(category).trim().toUpperCase() === 'GOVT_FD') {
+  const catUpper = String(category).trim().toUpperCase()
+  if (catUpper === 'GOVT_FD') {
     bindVars.category = 'GOVT_FD'
     return `${filterClause} AND ${govtFdCategoryMatchAql()}`
+  }
+  if (catUpper === 'NCD') {
+    bindVars.category = 'NCD'
+    bindVars.bond_category = 'BOND'
+    bindVars.bond_issuer_type = 'NCD'
+    return `${filterClause} AND (
+      ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+      OR (
+        ((receipt.product != null && receipt.product.category == @bond_category) OR receipt.product_category == @bond_category)
+        AND UPPER(TO_STRING(
+          (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.issuer != null && receipt.product_details.bond.issuer.type != null)
+            ? receipt.product_details.bond.issuer.type
+            : ""
+        )) == @bond_issuer_type
+      )
+    )`
   }
   bindVars.category = category
   return `${filterClause} AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)`
@@ -160,9 +197,26 @@ export function appendMfTxnTypeToFilterString(filterClause, bindVars, txn_type, 
  */
 export function appendExportCategoryQuery(query, bindVars, category) {
   if (!category) return query
-  if (String(category).trim().toUpperCase() === 'GOVT_FD') {
+  const catUpper = String(category).trim().toUpperCase()
+  if (catUpper === 'GOVT_FD') {
     bindVars.category = 'GOVT_FD'
     return `${query} AND ${govtFdCategoryMatchAql()}`
+  }
+  if (catUpper === 'NCD') {
+    bindVars.category = 'NCD'
+    bindVars.bond_category = 'BOND'
+    bindVars.bond_issuer_type = 'NCD'
+    return `${query} AND (
+      ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+      OR (
+        ((receipt.product != null && receipt.product.category == @bond_category) OR receipt.product_category == @bond_category)
+        AND UPPER(TO_STRING(
+          (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.issuer != null && receipt.product_details.bond.issuer.type != null)
+            ? receipt.product_details.bond.issuer.type
+            : ""
+        )) == @bond_issuer_type
+      )
+    )`
   }
   bindVars.category = category
   return `${query} AND ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)`

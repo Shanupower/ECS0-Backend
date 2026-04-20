@@ -494,7 +494,9 @@ router.get('/summary', requireAuth, async (req, res) => {
   }
 
   // Personal target (optional, stored on users) for personal dashboards/reports.
-  // If not set, the client should fall back to branch_target.
+  // Pool split allocation:
+  // - If personal target is set, use it.
+  // - Else allocate the remaining branch target equally among active branch users without a personal target.
   const isPersonalScope =
     viewMode === 'personal' ||
     (req.user.role === 'employee' && viewMode !== 'branch') ||
@@ -503,27 +505,123 @@ router.get('/summary', requireAuth, async (req, res) => {
 
   if (isPersonalScope) {
     let personalTarget = null
+    let personalUserId = null
     if (req.user.role === 'admin') {
-      // Admin personal view: resolve the selected employee by emp_code (including admin self).
-      const rows = await q(`
-        FOR user IN users
-          FILTER user.emp_code == @e
-          LIMIT 1
-          RETURN user.personal_monthly_target
-      `, { e: emp_code })
-      if (rows.length > 0) personalTarget = rows[0] != null ? Number(rows[0]) : null
+      // Admin personal view: resolve by emp_code when provided; otherwise current user (e.g. admin without emp_code).
+      const rows = emp_code
+        ? await q(`
+            FOR user IN users
+              FILTER user.emp_code == @e
+              LIMIT 1
+              RETURN { id: user._key, personal_monthly_target: user.personal_monthly_target }
+          `, { e: emp_code })
+        : await q(`
+            FOR user IN users
+              FILTER user._key == @id
+              LIMIT 1
+              RETURN { id: user._key, personal_monthly_target: user.personal_monthly_target }
+          `, { id: req.user.sub })
+      if (rows.length > 0) {
+        personalUserId = rows[0]?.id ?? null
+        personalTarget = rows[0]?.personal_monthly_target != null ? Number(rows[0].personal_monthly_target) : null
+      }
     } else {
       // Non-admin personal view: resolve current user by _key.
       const rows = await q(`
         FOR user IN users
           FILTER user._key == @id
           LIMIT 1
-          RETURN user.personal_monthly_target
+          RETURN { id: user._key, personal_monthly_target: user.personal_monthly_target }
       `, { id: req.user.sub })
-      if (rows.length > 0) personalTarget = rows[0] != null ? Number(rows[0]) : null
+      if (rows.length > 0) {
+        personalUserId = rows[0]?.id ?? null
+        personalTarget = rows[0]?.personal_monthly_target != null ? Number(rows[0].personal_monthly_target) : null
+      }
     }
     response.personal_target = personalTarget
-    response.effective_target = personalTarget != null ? personalTarget : (response.branch_target ?? null)
+
+    if (personalTarget != null) {
+      response.effective_target = personalTarget
+    } else {
+      // Compute allocated target from remaining pool for this branch.
+      // We rely on the branchRef logic above which scoped branch_target.
+      // If branch_target is missing, allocation is not possible.
+      const branchTarget = response.branch_target != null ? Number(response.branch_target) : null
+      if (branchTarget != null && Number.isFinite(branchTarget) && branchTarget > 0) {
+        // Resolve this user's branch ref for allocation.
+        let branchRef = null
+        if (req.user.role === 'admin') {
+          // For admin personal view, prefer the selected user's branch.
+          if (personalUserId) {
+            const rows = await q(`
+              FOR u IN users
+                FILTER u._key == @id
+                LIMIT 1
+                RETURN { branch_code: u.branch_code, branch: u.branch }
+            `, { id: personalUserId })
+            branchRef = rows[0] ? (rows[0].branch_code || rows[0].branch) : null
+          }
+        } else if (req.user.role === 'employee' || req.user.role === 'manager' || req.user.role === 'branch') {
+          const rows = await q(`
+            FOR u IN users
+              FILTER u._key == @id
+              LIMIT 1
+              RETURN { branch_code: u.branch_code, branch: u.branch }
+          `, { id: req.user.sub })
+          branchRef = rows[0] ? (rows[0].branch_code || rows[0].branch) : null
+        }
+
+        if (branchRef) {
+          const branchIdentifiers = await getBranchIdentifiersForFilter(branchRef)
+          const ids = (branchIdentifiers?.length ? branchIdentifiers : [branchRef]).map((x) => String(x))
+
+          const allocRows = await q(
+            `
+            LET sumPersonal = FIRST(
+              FOR u IN users
+                FILTER u.is_active == true
+                  AND u.personal_monthly_target != null
+                  AND u.personal_monthly_target != ""
+                  AND (
+                    (u.branch_code != null AND TO_STRING(u.branch_code) IN @ids)
+                    OR (u.branch != null AND TO_STRING(u.branch) IN @ids)
+                  )
+                COLLECT AGGREGATE total = SUM(TO_NUMBER(u.personal_monthly_target))
+                RETURN total
+            )
+            LET unsetCount = FIRST(
+              FOR u IN users
+                FILTER u.is_active == true
+                  AND (u.personal_monthly_target == null OR u.personal_monthly_target == "")
+                  AND (
+                    (u.branch_code != null AND TO_STRING(u.branch_code) IN @ids)
+                    OR (u.branch != null AND TO_STRING(u.branch) IN @ids)
+                  )
+                COLLECT AGGREGATE c = LENGTH(1)
+                RETURN c
+            )
+            RETURN { sumPersonal: sumPersonal || 0, unsetCount: unsetCount || 0 }
+          `,
+            { ids }
+          )
+
+          const sumPersonal = Number(allocRows?.[0]?.sumPersonal || 0)
+          const unsetCount = Number(allocRows?.[0]?.unsetCount || 0)
+          const remainingPool = branchTarget - sumPersonal
+          const allocatedTarget = unsetCount > 0 ? remainingPool / unsetCount : null
+
+          response.sum_personal_targets = sumPersonal
+          response.unset_count = unsetCount
+          response.remaining_pool = remainingPool
+          response.allocated_target = allocatedTarget
+          response.effective_target = allocatedTarget
+        } else {
+          response.effective_target = null
+        }
+      } else {
+        response.effective_target = null
+      }
+    }
   }
   
   res.json(response)
@@ -952,6 +1050,20 @@ router.get('/branches', requireAuth, async (req, res) => {
     `
     const employeeStats = await q(employeeStatsQuery)
 
+    // Sum of personal monthly targets per branch (employees/managers/admins with a branch set).
+    // Used for admin-only "include personal targets" toggle in Branch Performance Overview.
+    const personalTargetByBranchQuery = `
+      FOR user IN users
+        FILTER user.is_active == true
+          AND user.branch != null
+          AND user.personal_monthly_target != null
+          AND user.personal_monthly_target != ""
+        COLLECT branch = user.branch
+        AGGREGATE total_personal_target = SUM(TO_NUMBER(user.personal_monthly_target))
+        RETURN { branch, total_personal_target }
+    `
+    const personalTargetByBranch = await q(personalTargetByBranchQuery)
+
     const branchDocs = await q(`
       FOR b IN branches
         RETURN { key: b._key, code: b.branch_code, name: b.branch_name, monthly_target: b.monthly_target }
@@ -985,6 +1097,29 @@ router.get('/branches', requireAuth, async (req, res) => {
       return null
     }
 
+    const personalTargetForBranchRef = (branchRef) => {
+      const branchDoc = resolveBranchDoc(branchRef)
+      const s = String(branchRef || '').trim()
+      const lower = s.toLowerCase()
+      let total = 0
+      for (const row of personalTargetByBranch || []) {
+        const rb = row?.branch
+        if (rb == null || rb === '') continue
+        const rDoc = resolveBranchDoc(rb)
+        const rs = String(rb).trim()
+        const rLower = rs.toLowerCase()
+        const matches =
+          (branchDoc?.key != null && rDoc?.key != null && String(branchDoc.key).trim() === String(rDoc.key).trim()) ||
+          (branchDoc?.code != null && rDoc?.code != null && String(branchDoc.code).trim().toLowerCase() === String(rDoc.code).trim().toLowerCase()) ||
+          (branchDoc?.name != null && rDoc?.name != null && String(branchDoc.name).trim().toLowerCase() === String(rDoc.name).trim().toLowerCase()) ||
+          (s && (rs === s || rLower === lower))
+        if (!matches) continue
+        const n = Number(row.total_personal_target)
+        if (Number.isFinite(n)) total += n
+      }
+      return total
+    }
+
     // Merge stats that belong to the same logical branch (raw branch value may be key/code/name).
     const mergedByBranch = new Map()
     branchStats.forEach((branch) => {
@@ -1007,25 +1142,48 @@ router.get('/branches', requireAuth, async (req, res) => {
       mergedByBranch.set(key, existing)
     })
 
+    // Include every configured branch even when there are no receipts in range, so the overview
+    // and target totals reflect all branches (not only those with activity this period).
+    branchDocs.forEach((b) => {
+      if (b == null) return
+      const aggregateKey = b.key || b.code || String(b.name || '').trim()
+      if (!aggregateKey) return
+      const key = String(aggregateKey).toLowerCase()
+      if (mergedByBranch.has(key)) return
+      mergedByBranch.set(key, {
+        branch: b.name || b.code || b.key || 'Unknown Branch',
+        branch_name: b.name || b.code || b.key || 'Unknown Branch',
+        branch_code: b.code || null,
+        total_receipts: 0,
+        total_investments: 0,
+        total_cc: 0,
+        total_si: 0
+      })
+    })
+
     const mergedStats = Array.from(mergedByBranch.values()).map((branch) => {
       const employeeData = employeeStats.find((emp) => String(emp.branch || '').trim().toLowerCase() === String(branch.branch_name || '').trim().toLowerCase())
       const tgt = monthlyTargetForReceiptBranch(branch.branch_code || branch.branch_name || branch.branch)
+      const personalTgt = personalTargetForBranchRef(branch.branch_code || branch.branch_name || branch.branch)
       return {
         ...branch,
         total_employees: employeeData?.employee_count || 0,
         total_target: tgt != null ? tgt : 0,
+        total_personal_target: personalTgt,
         commissions: branch.total_cc,
         collection_credit: branch.total_cc
       }
     }).sort((a, b) => (b.total_investments || 0) - (a.total_investments || 0))
     
     const totalMonthlyTarget = mergedStats.reduce((sum, branch) => sum + (Number(branch.total_target) || 0), 0)
+    const totalPersonalMonthlyTarget = mergedStats.reduce((sum, branch) => sum + (Number(branch.total_personal_target) || 0), 0)
     const response = {
       total_branches: mergedStats.length,
       total_investments: mergedStats.reduce((sum, branch) => sum + branch.total_investments, 0),
       total_receipts: mergedStats.reduce((sum, branch) => sum + branch.total_receipts, 0),
       total_collection_credit: mergedStats.reduce((sum, branch) => sum + branch.total_cc, 0),
       total_monthly_target: totalMonthlyTarget,
+      total_personal_monthly_target: totalPersonalMonthlyTarget,
       branches: mergedStats
     }
     
@@ -1056,16 +1214,9 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
       bindVars.to = to
     }
     
-    if (branch_code) {
-      const branchIdentifiers = await getBranchIdentifiersForFilter(branch_code)
-      if (branchIdentifiers.length > 0) {
-        filterConditions.push('receipt.branch IN @branchIdentifiers')
-        bindVars.branchIdentifiers = branchIdentifiers
-      } else {
-        filterConditions.push('receipt.branch == @branch_code')
-        bindVars.branch_code = branch_code
-      }
-    }
+    // NOTE: When branch_code is present, we want to return ALL active users in that branch
+    // (including users with 0 receipts in the period), so we compute aggregates user-first below.
+    // We therefore do NOT add a receipt.branch filter here for the branch_code path.
     
     if (includePending !== '1') {
       filterConditions.push('receipt.status == "Completed"')
@@ -1074,11 +1225,131 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
     }
     
     filterConditions.push('receipt.is_deleted == false')
-    filterConditions.push('receipt.emp_code != null AND receipt.emp_code != ""')
+    // Keep legacy guard for receipt-driven mode (no branch_code path). For user-driven mode we may
+    // include receipts linked by user_id even when emp_code is missing.
+    if (!branch_code) filterConditions.push('receipt.emp_code != null AND receipt.emp_code != ""')
     
     const filterClause = filterConditions.length > 0 ? `FILTER ${filterConditions.join(' AND ')}` : ''
     
-    const employeeStats = await q(`
+    if (branch_code) {
+      const branchIdentifiers = await getBranchIdentifiersForFilter(branch_code)
+      const ids = (branchIdentifiers?.length ? branchIdentifiers : [branch_code]).map((x) => String(x))
+
+      // Resolve branch monthly target once.
+      const branchMonthlyTarget = branchIdentifiers.length > 0
+        ? await getBranchMonthlyTargetForIdentifiers(branchIdentifiers)
+        : null
+
+      // Active users in this branch (all roles).
+      const usersInBranch = await q(
+        `
+        FOR u IN users
+          FILTER u.is_active == true
+            AND (
+              (u.branch_code != null AND TO_STRING(u.branch_code) IN @ids)
+              OR (u.branch != null AND TO_STRING(u.branch) IN @ids)
+            )
+          SORT u.name
+          RETURN {
+            id: u._key,
+            emp_code: u.emp_code,
+            name: u.name,
+            role: u.role,
+            branch: u.branch,
+            branch_code: u.branch_code,
+            personal_target: u.personal_monthly_target != null ? TO_NUMBER(u.personal_monthly_target) : null
+          }
+      `,
+        { ids }
+      )
+
+      // Pool split numbers (active users only, all roles).
+      const poolRows = await q(
+        `
+        LET sumPersonal = FIRST(
+          FOR u IN users
+            FILTER u.is_active == true
+              AND u.personal_monthly_target != null
+              AND u.personal_monthly_target != ""
+              AND (
+                (u.branch_code != null AND TO_STRING(u.branch_code) IN @ids)
+                OR (u.branch != null AND TO_STRING(u.branch) IN @ids)
+              )
+            COLLECT AGGREGATE total = SUM(TO_NUMBER(u.personal_monthly_target))
+            RETURN total
+        )
+        LET unsetCount = FIRST(
+          FOR u IN users
+            FILTER u.is_active == true
+              AND (u.personal_monthly_target == null OR u.personal_monthly_target == "")
+              AND (
+                (u.branch_code != null AND TO_STRING(u.branch_code) IN @ids)
+                OR (u.branch != null AND TO_STRING(u.branch) IN @ids)
+              )
+            COLLECT AGGREGATE c = LENGTH(1)
+            RETURN c
+        )
+        RETURN { sumPersonal: sumPersonal || 0, unsetCount: unsetCount || 0 }
+      `,
+        { ids }
+      )
+
+      const sumPersonal = Number(poolRows?.[0]?.sumPersonal || 0)
+      const unsetCount = Number(poolRows?.[0]?.unsetCount || 0)
+      const monthly = branchMonthlyTarget != null && branchMonthlyTarget !== '' ? Number(branchMonthlyTarget) : null
+      const remainingPool = monthly != null && Number.isFinite(monthly) ? (monthly - sumPersonal) : null
+      const allocated = remainingPool != null && unsetCount > 0 ? remainingPool / unsetCount : null
+
+      // For each user, compute achieved totals by (receipt.user_id OR receipt.emp_code).
+      const userRowsWithTotals = await Promise.all(
+        (usersInBranch || []).map(async (u) => {
+          const totalsRows = await q(
+            `
+            FOR receipt IN receipts
+              ${filterClause}
+              FILTER (
+                receipt.user_id == @userId
+                OR (receipt.emp_code != null AND receipt.emp_code != "" AND receipt.emp_code == @empCode)
+              )
+              COLLECT AGGREGATE
+                receipt_count = LENGTH(1),
+                total_investment = SUM(${INV_AMOUNT_AQL}),
+                total_cc = SUM(${CC_AQL}),
+                total_si = SUM(${SI_AQL}),
+                avg_investment = AVG(${INV_AMOUNT_AQL})
+              RETURN { receipt_count, total_investment, total_cc, total_si, avg_investment }
+          `,
+            { ...bindVars, userId: String(u.id), empCode: String(u.emp_code || '') }
+          )
+          const t = totalsRows?.[0] || {}
+          const personalT = u.personal_target != null ? Number(u.personal_target) : null
+          const effective = personalT != null ? personalT : (allocated != null ? allocated : null)
+          return {
+            emp_code: u.emp_code,
+            employee_name: u.name,
+            role: u.role,
+            personal_target: personalT,
+            branch_monthly_target: monthly,
+            sum_personal_targets: sumPersonal,
+            unset_count: unsetCount,
+            remaining_pool: remainingPool,
+            allocated_target: allocated,
+            effective_target: effective,
+            receipt_count: Number(t.receipt_count || 0),
+            total_investment: Number(t.total_investment || 0),
+            total_cc: Number(t.total_cc || 0),
+            total_si: Number(t.total_si || 0),
+            avg_investment: Number(t.avg_investment || 0)
+          }
+        })
+      )
+
+      // Sort by total_investment desc (like existing behavior).
+      userRowsWithTotals.sort((a, b) => (b.total_investment || 0) - (a.total_investment || 0))
+      return res.json(userRowsWithTotals)
+    }
+
+    const employeeStatsRaw = await q(`
       FOR receipt IN receipts
       ${filterClause}
       COLLECT 
@@ -1113,6 +1384,13 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
       RETURN {
         emp_code,
         employee_name: resolved_employee_name,
+        user_branch_ref: userDoc != null
+          ? (
+              userDoc.branch_code != null && TO_STRING(userDoc.branch_code) != ""
+                ? TO_STRING(userDoc.branch_code)
+                : (userDoc.branch != null ? TO_STRING(userDoc.branch) : null)
+            )
+          : null,
         personal_target: userDoc != null && userDoc.personal_monthly_target != null ? TO_NUMBER(userDoc.personal_monthly_target) : null,
         receipt_count,
         total_investment,
@@ -1121,8 +1399,94 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
         avg_investment
       }
     `, bindVars)
-    
-    res.json(employeeStats)
+
+    const employeeStats = Array.isArray(employeeStatsRaw) ? employeeStatsRaw : []
+    const branchRefs = Array.from(
+      new Set(
+        employeeStats
+          .map((r) => (r?.user_branch_ref != null ? String(r.user_branch_ref).trim() : ''))
+          .filter(Boolean)
+      )
+    )
+
+    // Precompute allocation per branchRef (active users only; all roles) and attach to rows.
+    const perBranch = new Map()
+    await Promise.all(
+      branchRefs.map(async (branchRef) => {
+        const branchRows = await q(
+          `
+          FOR b IN branches
+            FILTER b._key == @branchRef
+               OR (b.branch_code != null && LOWER(TRIM(TO_STRING(b.branch_code))) == LOWER(@branchRef))
+               OR (b.branch_name != null && LOWER(TRIM(TO_STRING(b.branch_name))) == LOWER(@branchRef))
+            LIMIT 1
+            RETURN { key: b._key, code: b.branch_code, name: b.branch_name, monthly_target: b.monthly_target }
+        `,
+          { branchRef }
+        )
+        const b = branchRows?.[0]
+        const monthly = b?.monthly_target != null && b?.monthly_target !== '' ? Number(b.monthly_target) : null
+        const ids = [b?.key, b?.code, b?.name].filter((x) => x != null && String(x).trim() !== '').map((x) => String(x).trim())
+        if (!ids.length) ids.push(String(branchRef))
+
+        const rows = await q(
+          `
+          LET sumPersonal = FIRST(
+            FOR u IN users
+              FILTER u.is_active == true
+                AND u.personal_monthly_target != null
+                AND u.personal_monthly_target != ""
+                AND (
+                  (u.branch_code != null AND TO_STRING(u.branch_code) IN @ids)
+                  OR (u.branch != null AND TO_STRING(u.branch) IN @ids)
+                )
+              COLLECT AGGREGATE total = SUM(TO_NUMBER(u.personal_monthly_target))
+              RETURN total
+          )
+          LET unsetCount = FIRST(
+            FOR u IN users
+              FILTER u.is_active == true
+                AND (u.personal_monthly_target == null OR u.personal_monthly_target == "")
+                AND (
+                  (u.branch_code != null AND TO_STRING(u.branch_code) IN @ids)
+                  OR (u.branch != null AND TO_STRING(u.branch) IN @ids)
+                )
+              COLLECT AGGREGATE c = LENGTH(1)
+              RETURN c
+          )
+          RETURN { sumPersonal: sumPersonal || 0, unsetCount: unsetCount || 0 }
+        `,
+          { ids }
+        )
+        const sumPersonal = Number(rows?.[0]?.sumPersonal || 0)
+        const unsetCount = Number(rows?.[0]?.unsetCount || 0)
+        const remainingPool = monthly != null && Number.isFinite(monthly) ? (monthly - sumPersonal) : null
+        const allocated = remainingPool != null && unsetCount > 0 ? remainingPool / unsetCount : null
+        perBranch.set(String(branchRef).trim(), {
+          branch_monthly_target: monthly,
+          sum_personal_targets: sumPersonal,
+          unset_count: unsetCount,
+          remaining_pool: remainingPool,
+          allocated_target: allocated
+        })
+      })
+    )
+
+    const finalRows = employeeStats.map((r) => {
+      const ref = r?.user_branch_ref != null ? String(r.user_branch_ref).trim() : ''
+      const meta = ref ? perBranch.get(ref) : null
+      const personal = r?.personal_target != null ? Number(r.personal_target) : null
+      const allocated = meta?.allocated_target != null ? Number(meta.allocated_target) : null
+      const effective = personal != null ? personal : allocated
+      return {
+        ...r,
+        ...(meta ? meta : {}),
+        allocated_target: allocated,
+        effective_target: effective
+      }
+    })
+
+    res.json(finalRows)
   } catch (error) {
     console.error('Error fetching employee performance:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
