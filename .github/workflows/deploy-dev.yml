@@ -45,14 +45,23 @@ jobs:
             cd \"/home/ubuntu/ECS0-Backend\"
             git fetch origin
             git checkout Dev
-            git pull --ff-only origin Dev
+            # Keep server deploys reproducible even if someone edited files on the box.
+            git reset --hard origin/Dev
+            git clean -fd
             npm i
 
             echo \"--- Frontend: pull + npm i\"
             cd \"/home/ubuntu/ECS0\"
+            # Preserve server-specific env while still forcing code to match origin/Dev.
+            ENV_BAK=\"/tmp/ecs0_frontend_env_$$.bak\"
+            if [ -f .env ]; then cp .env \"$ENV_BAK\"; fi
+
             git fetch origin
             git checkout Dev
-            git pull --ff-only origin Dev
+            git reset --hard origin/Dev
+            git clean -fd
+
+            if [ -f \"$ENV_BAK\" ]; then mv \"$ENV_BAK\" .env; fi
             npm i
 
             echo \"--- PM2 restart\"
