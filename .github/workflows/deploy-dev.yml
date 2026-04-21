@@ -38,35 +38,35 @@ jobs:
           # Validate key can be parsed (fails fast with clear error)
           ssh-keygen -y -f ~/.ssh/dev_deploy_key >/dev/null
 
-          ssh -i ~/.ssh/dev_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no "$USERNAME@$HOST" "bash -lc '
-            set -euo pipefail
+          ssh -i ~/.ssh/dev_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no "$USERNAME@$HOST" bash -s <<'EOF'
+          set -euo pipefail
 
-            echo \"--- Backend: pull + npm i\"
-            cd \"/home/ubuntu/ECS0-Backend\"
-            git fetch origin
-            git checkout Dev
-            # Keep server deploys reproducible even if someone edited files on the box.
-            git reset --hard origin/Dev
-            git clean -fd
-            npm i
+          echo "--- Backend: pull + npm i"
+          cd "/home/ubuntu/ECS0-Backend"
+          git fetch origin
+          git checkout Dev
+          # Keep server deploys reproducible even if someone edited files on the box.
+          git reset --hard origin/Dev
+          git clean -fd
+          npm i
 
-            echo \"--- Frontend: pull + npm i\"
-            cd \"/home/ubuntu/ECS0\"
-            # Preserve server-specific env while still forcing code to match origin/Dev.
-            ENV_BAK=\"/tmp/ecs0_frontend_env_$$.bak\"
-            if [ -f .env ]; then cp .env \"$ENV_BAK\"; fi
+          echo "--- Frontend: pull + npm i"
+          cd "/home/ubuntu/ECS0"
+          # Preserve server-specific env while still forcing code to match origin/Dev.
+          ENV_BAK="/tmp/ecs0_frontend_env_$$.bak"
+          if [ -f .env ]; then cp .env "$ENV_BAK"; fi
 
-            git fetch origin
-            git checkout Dev
-            git reset --hard origin/Dev
-            git clean -fd
+          git fetch origin
+          git checkout Dev
+          git reset --hard origin/Dev
+          git clean -fd
 
-            if [ -f \"$ENV_BAK\" ]; then mv \"$ENV_BAK\" .env; fi
-            npm i
+          if [ -f "$ENV_BAK" ]; then mv "$ENV_BAK" .env; fi
+          npm i
 
-            echo \"--- PM2 restart\"
-            pm2 restart 0
-            pm2 restart 1
-            pm2 save || true
-          '"
+          echo "--- PM2 restart"
+          pm2 restart 0
+          pm2 restart 1
+          pm2 save || true
+          EOF
 
