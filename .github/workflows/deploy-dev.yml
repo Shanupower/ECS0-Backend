@@ -1,0 +1,63 @@
+name: Deploy to Dev (EC2)
+
+on:
+  push:
+    branches: [ Dev ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy frontend + backend to Dev EC2 (SSH)
+        env:
+          HOST: ${{ secrets.DEV_EC2_HOST }}
+          USERNAME: ${{ secrets.DEV_EC2_USER }}
+          KEY: ${{ secrets.DEV_EC2_SSH_KEY }}
+          KEY_B64: ${{ secrets.DEV_EC2_SSH_KEY_B64 }}
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y openssh-client
+
+          mkdir -p ~/.ssh
+          # Prefer base64 secret to avoid newline/formatting issues.
+          if [ -n "${KEY_B64:-}" ]; then
+            printf '%s' "$KEY_B64" | tr -d '\r\n ' | base64 -d > ~/.ssh/dev_deploy_key
+          else
+            printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/dev_deploy_key
+          fi
+          chmod 600 ~/.ssh/dev_deploy_key
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+          # Validate key can be parsed (fails fast with clear error)
+          ssh-keygen -y -f ~/.ssh/dev_deploy_key >/dev/null
+
+          ssh -i ~/.ssh/dev_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no "$USERNAME@$HOST" "bash -lc '
+            set -euo pipefail
+
+            echo \"--- Backend: pull + npm i\"
+            cd \"/home/ubuntu/ECS0-Backend\"
+            git fetch origin
+            git checkout Dev
+            git pull --ff-only origin Dev
+            npm i
+
+            echo \"--- Frontend: pull + npm i\"
+            cd \"/home/ubuntu/ECS0\"
+            git fetch origin
+            git checkout Dev
+            git pull --ff-only origin Dev
+            npm i
+
+            echo \"--- PM2 restart\"
+            pm2 restart 0
+            pm2 restart 1
+            pm2 save || true
+          '"
+
