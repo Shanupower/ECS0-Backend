@@ -11,6 +11,7 @@ import {
   applyMfTxnTypeOrModeFilter
 } from '../utils/receipt-filters.js'
 import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { publishEvent } from '../services/task-events.js'
 
 function normalizeTenureUnit(u) {
   const v = String(u || '').trim().toLowerCase()
@@ -811,6 +812,21 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       // Don't fail the receipt creation if PDF generation fails
     }
 
+    publishEvent({
+      type: 'receipt.created',
+      payload: {
+        receipt_id: receiptId,
+        customer_id: receiptDoc.customer_id || null,
+        customer_name: receiptDoc.customer_name || null,
+        category: receiptDoc.category || null,
+        amount: calculations?.total || calculations?.amount || null,
+        branch: receiptDoc.branch || null,
+        branch_code: receiptDoc.branch_code || null
+      },
+      actor: { id: req.user.sub, emp_code: req.user.emp_code },
+      branch: receiptDoc.branch || null
+    })
+
     res.status(201).json({ 
       id: receiptId,
       files: uploadedFiles
@@ -1322,6 +1338,10 @@ router.get('/', requireAuth, async (req, res) => {
         filterConditions.push('receipt.status == @status')
       }
       bindVars.status = status
+    } else if (req.query.includePending === '0') {
+      // Global "Include pending" toggle is OFF → exclude pending / null-status receipts
+      // so listings stay consistent with KPIs/charts that also exclude them.
+      filterConditions.push('receipt.status == "Completed"')
     }
     applyMfTxnTypeOrModeFilter(filterConditions, bindVars, txn_type, mode)
     if (issuer) {

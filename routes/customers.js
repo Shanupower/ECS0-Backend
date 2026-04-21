@@ -5,6 +5,7 @@ import { q, getCollection, getUserBranch, normalizeBranchName, getCanonicalBranc
 import { requireAuth } from '../middleware/auth.js'
 import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
 import { validatePAN, validateEmail, validateMobile, validateAadhar, validatePIN, validateRequired, validateMinorsArray } from '../utils/validators.js'
+import { publishEvent } from '../services/task-events.js'
 
 const router = express.Router()
 
@@ -760,45 +761,99 @@ router.get('/', requireAuth, async (req, res) => {
 })
 
 // Portfolio review: list customers with last_reviewed_at / next_review_due and optional filter
+// Resolve admin branch-code scope against customer.branches[] by mapping branch_code → canonical _key.
+async function resolveAdminBranchKeys(branchCodeParam) {
+  if (!branchCodeParam) return null
+  const str = String(branchCodeParam).trim()
+  if (!str) return null
+  const rows = await q(`
+    FOR b IN branches
+      FILTER b._key == @str
+         OR (b.branch_code != null && LOWER(TRIM(TO_STRING(b.branch_code))) == LOWER(@str))
+         OR (b.branch_name != null && LOWER(TRIM(TO_STRING(b.branch_name))) == LOWER(@str))
+      LIMIT 1
+      RETURN { _key: b._key, code: b.branch_code, name: b.branch_name }
+  `, { str })
+  if (!rows.length) return { keys: [], names: [] }
+  const r = rows[0]
+  const keys = [r._key].filter(Boolean).map(String)
+  const names = [r.name, r.code, str].filter(Boolean).map(x => String(x))
+  return { keys, names }
+}
+
 router.get('/portfolio-review', requireAuth, async (req, res) => {
   try {
-    const { review_filter = 'all', page = '1', size = '50', search } = req.query
+    const { review_filter = 'all', page = '1', size = '50', search, branch_code } = req.query
     const branchFilter = await getBranchFilterForCustomer(req.user.sub)
 
     const bindVars = { ...branchFilter.bindVars }
-    const conditions = []
+    const baseConditions = []
     if (branchFilter.branchCondition) {
-      conditions.push(`(${branchFilter.branchCondition})`)
+      baseConditions.push(`(${branchFilter.branchCondition})`)
+    }
+
+    // Admin may scope by ?branch_code=CHEMBUR against customer.branches[] / relationship_manager.
+    if (branchFilter.isAdmin) {
+      const adminScope = await resolveAdminBranchKeys(branch_code)
+      if (adminScope) {
+        bindVars.adminBranchKeys = adminScope.keys
+        bindVars.adminBranchNames = adminScope.names
+        baseConditions.push(`(
+          (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && LENGTH(INTERSECTION(customer.branches, @adminBranchKeys)) > 0)
+          ||
+          ( (customer.branches == null OR !IS_ARRAY(customer.branches) OR LENGTH(customer.branches) == 0) &&
+            (
+              (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @adminBranchNames)) > 0)
+              || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager IN @adminBranchNames)
+            )
+          )
+        )`)
+      }
     }
 
     const searchTerm = typeof search === 'string' ? search.trim() : ''
     if (searchTerm.length > 0) {
       const searchLower = searchTerm.toLowerCase()
       bindVars.searchLower = searchLower
-      conditions.push(`(
+      baseConditions.push(`(
         (customer.name != null && CONTAINS(LOWER(TO_STRING(customer.name)), @searchLower)) ||
         (customer.mobile != null && CONTAINS(LOWER(TO_STRING(customer.mobile)), @searchLower)) ||
-        (customer.email != null && CONTAINS(LOWER(TO_STRING(customer.email)), @searchLower))
+        (customer.email != null && CONTAINS(LOWER(TO_STRING(customer.email)), @searchLower)) ||
+        (customer.pan != null && CONTAINS(LOWER(TO_STRING(customer.pan)), @searchLower))
       )`)
     }
 
     const today = new Date().toISOString().slice(0, 10)
+    const endOfWeekISO = (() => {
+      const d = new Date()
+      const end = new Date(d)
+      end.setDate(d.getDate() + (7 - d.getDay()))
+      return end.toISOString().slice(0, 10)
+    })()
+    const endOfMonthISO = (() => {
+      const d = new Date()
+      const end = new Date(d.getFullYear(), d.getMonth() + 1, 0)
+      return end.toISOString().slice(0, 10)
+    })()
+
+    const filterConditions = [...baseConditions]
     if (review_filter === 'overdue') {
       bindVars.today = today
-      conditions.push('customer.next_review_due != null && customer.next_review_due < @today')
+      filterConditions.push('customer.next_review_due != null && customer.next_review_due < @today')
     } else if (review_filter === 'due_today') {
       bindVars.today = today
-      conditions.push('customer.next_review_due == @today')
+      filterConditions.push('customer.next_review_due == @today')
     } else if (review_filter === 'due_this_week') {
-      const d = new Date()
-      const endOfWeek = new Date(d)
-      endOfWeek.setDate(d.getDate() + (7 - d.getDay()))
       bindVars.today = today
-      bindVars.endWeek = endOfWeek.toISOString().slice(0, 10)
-      conditions.push('customer.next_review_due != null && customer.next_review_due >= @today && customer.next_review_due <= @endWeek')
+      bindVars.endWeek = endOfWeekISO
+      filterConditions.push('customer.next_review_due != null && customer.next_review_due >= @today && customer.next_review_due <= @endWeek')
+    } else if (review_filter === 'due_this_month') {
+      bindVars.today = today
+      bindVars.endMonth = endOfMonthISO
+      filterConditions.push('customer.next_review_due != null && customer.next_review_due >= @today && customer.next_review_due <= @endMonth')
     }
 
-    const filterClause = conditions.length > 0 ? `FILTER ${conditions.join(' AND ')}` : ''
+    const filterClause = filterConditions.length > 0 ? `FILTER ${filterConditions.join(' AND ')}` : ''
 
     const p = Math.max(1, parseInt(page, 10) || 1)
     const s = Math.min(200, Math.max(1, parseInt(size, 10) || 50))
@@ -818,9 +873,12 @@ router.get('/portfolio-review', requireAuth, async (req, res) => {
         relationship_manager: customer.relationship_manager,
         relationship_manager_display: customer.relationship_manager_display,
         branches: customer.branches,
+        review_tier: customer.review_tier || null,
+        review_cadence_months: customer.review_cadence_months != null ? customer.review_cadence_months : null,
         last_reviewed_at: customer.last_reviewed_at || null,
         last_reviewed_by_id: customer.last_reviewed_by_id || null,
         last_reviewed_by_emp_code: customer.last_reviewed_by_emp_code || null,
+        last_reviewed_by_name: customer.last_reviewed_by_name || null,
         next_review_due: customer.next_review_due || null
       }
     `
@@ -830,16 +888,252 @@ router.get('/portfolio-review', requireAuth, async (req, res) => {
       COLLECT WITH COUNT INTO total
       RETURN total
     `
-    const countBindVars = { ...bindVars }
 
-    const [items, totalResult] = await Promise.all([
+    // Bucket counts (use the shared base scope ignoring the active review_filter).
+    const baseClause = baseConditions.length > 0 ? `FILTER ${baseConditions.join(' AND ')}` : ''
+    const countsBind = { ...bindVars, today, endWeek: endOfWeekISO, endMonth: endOfMonthISO }
+    const countsQuery = `
+      LET base = (
+        FOR customer IN customers
+        ${baseClause}
+        RETURN customer.next_review_due
+      )
+      LET overdue = LENGTH(base[* FILTER CURRENT != null && CURRENT < @today])
+      LET due_today = LENGTH(base[* FILTER CURRENT == @today])
+      LET due_this_week = LENGTH(base[* FILTER CURRENT != null && CURRENT >= @today && CURRENT <= @endWeek])
+      LET due_this_month = LENGTH(base[* FILTER CURRENT != null && CURRENT >= @today && CURRENT <= @endMonth])
+      LET all_count = LENGTH(base)
+      RETURN { overdue, due_today, due_this_week, due_this_month, "all": all_count }
+    `
+
+    const [items, totalResult, countsResult] = await Promise.all([
       q(query, bindVars),
-      q(countQuery, countBindVars)
+      q(countQuery, bindVars),
+      q(countsQuery, countsBind)
     ])
     const total = totalResult[0] || 0
-    res.json({ items, total, page: p, size: s })
+    const counts = countsResult[0] || { overdue: 0, due_today: 0, due_this_week: 0, due_this_month: 0, all: 0 }
+    res.json({ items, total, page: p, size: s, counts })
   } catch (error) {
     console.error('Error fetching portfolio review:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// GET /api/customers/:id/review-history — chronological review events for a customer
+router.get('/:id/review-history', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    if (!id || Number.isNaN(id)) return res.status(400).json({ error: 'invalid_customer_id' })
+    const customers = await q(`FOR c IN customers FILTER c.investor_id == @id LIMIT 1 RETURN c`, { id })
+    if (!customers.length) return res.status(404).json({ error: 'not_found' })
+    const customer = customers[0]
+    const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+    if (!canAccess) return res.status(403).json({ error: 'forbidden' })
+    const db = (await import('../config/database.js')).default
+    const col = db.collection('portfolio_review_events')
+    if (!(await col.exists())) {
+      return res.json({ items: [] })
+    }
+    const rows = await q(`
+      FOR e IN portfolio_review_events
+      FILTER e.investor_id == @id
+      SORT e.reviewed_at DESC
+      LIMIT 200
+      RETURN e
+    `, { id })
+    res.json({ items: rows })
+  } catch (error) {
+    console.error('Error fetching review history:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// Helper — add N months to a yyyy-mm-dd string.
+function addMonthsISO(ymd, months) {
+  const [y, m, d] = String(ymd).slice(0, 10).split('-').map(Number)
+  const base = new Date(Date.UTC(y, m - 1, d))
+  base.setUTCMonth(base.getUTCMonth() + Number(months || 0))
+  return base.toISOString().slice(0, 10)
+}
+
+async function ensureReviewEventsCollection() {
+  const db = (await import('../config/database.js')).default
+  const col = db.collection('portfolio_review_events')
+  if (!(await col.exists())) await col.create()
+  return getCollection('portfolio_review_events')
+}
+
+async function writeReviewEvent({ customer, reviewerUser, note, nextReviewDue }) {
+  try {
+    const col = await ensureReviewEventsCollection()
+    const doc = {
+      investor_id: customer.investor_id,
+      customer_key: customer._key,
+      reviewed_at: new Date().toISOString(),
+      reviewer_id: reviewerUser.sub || null,
+      reviewer_emp_code: reviewerUser.emp_code || null,
+      reviewer_name: reviewerUser.name || null,
+      note: note || null,
+      next_review_due: nextReviewDue || null,
+      branch_code: Array.isArray(customer.branches) && customer.branches[0] ? customer.branches[0]
+        : (Array.isArray(customer.relationship_manager) ? customer.relationship_manager[0] : customer.relationship_manager) || null
+    }
+    await col.save(doc)
+  } catch (err) {
+    console.error('writeReviewEvent failed:', err)
+  }
+}
+
+// POST /api/customers/portfolio-review/bulk-update
+// Actions: 'mark_reviewed' (uses each customer's cadence; falls back to config A=12/B=6/C=3/default=12)
+//          'push_next_review' (months required)
+//          'reassign' (admin only, to_user_id required)
+router.post('/portfolio-review/bulk-update', requireAuth, async (req, res) => {
+  try {
+    const { investor_ids = [], action, months, to_user_id, note } = req.body || {}
+    if (!Array.isArray(investor_ids) || investor_ids.length === 0) {
+      return res.status(400).json({ error: 'validation_error', detail: 'investor_ids required' })
+    }
+    if (!['mark_reviewed', 'push_next_review', 'reassign'].includes(action)) {
+      return res.status(400).json({ error: 'validation_error', detail: 'Unknown action' })
+    }
+    if (action === 'push_next_review' && (!months || Number(months) <= 0)) {
+      return res.status(400).json({ error: 'validation_error', detail: 'months > 0 required for push_next_review' })
+    }
+    if (action === 'reassign' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'forbidden', detail: 'Only admins can reassign' })
+    }
+
+    const ids = investor_ids.map(x => Number(x)).filter(n => Number.isFinite(n))
+    const customers = await q(`
+      FOR c IN customers FILTER c.investor_id IN @ids RETURN c
+    `, { ids })
+
+    // Load app config for default tier cadences.
+    let tierCadence = { A: 12, B: 6, C: 3 }
+    try {
+      const { getAppConfig } = await import('./app-config.js')
+      const cfg = await getAppConfig()
+      if (cfg && cfg.review_tier_cadence_months) tierCadence = { ...tierCadence, ...cfg.review_tier_cadence_months }
+    } catch {}
+
+    const today = new Date().toISOString().slice(0, 10)
+    const nowIso = new Date().toISOString()
+    const results = []
+    const errors = []
+
+    for (const customer of customers) {
+      try {
+        const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+        if (!canAccess) {
+          errors.push({ investor_id: customer.investor_id, reason: 'forbidden' })
+          continue
+        }
+
+        if (action === 'mark_reviewed') {
+          const cadence = Number(customer.review_cadence_months || tierCadence[customer.review_tier] || tierCadence.A || 12)
+          const nextDue = addMonthsISO(today, cadence)
+          const patch = {
+            last_reviewed_at: today,
+            last_reviewed_by_id: req.user.sub || null,
+            last_reviewed_by_emp_code: req.user.emp_code || null,
+            last_reviewed_by_name: req.user.name || null,
+            next_review_due: nextDue,
+            updated_at: nowIso
+          }
+          await q(`
+            FOR c IN customers FILTER c.investor_id == @id UPDATE c WITH @patch IN customers
+          `, { id: customer.investor_id, patch })
+          await writeReviewEvent({ customer, reviewerUser: req.user, note, nextReviewDue: nextDue })
+          results.push({ investor_id: customer.investor_id, next_review_due: nextDue })
+          publishEvent({
+            type: 'portfolio_review.completed',
+            payload: { customer_id: customer._key, investor_id: customer.investor_id, next_review_due: nextDue, tier: customer.review_tier || null },
+            actor: { id: req.user.sub, emp_code: req.user.emp_code },
+            branch: Array.isArray(customer.branches) && customer.branches.length ? customer.branches[0] : null
+          })
+        } else if (action === 'push_next_review') {
+          // Push by N months from today OR from existing next_review_due if present.
+          const base = customer.next_review_due || today
+          const nextDue = addMonthsISO(base, Number(months))
+          await q(`
+            FOR c IN customers FILTER c.investor_id == @id UPDATE c WITH @patch IN customers
+          `, { id: customer.investor_id, patch: { next_review_due: nextDue, updated_at: nowIso } })
+          results.push({ investor_id: customer.investor_id, next_review_due: nextDue })
+        } else if (action === 'reassign') {
+          // Resolve the user and branch assignment, then update customer.branches / relationship_manager.
+          const users = await q(`FOR u IN users FILTER u._key == @aid OR u.emp_code == @aid LIMIT 1 RETURN u`, { aid: String(to_user_id).trim() })
+          if (!users.length) {
+            errors.push({ investor_id: customer.investor_id, reason: 'user_not_found' })
+            continue
+          }
+          const u = users[0]
+          const patch = {
+            relationship_manager_display: u.name || u.emp_code || null,
+            assigned_rm_emp_code: u.emp_code || null,
+            assigned_rm_user_id: u._key || null,
+            updated_at: nowIso
+          }
+          await q(`FOR c IN customers FILTER c.investor_id == @id UPDATE c WITH @patch IN customers`, { id: customer.investor_id, patch })
+          results.push({ investor_id: customer.investor_id })
+        }
+      } catch (err) {
+        console.error('bulk-update row error:', err)
+        errors.push({ investor_id: customer.investor_id, reason: err.message || 'error' })
+      }
+    }
+
+    res.json({ updated: results.length, results, errors })
+  } catch (error) {
+    console.error('Error in bulk-update:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// Timeline: unified feed of tasks + receipts + review events + lead activities for a customer.
+router.get('/:id/timeline', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+    if (!id || isNaN(Number(id))) return res.status(400).json({ error: 'invalid_customer_id' })
+    const rows = await q('FOR c IN customers FILTER c.investor_id == @id LIMIT 1 RETURN c', { id: Number(id) })
+    if (!rows.length) return res.status(404).json({ error: 'not_found' })
+    const customer = rows[0]
+
+    const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+    if (!canAccess) return res.status(403).json({ error: 'forbidden' })
+
+    const limit = Math.min(200, Math.max(10, parseInt(req.query.limit, 10) || 100))
+
+    const tasks = await q(`
+      FOR t IN tasks FILTER t.customer_id == @cid
+        SORT t.created_at DESC
+        LIMIT @l
+        RETURN { _key: t._key, kind: 'task', title: t.title, status: t.status, priority: t.priority, assignee_emp_code: t.assignee_emp_code, due_date: t.due_date, completed_at: t.completed_at, at: t.updated_at || t.created_at }
+    `, { cid: customer._key, l: limit }).catch(() => [])
+
+    const receipts = await q(`
+      FOR r IN receipts FILTER r.customer_id == @cid
+        SORT r.created_at DESC
+        LIMIT @l
+        RETURN { _key: r._key, kind: 'receipt', category: r.category || r.transaction.category, product: r.product_details, amount: r.calculations.total || r.calculations.amount, receipt_number: r.receipt_number, at: r.created_at }
+    `, { cid: customer._key, l: limit }).catch(() => [])
+
+    const reviews = await q(`
+      FOR e IN customer_review_events FILTER e.customer_key == @cid
+        SORT e.created_at DESC
+        LIMIT @l
+        RETURN { _key: e._key, kind: 'review', next_review_due: e.next_review_due, note: e.note, reviewer_name: e.reviewer_name, at: e.created_at }
+    `, { cid: customer._key, l: limit }).catch(() => [])
+
+    const feed = [...tasks, ...receipts, ...reviews]
+      .filter(x => x && x.at)
+      .sort((a, b) => (a.at < b.at ? 1 : -1))
+      .slice(0, limit)
+
+    res.json({ items: feed, counts: { tasks: tasks.length, receipts: receipts.length, reviews: reviews.length } })
+  } catch (error) {
+    console.error('customer timeline error:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })
@@ -1208,6 +1502,20 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     }
 
     const result = await getCollection('customers').save(customerDoc)
+
+    publishEvent({
+      type: 'customer.created',
+      payload: {
+        customer_id: result._key,
+        investor_id: nextId,
+        name: customerDoc.full_name || customerDoc.name || null,
+        branches,
+        branch: Array.isArray(branches) && branches.length ? branches[0] : null
+      },
+      actor: { id: req.user.sub, emp_code: req.user.emp_code },
+      branch: Array.isArray(branches) && branches.length ? branches[0] : null
+    })
+
     res.status(201).json({ 
       investor_id: nextId,
       relationship_manager: relationshipManager,
@@ -1255,7 +1563,10 @@ router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
       relationship_manager, // Backward compatibility: single branch
       minors, // Array of minors (for update)
       last_reviewed_at,
-      next_review_due
+      next_review_due,
+      review_tier,
+      review_cadence_months,
+      review_note
     } = req.body || {}
 
     // Check if customer exists and get full customer data
@@ -1409,8 +1720,27 @@ router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
       // Record who marked the portfolio review as done
       updates.last_reviewed_by_id = req.user.sub || null
       updates.last_reviewed_by_emp_code = req.user.emp_code || null
+      updates.last_reviewed_by_name = req.user.name || null
     }
     if (next_review_due !== undefined) updates.next_review_due = next_review_due || null
+    if (review_tier !== undefined) {
+      const t = review_tier ? String(review_tier).trim().toUpperCase() : null
+      if (t && !['A', 'B', 'C'].includes(t)) {
+        return res.status(400).json({ error: 'validation_error', detail: 'review_tier must be A, B, or C' })
+      }
+      updates.review_tier = t || null
+    }
+    if (review_cadence_months !== undefined) {
+      if (review_cadence_months === null || review_cadence_months === '') {
+        updates.review_cadence_months = null
+      } else {
+        const n = Number(review_cadence_months)
+        if (!Number.isFinite(n) || n <= 0 || n > 60) {
+          return res.status(400).json({ error: 'validation_error', detail: 'review_cadence_months must be 1–60' })
+        }
+        updates.review_cadence_months = n
+      }
+    }
 
     // Handle branch updates - support both 'branches' array (canonical keys) and 'relationship_manager' for backward compatibility
     if (branches !== undefined || relationship_manager !== undefined) {
@@ -1615,6 +1945,17 @@ router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
       return res.status(500).json({ 
         error: 'update_failed', 
         detail: 'Customer update query did not affect any records' 
+      })
+    }
+
+    // When a single-customer mark-reviewed happens here, log a review event so history stays in sync.
+    if (last_reviewed_at !== undefined && last_reviewed_at) {
+      const updated = updateResult[0]
+      await writeReviewEvent({
+        customer: updated,
+        reviewerUser: req.user,
+        note: review_note || null,
+        nextReviewDue: updates.next_review_due || null
       })
     }
 

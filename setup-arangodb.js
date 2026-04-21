@@ -105,6 +105,12 @@ async function setupDatabase() {
         options: {
           keyOptions: { type: 'traditional' }
         }
+      },
+      {
+        name: 'branch_audit_events',
+        options: {
+          keyOptions: { type: 'traditional' }
+        }
       }
     ]
     
@@ -218,6 +224,16 @@ async function setupDatabase() {
         collection: 'receipts',
         type: 'persistent',
         fields: ['date']
+      },
+      {
+        collection: 'branch_audit_events',
+        type: 'persistent',
+        fields: ['branch_code']
+      },
+      {
+        collection: 'branch_audit_events',
+        type: 'persistent',
+        fields: ['created_at']
       },
       {
         collection: 'receipts',
@@ -403,7 +419,17 @@ async function setupDatabase() {
     } catch (error) {
       console.warn('Could not add schema validation to fd_issuers:', error.message)
     }
-    
+
+    // Tasks redesign: ensure extended collections + indexes. Lives in its own module so
+    // the tasks routes can also call it lazily at request time (see config/tasks-collections.js).
+    try {
+      const { ensureTaskSetup } = await import('./config/tasks-collections.js')
+      await ensureTaskSetup()
+      console.log('Tasks collections + indexes ensured')
+    } catch (error) {
+      console.warn('Could not ensure tasks collections/indexes:', error.message)
+    }
+
     console.log('ArangoDB setup completed successfully!')
     
   } catch (error) {
