@@ -43,11 +43,17 @@ jobs:
 
           echo "--- Backend: pull + npm i"
           cd "/home/ubuntu/ECS0-Backend"
+          # Preserve server-specific env while still forcing code to match origin/Dev.
+          ENV_BAK_BACKEND="/tmp/ecs0_backend_env_$$.bak"
+          if [ -f .env ]; then cp .env "$ENV_BAK_BACKEND"; fi
+
           git fetch origin
           git checkout Dev
           # Keep server deploys reproducible even if someone edited files on the box.
           git reset --hard origin/Dev
           git clean -fd
+
+          if [ -f "$ENV_BAK_BACKEND" ]; then mv "$ENV_BAK_BACKEND" .env; fi
           npm i
 
           echo "--- Frontend: pull + npm i"
