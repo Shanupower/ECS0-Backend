@@ -72,7 +72,10 @@ jobs:
 
           echo "--- PM2 restart"
           pm2 restart 0
-          pm2 restart 1
+
+          echo "--- PM2 restart backend (ensure production start, not --watch)"
+          pm2 delete "Dev-ECS-Backend" || true
+          pm2 start npm --name "Dev-ECS-Backend" --cwd "/home/ubuntu/ECS0-Backend" -- start
           pm2 save || true
 
           echo "--- Verify backend is serving locally"
