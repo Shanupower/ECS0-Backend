@@ -46,6 +46,15 @@ export const DEFAULT_APP_CONFIG = {
     { key: 'p2', label: 'Normal', color: 'slate'  },
     { key: 'p3', label: 'Low',    color: 'neutral'}
   ],
+  // -----------------------------------------------------------------
+  // Receipt-approval workflow (v2). Configures the dynamic, team-driven
+  // approval flow documented in docs/superpowers/specs/2026-04-22-...
+  // -----------------------------------------------------------------
+  receipt_intake_team_id: null,          // teams._key receiving freshly-submitted receipts
+  receipt_final_status_label: 'Completed',
+  feature_flags: {
+    receipts_approval_v2: false          // flipped on during Phase 4 cutover
+  },
   task_labels: [],        // [{ key, label, color }] - admin editable
   task_sla_tiers: [
     // Hours from created_at by which a task must reach a completed status.
@@ -186,6 +195,12 @@ function mergeDefaults(stored) {
     if (!Array.isArray(out[k])) out[k] = DEFAULT_APP_CONFIG[k]
   }
   if (!out.task_default_view) out.task_default_view = DEFAULT_APP_CONFIG.task_default_view
+  // Feature flags: union of defaults + stored, with stored taking precedence.
+  out.feature_flags = {
+    ...DEFAULT_APP_CONFIG.feature_flags,
+    ...((stored && stored.feature_flags && typeof stored.feature_flags === 'object') ? stored.feature_flags : {})
+  }
+  if (!out.receipt_final_status_label) out.receipt_final_status_label = DEFAULT_APP_CONFIG.receipt_final_status_label
   return out
 }
 
@@ -299,6 +314,27 @@ function validatePayload(patch) {
     if (!allowed.includes(patch.task_default_view)) errs.push(`task_default_view must be one of ${allowed.join('/')}`)
   }
 
+  // Receipt-approval workflow validation.
+  if (patch.receipt_intake_team_id !== undefined && patch.receipt_intake_team_id !== null) {
+    if (typeof patch.receipt_intake_team_id !== 'string' || !patch.receipt_intake_team_id.trim()) {
+      errs.push('receipt_intake_team_id must be a non-empty string (or null to unset)')
+    }
+  }
+  if (patch.receipt_final_status_label !== undefined) {
+    if (typeof patch.receipt_final_status_label !== 'string' || !patch.receipt_final_status_label.trim()) {
+      errs.push('receipt_final_status_label must be a non-empty string')
+    }
+  }
+  if (patch.feature_flags !== undefined) {
+    if (!patch.feature_flags || typeof patch.feature_flags !== 'object' || Array.isArray(patch.feature_flags)) {
+      errs.push('feature_flags must be an object')
+    } else {
+      for (const [k, v] of Object.entries(patch.feature_flags)) {
+        if (typeof v !== 'boolean') errs.push(`feature_flags.${k} must be boolean`)
+      }
+    }
+  }
+
   return errs
 }
 
@@ -309,6 +345,19 @@ router.put('/', requireAuth, requireRole('admin', 'manager'), async (req, res) =
     const body = req.body || {}
     const errs = validatePayload(body)
     if (errs.length) return res.status(400).json({ error: 'validation_error', detail: errs.join('; ') })
+
+    // If admin is setting the intake team, verify it exists and is active.
+    if (Object.prototype.hasOwnProperty.call(body, 'receipt_intake_team_id') && body.receipt_intake_team_id) {
+      const exists = await q(`
+        FOR t IN teams FILTER t._key == @k AND t.is_active != false LIMIT 1 RETURN 1
+      `, { k: String(body.receipt_intake_team_id) }).catch(() => [])
+      if (!exists.length) {
+        return res.status(400).json({
+          error: 'validation_error',
+          detail: 'receipt_intake_team_id must reference an active team'
+        })
+      }
+    }
 
     // Normalize + whitelist only known keys.
     const patch = {}
@@ -328,12 +377,29 @@ router.put('/', requireAuth, requireRole('admin', 'manager'), async (req, res) =
       'task_labels',
       'task_sla_tiers',
       'task_event_rules',
-      'task_default_view'
+      'task_default_view',
+      // Receipt-approval workflow
+      'receipt_intake_team_id',
+      'receipt_final_status_label',
+      'feature_flags'
     ])
     // Keys whose array values are arrays of objects — preserve shape instead of string-coercing.
     const objectArrayKeys = new Set(['task_statuses', 'task_priorities', 'task_labels', 'task_sla_tiers', 'task_event_rules'])
+    // String-scalar keys: keep as trimmed strings (never cast to Number).
+    const stringKeys = new Set(['task_default_view', 'receipt_intake_team_id', 'receipt_final_status_label'])
+    // Object keys whose values must be preserved verbatim (not coerced to Number).
+    const rawObjectKeys = new Set(['feature_flags'])
     for (const [k, v] of Object.entries(body)) {
       if (!allowKeys.has(k)) continue
+      if (stringKeys.has(k)) {
+        if (v === null) patch[k] = null
+        else if (typeof v === 'string') patch[k] = v.trim() || null
+        continue
+      }
+      if (rawObjectKeys.has(k)) {
+        if (v && typeof v === 'object' && !Array.isArray(v)) patch[k] = { ...v }
+        continue
+      }
       if (objectArrayKeys.has(k)) {
         if (Array.isArray(v)) patch[k] = v.filter(x => x && typeof x === 'object').map(x => ({ ...x }))
       } else if (Array.isArray(v)) {
@@ -344,9 +410,7 @@ router.put('/', requireAuth, requireRole('admin', 'manager'), async (req, res) =
         patch[k] = o
       } else if (typeof v === 'number') patch[k] = v
       else if (typeof v === 'string' && v.trim() !== '') {
-        // Numeric fields parse as numbers; string fields (task_default_view) stay strings.
-        if (k === 'task_default_view') patch[k] = v.trim()
-        else patch[k] = Number(v)
+        patch[k] = Number(v)
       }
     }
 

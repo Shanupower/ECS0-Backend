@@ -12,7 +12,9 @@ const DOC_COLLECTIONS = [
   'task_automations',
   'sla_breaches',
   'task_watchers',
-  'notifications'
+  'notifications',
+  // Receipt-approval workflow (v2). `teams` holds global approver groups.
+  'teams'
 ]
 
 const EDGE_COLLECTIONS = [
@@ -63,7 +65,19 @@ const INDEXES = [
 
   // notifications
   { collection: 'notifications', type: 'persistent', fields: ['user_id', 'read_at'] },
-  { collection: 'notifications', type: 'persistent', fields: ['created_at'] }
+  { collection: 'notifications', type: 'persistent', fields: ['created_at'] },
+
+  // Receipt-approval workflow additions.
+  // teams: lookup by active name, by lead, and by member (array index).
+  { collection: 'teams', type: 'persistent', fields: ['name'], unique: true },
+  { collection: 'teams', type: 'persistent', fields: ['is_active'] },
+  { collection: 'teams', type: 'persistent', fields: ['lead_user_id'] },
+  { collection: 'teams', type: 'persistent', fields: ['member_ids[*]'] },
+
+  // Approval tasks: filter by kind + team_id + cycle so "my team's pending approvals" is fast.
+  { collection: 'tasks', type: 'persistent', fields: ['kind'], sparse: true },
+  { collection: 'tasks', type: 'persistent', fields: ['team_id'], sparse: true },
+  { collection: 'tasks', type: 'persistent', fields: ['approval_cycle_id'], sparse: true }
 ]
 
 async function createIfMissing(name, isEdge = false) {

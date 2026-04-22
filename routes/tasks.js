@@ -739,6 +739,20 @@ router.patch('/:id', requireAuth, async (req, res) => {
     if (!access.ok) return res.status(access.code).json({ error: access.code === 404 ? 'not_found' : 'forbidden', detail: access.detail })
 
     const patch = pick(req.body || {}, [...TASK_INPUT_WHITELIST, 'archived', 'archived_at'])
+
+    // Receipt-approval tasks are managed by services/receipt-stage-engine.js.
+    // Block any manual status/assignee change; comments and watchers still flow through the normal endpoints.
+    if (access.task.kind === 'receipt_approval') {
+      const forbiddenFields = ['status', 'assignee_id', 'assignee_emp_code', 'completed_at']
+      const touched = forbiddenFields.filter(k => Object.prototype.hasOwnProperty.call(patch, k))
+      if (touched.length) {
+        return res.status(409).json({
+          error: 'use_receipt_approval_api',
+          detail: `Use POST /api/receipts/:id/{route|complete|reject} — direct task updates (${touched.join(', ')}) are not allowed on approval tasks`
+        })
+      }
+    }
+
     const applied = await applyPatch(access.task, patch, req.user, statusKeys, priorityKeys)
     if (applied.error) return res.status(applied.status || 400).json({ error: applied.error })
 
@@ -792,6 +806,12 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     for (const id of ids) {
       const access = await ensureCanAccess(id, req)
       if (!access.ok) { results.skipped++; results.errors.push({ id, error: access.detail }); continue }
+      if (access.task.kind === 'receipt_approval') {
+        const forbiddenFields = ['status', 'assignee_id', 'assignee_emp_code', 'completed_at']
+        if (forbiddenFields.some(k => Object.prototype.hasOwnProperty.call(patch, k))) {
+          results.skipped++; results.errors.push({ id, error: 'use_receipt_approval_api' }); continue
+        }
+      }
       const applied = await applyPatch(access.task, patch, req.user, statusKeys, priorityKeys)
       if (applied.error) { results.skipped++; results.errors.push({ id, error: applied.error }); continue }
       await col.update(id, applied.updates)
@@ -817,6 +837,12 @@ router.delete('/:id', requireAuth, async (req, res) => {
     const access = await ensureCanAccess(req.params.id, req)
     if (!access.ok) return res.status(access.code).json({ error: access.code === 404 ? 'not_found' : 'forbidden', detail: access.detail })
     const task = access.task
+    if (task.kind === 'receipt_approval') {
+      return res.status(409).json({
+        error: 'use_receipt_approval_api',
+        detail: 'Approval tasks cannot be deleted directly; use POST /api/receipts/:id/reject or admin override'
+      })
+    }
     const isAssigner = task.assigned_by_id === req.user.sub
     if (!['admin', 'manager'].includes(req.user.role) && !isAssigner) {
       return res.status(403).json({ error: 'forbidden', detail: 'Only assigner, admin, or manager can delete' })
