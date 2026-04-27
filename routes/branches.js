@@ -436,7 +436,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
 router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const { branchCode } = req.params
-    const { branch_name, branch_type, address, phone, email, monthly_target } = req.body
+    const { branch_name, branch_type, address, phone, email, monthly_target, is_active } = req.body
 
     // Validate email if provided
     if (email !== undefined && email !== null && email !== '') {
@@ -476,6 +476,9 @@ router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) =
     if (monthly_target !== undefined) {
       updateData.monthly_target =
         monthly_target === '' || monthly_target === null ? null : Number(monthly_target)
+    }
+    if (typeof is_active === 'boolean') {
+      updateData.is_active = is_active
     }
 
     // Fetch existing branch to detect name changes
