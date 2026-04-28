@@ -757,13 +757,17 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
 
     // Build structured receipt document — nested tree only; stats/list use product.category, transaction.amount, etc.
     const receiptEmpCode = d.empCode || d.emp_code || req.user.emp_code || null
+    const appCfgCreate = await getAppConfig()
+    const approvalV2Create = !!(appCfgCreate?.feature_flags?.receipts_approval_v2)
+
     const receiptDoc = {
       // ============================================
       // CORE METADATA
       // ============================================
       receipt_no: receiptNo,
       date: date,
-      status: 'Pending',
+      // Approval v2: start as Draft so submit engine can run (including auto-submit below).
+      status: approvalV2Create ? 'Draft' : 'Pending',
       branch: d.branch || null,
       user_id: req.user.sub,
       emp_code: receiptEmpCode,
@@ -838,9 +842,28 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       branch: receiptDoc.branch || null
     })
 
-    res.status(201).json({ 
+    let approval_warning = null
+    let submittedReceipt = null
+    let submittedTask = null
+    if (approvalV2Create) {
+      try {
+        const submitResult = await engineSubmit(receiptId, req.user)
+        submittedReceipt = submitResult.receipt
+        submittedTask = submitResult.task
+      } catch (err) {
+        approval_warning = err instanceof EngineError ? (err.detail || err.message) : (err?.message || String(err))
+        console.warn('[receipts] auto-submit after create failed:', approval_warning)
+      }
+    }
+
+    res.status(201).json({
       id: receiptId,
-      files: uploadedFiles
+      files: uploadedFiles,
+      ...(submittedReceipt && { receipt: submittedReceipt }),
+      ...(submittedTask && {
+        approval_task: { _key: submittedTask._key, title: submittedTask.title }
+      }),
+      ...(approval_warning && { approval_warning })
     })
   } catch (e) {
     console.error('Insert failed:', e)

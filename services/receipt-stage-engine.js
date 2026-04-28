@@ -81,10 +81,36 @@ async function loadTeam(key) {
   return rows[0]
 }
 
-async function loadIntakeTeam() {
+/** Uppercase trimmed product.category from nested or legacy receipt fields. */
+export function receiptProductCategory(receipt) {
+  const raw = receipt?.product?.category ?? receipt?.product_category ?? ''
+  const s = String(raw).trim().toUpperCase()
+  return s || null
+}
+
+/**
+ * Resolve intake team for a receipt from per-category map, then fallback to receipt_intake_team_id.
+ * NCD may fall back to BOND’s team if NCD is unmapped.
+ */
+export async function resolveIntakeTeam(receipt) {
   const cfg = await getAppConfig()
-  const intakeId = cfg?.receipt_intake_team_id
-  if (!intakeId) throw new EngineError('no_intake_team_configured', 409, 'Admin has not set receipt_intake_team_id')
+  const map = (cfg?.receipt_intake_teams_by_category && typeof cfg.receipt_intake_teams_by_category === 'object')
+    ? cfg.receipt_intake_teams_by_category
+    : {}
+  const cat = receipt ? receiptProductCategory(receipt) : null
+  let intakeId = null
+  if (cat && map[cat]) {
+    intakeId = String(map[cat]).trim()
+  }
+  if (!intakeId && cat === 'NCD' && map.BOND) {
+    intakeId = String(map.BOND).trim()
+  }
+  if (!intakeId) {
+    intakeId = cfg?.receipt_intake_team_id ? String(cfg.receipt_intake_team_id).trim() : ''
+  }
+  if (!intakeId) {
+    throw new EngineError('no_intake_team_configured', 409, 'Admin has not set receipt_intake_team_id or a team for this product category')
+  }
   const t = await loadTeam(intakeId).catch(() => null)
   if (!t || t.is_active === false) {
     throw new EngineError('no_intake_team_configured', 409, 'Configured intake team is missing or inactive')
@@ -332,7 +358,7 @@ export async function submit(receiptKey, actor, { attachmentIds = [] } = {}) {
   if (!TERMINAL_STATUSES.has(receipt.status)) {
     throw new EngineError('receipt_not_in_flight', 409, `Receipt is already ${receipt.status}; cannot submit`)
   }
-  const { team: intake } = await loadIntakeTeam()
+  const { team: intake } = await resolveIntakeTeam(receipt)
 
   const cycleId = newCycleId()
   const task = await createApprovalTask(receipt, intake, cycleId, actor)
@@ -437,7 +463,8 @@ export async function completeReceipt(receiptKey, actor, comment, { forced = fal
   if (!forced && !(isTeamMember(currentTeam, actor) || isAdmin(actor))) {
     throw new EngineError('not_current_team_member', 403, `Only members of team "${currentTeam.name}" can approve`)
   }
-  const { finalLabel } = await loadIntakeTeam() // also re-validates intake exists
+  const cfg = await getAppConfig()
+  const finalLabel = cfg?.receipt_final_status_label || DEFAULT_FINAL_LABEL
 
   await closeApprovalTask(receipt.current_approval_task_key, 'approved', actor, comment)
 
