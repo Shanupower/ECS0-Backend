@@ -57,6 +57,8 @@ jobs:
           npm i
 
           echo "--- Frontend: pull + npm i"
+          # Stop frontend process before git clean/reset to avoid race with Vite temp files.
+          pm2 stop 0 || true
           cd "/home/ubuntu/ECS0"
           # Preserve server-specific env while still forcing code to match origin/Dev.
           ENV_BAK="/tmp/ecs0_frontend_env_$$.bak"
