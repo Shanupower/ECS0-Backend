@@ -580,6 +580,119 @@ export async function adminOverride(receiptKey, actor, { nextTeamId = null, comp
   return routeToTeam(receiptKey, actor, nextTeamId, comment || 'admin routed', { attachmentIds })
 }
 
+/**
+ * Forcibly move a receipt to a target team, regardless of its current stage.
+ *
+ * Used by the bulk migration job when an admin reconfigures the intake team(s)
+ * in System Settings. Unlike `submit()`, this does NOT require the receipt to
+ * be in a terminal status — it accepts in-flight receipts and resets their
+ * approval cycle so the new intake team gets a fresh approval task.
+ *
+ * Skips receipts that are already in a workflow-terminal status (Completed /
+ * configured final label / Needs Changes) — those should not be auto-routed
+ * by a config change.
+ *
+ * Behavior on a moved receipt:
+ *   - close the existing approval task (if any) as 'forced'
+ *   - create a new approval task on the target team's lead
+ *   - reset approval_cycle_id, approved_by_team_ids = []
+ *   - set status = targetTeam.name and current_team_id = targetTeam._key
+ *   - append a history entry with { forced: true, reset: true, comment }
+ *   - publish a `receipt.forced_moved` event
+ */
+export async function forceMoveToTeam(receiptKey, actor, targetTeamKey, { reason = 'admin_intake_remap' } = {}) {
+  await ensureReady()
+  if (!isAdmin(actor)) throw new EngineError('forbidden', 403, 'Admin only')
+
+  const receipt = await loadReceipt(receiptKey)
+
+  // Compute terminal-skip set using current app config so renamed final label is honored.
+  const cfg = await getAppConfig().catch(() => null)
+  const finalLabel = cfg?.receipt_final_status_label || DEFAULT_FINAL_LABEL
+  const TERMINAL_OUT = new Set([finalLabel, STATUS_NEEDS_CHANGES])
+  if (TERMINAL_OUT.has(receipt.status)) {
+    throw new EngineError('receipt_terminal', 409, `Receipt is ${receipt.status}; not eligible for forced move`)
+  }
+
+  const targetTeam = await loadTeam(targetTeamKey)
+  if (!targetTeam || targetTeam.is_active === false) {
+    throw new EngineError('invalid_next_team', 400, 'Target team is missing or inactive')
+  }
+
+  // No-op if already on the target team — caller (preview) typically filters
+  // these out, but guard here so a stale UI doesn't churn approval tasks.
+  if (receipt.current_team_id === targetTeam._key) {
+    return { receipt, task: null, skipped: 'already_on_target' }
+  }
+
+  // Close existing approval task BEFORE creating the new one, so a transient
+  // failure doesn't leave the receipt with two open approval tasks.
+  if (receipt.current_approval_task_key) {
+    try {
+      await closeApprovalTask(receipt.current_approval_task_key, 'forced', actor, reason)
+    } catch (err) {
+      console.warn('[engine] forceMoveToTeam closeApprovalTask warn:', err.message)
+    }
+  }
+
+  const cycleId = newCycleId()
+  const newTask = await createApprovalTask(receipt, targetTeam, cycleId, actor)
+
+  let updated
+  try {
+    // CAS on (status, current_team_id) so a concurrent change forces us to retry.
+    const expected = {
+      status: receipt.status,
+      current_team_id: receipt.current_team_id ?? null
+    }
+    const history = Array.isArray(receipt.stage_history) ? [...receipt.stage_history] : []
+    // Close any open history entry for the previous stage so the timeline is
+    // self-consistent (no two open entries in the same cycle).
+    if (receipt.approval_cycle_id && receipt.current_team_id) {
+      const idx = findOpenHistoryIndex(history, receipt.approval_cycle_id, receipt.current_team_id)
+      if (idx >= 0) {
+        history[idx] = closeHistoryEntry(history[idx], {
+          resolution: 'reset',
+          nextTeam: targetTeam,
+          comment: reason,
+          actor,
+          forced: true
+        })
+      }
+    }
+    const opening = openHistoryEntry({ cycleId, team: targetTeam, actor, taskKey: newTask._key })
+    history.push({ ...opening, forced: true, reset: true, comment: reason })
+    updated = await casUpdateReceipt(receiptKey, expected, {
+      status: targetTeam.name,
+      current_team_id: targetTeam._key,
+      current_approval_task_key: newTask._key,
+      approval_cycle_id: cycleId,
+      approved_by_team_ids: [],
+      stage_history: history,
+      updated_at: now()
+    })
+  } catch (err) {
+    // Compensate: drop the new task we just created so we don't orphan it.
+    try { await getCollection('tasks').remove(newTask._key) } catch { /* best effort */ }
+    throw err
+  }
+
+  publishEvent({
+    type: 'receipt.forced_moved',
+    payload: {
+      receipt_id: receiptKey,
+      from_team_id: receipt.current_team_id || null,
+      to_team_id: targetTeam._key,
+      cycle_id: cycleId,
+      reason,
+      actor_id: actor?.sub || actor?._key
+    },
+    actor, branch: receipt.branch || null
+  })
+
+  return { receipt: updated, task: newTask }
+}
+
 // ---------------------------------------------------------------------------
 // Validations
 // ---------------------------------------------------------------------------
