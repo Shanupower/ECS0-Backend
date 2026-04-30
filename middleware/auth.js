@@ -52,8 +52,9 @@ export const requireAuth = (req, res, next) => {
   }
 }
 
-export const requireRole = (role) => (req, res, next) => {
-  if (!req.user || req.user.role !== role) return res.status(403).json({ error: 'forbidden' })
+export const requireRole = (...roles) => (req, res, next) => {
+  const allowed = roles.flat().filter(Boolean)
+  if (!req.user || !allowed.includes(req.user.role)) return res.status(403).json({ error: 'forbidden' })
   next()
 }
 
@@ -73,10 +74,16 @@ export const requireBranchAccess = (req, res, next) => {
   // For regular users, check if they have access to the requested branch
   const requestedBranch = req.params.branchCode || req.query.branch_code
   if (requestedBranch) {
-    const userBranchLower = req.user.branch?.toLowerCase()
-    const requestedBranchLower = requestedBranch.toLowerCase()
+    const requestedBranchLower = String(requestedBranch).toLowerCase()
+
+    // Prefer branch_code from token (stable), fall back to branch when present.
+    const tokenBranchCode = req.user.branch_code != null ? String(req.user.branch_code).trim() : ''
+    const tokenBranch = req.user.branch != null ? String(req.user.branch).trim() : ''
+    const userBranchCodeLower = tokenBranchCode ? tokenBranchCode.toLowerCase() : ''
+    const userBranchLower = tokenBranch ? tokenBranch.toLowerCase() : ''
     
-    if (userBranchLower !== requestedBranchLower) {
+    // Allow if requested branch matches either branch_code or branch string.
+    if (requestedBranchLower !== userBranchCodeLower && requestedBranchLower !== userBranchLower) {
       return res.status(403).json({ error: 'branch_access_denied' })
     }
   }

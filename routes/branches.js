@@ -4,6 +4,7 @@ import { requireAuth, requireRole, requireBranchAccess } from '../middleware/aut
 import { validateBranchCode, validateEmail, validateMobile, validatePIN, validateRequired } from '../utils/validators.js'
 import { appendCategoryToFilterString, appendMfTxnTypeToFilterString } from '../utils/receipt-filters.js'
 import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { INV_AMOUNT_AQL, CC_AQL, SI_AQL } from '../utils/receipt-aggregates.js'
 
 const router = express.Router()
 
@@ -118,8 +119,8 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
     const statusFilter = includePending
       ? 'FILTER (receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)'
       : 'FILTER receipt.status == "Completed"'
-    // Same investment amount formula as stats: nested transaction.amount / product_details.fd first, then flat
-    const invAmountExpr = '(TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0) : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0) : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0) : (TO_NUMBER(receipt.fd_deposit_amount) || 0)'
+    // Use shared AQL so single-branch stats match /api/stats/summary and
+    // /api/stats/branches exactly (tree-total fields + legacy fallbacks).
     const statsQuery = `
       FOR receipt IN receipts
       FILTER receipt.branch IN @branchIdentifiers
@@ -128,9 +129,9 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
       ${deletedFilter}
       COLLECT AGGREGATE 
         total_receipts = SUM(1),
-        total_investments = SUM(${invAmountExpr}),
-        total_cc = SUM(TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0),
-        total_si = SUM(TO_NUMBER(receipt.service_income || receipt.si || 0) || 0)
+        total_investments = SUM(${INV_AMOUNT_AQL}),
+        total_cc = SUM(${CC_AQL}),
+        total_si = SUM(${SI_AQL})
       RETURN { total_receipts, total_investments, total_cc, total_si }
     `
     
@@ -170,6 +171,7 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
         total_receipts: stats[0]?.total_receipts || 0,
         total_investments: totalInvestments,
         collection_credit: totalCC,
+        total_cc: totalCC, // Canonical field used by newer frontends
         commissions: totalCC // Alias for backward compatibility
       }
     }
@@ -177,6 +179,7 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
     // Only include service income for admins
     if (req.user.role === 'admin') {
       result.statistics.service_income = totalSI
+      result.statistics.total_si = totalSI
     }
     
     res.json(result)
@@ -267,6 +270,10 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
         filterClause += ' AND receipt.status == @status'
       }
       bindVars.status = status
+    } else if (req.query.includePending === '0') {
+      // Global "Include pending" toggle is OFF → exclude pending / null-status receipts
+      // so listings stay consistent with KPIs/charts that also exclude them.
+      filterClause += ' AND receipt.status == "Completed"'
     }
 
     // Employee code filter (receipt.emp_code or receipt.employee.code)
@@ -429,7 +436,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
 router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const { branchCode } = req.params
-    const { branch_name, branch_type, address, phone, email, monthly_target } = req.body
+    const { branch_name, branch_type, address, phone, email, monthly_target, is_active } = req.body
 
     // Validate email if provided
     if (email !== undefined && email !== null && email !== '') {
@@ -469,6 +476,9 @@ router.put('/:branchCode', requireAuth, requireRole('admin'), async (req, res) =
     if (monthly_target !== undefined) {
       updateData.monthly_target =
         monthly_target === '' || monthly_target === null ? null : Number(monthly_target)
+    }
+    if (typeof is_active === 'boolean') {
+      updateData.is_active = is_active
     }
 
     // Fetch existing branch to detect name changes

@@ -34,13 +34,43 @@ async function canAccessReceiptMedia(req, receipt) {
   return false
 }
 
+/**
+ * Approval-evidence uploads are narrower than general receipt media:
+ * only admins, the receipt creator, and members of the team currently
+ * holding the receipt may attach evidence. All other callers fall back
+ * to `canAccessReceiptMedia`.
+ */
+async function canUploadApprovalEvidence(req, receipt) {
+  if (req.user.role === 'admin') return true
+  const uid = String(req.user.sub || req.user._key || '')
+  // Creator
+  if (receipt.user_id != null && String(receipt.user_id) === uid) return true
+  if (receipt.emp_code && req.user.emp_code &&
+      String(receipt.emp_code).trim().toLowerCase() === String(req.user.emp_code).trim().toLowerCase()) {
+    return true
+  }
+  // Current team member
+  if (receipt.current_team_id) {
+    const rows = await q(
+      'FOR t IN teams FILTER t._key == @k LIMIT 1 RETURN { member_ids: t.member_ids }',
+      { k: String(receipt.current_team_id) }
+    )
+    const members = rows[0]?.member_ids || []
+    if (members.map(String).includes(uid)) return true
+  }
+  return false
+}
+
 const receiptMetaReturn = `{
       id: receipt._key,
       user_id: receipt.user_id,
       emp_code: receipt.emp_code,
       branch: receipt.branch,
+      current_team_id: receipt.current_team_id,
       files: receipt.files
     }`
+
+const APPROVAL_STAGES = new Set(['submit', 'route', 'complete', 'reject', 'override'])
 
 // Upload media for receipt
 router.post('/:id/media', requireAuth, uploadMultiple, async (req, res) => {
@@ -59,19 +89,41 @@ router.post('/:id/media', requireAuth, uploadMultiple, async (req, res) => {
     }
     
     const receipt = receiptRows[0]
-    if (!(await canAccessReceiptMedia(req, receipt))) {
+
+    // `category` is optional. When the caller marks an upload as
+    // `approval_evidence`, we apply the stricter creator/current-team/admin
+    // gate and stamp the extra audit fields onto each file record.
+    const rawCategory = (req.body?.category || '').trim().toLowerCase()
+    const isApprovalEvidence = rawCategory === 'approval_evidence'
+
+    if (isApprovalEvidence) {
+      if (!(await canUploadApprovalEvidence(req, receipt))) {
+        return res.status(403).json({ error: 'forbidden', detail: 'Only the creator, current team members, or admins can attach approval evidence' })
+      }
+    } else if (!(await canAccessReceiptMedia(req, receipt))) {
       return res.status(403).json({ error: 'forbidden' })
     }
-    
+
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'no_files_uploaded' })
     }
-    
+
+    const approvalMeta = isApprovalEvidence ? {
+      category: 'approval_evidence',
+      stage_event_id: req.body?.stage_event_id || null,
+      cycle_id: req.body?.cycle_id || null,
+      team_id: req.body?.team_id || null,
+      team_name: req.body?.team_name || null,
+      uploaded_during: APPROVAL_STAGES.has((req.body?.uploaded_during || '').toLowerCase())
+        ? req.body.uploaded_during.toLowerCase()
+        : null
+    } : {}
+
     // Parse existing files or initialize empty array
     let existingFiles = receipt.files || []
-    
+
     const uploadedFiles = []
-    
+
     for (const file of req.files) {
       const fileData = {
         id: Date.now() + Math.random(), // Generate unique ID
@@ -80,9 +132,10 @@ router.post('/:id/media', requireAuth, uploadMultiple, async (req, res) => {
         file_size: file.size,
         mime_type: file.mimetype,
         uploaded_by: req.user.sub,
-        uploaded_at: new Date().toISOString()
+        uploaded_at: new Date().toISOString(),
+        ...approvalMeta
       }
-      
+
       existingFiles.push(fileData)
       uploadedFiles.push(fileData)
     }

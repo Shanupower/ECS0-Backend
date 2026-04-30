@@ -2,18 +2,10 @@ import express from 'express'
 import { q, getUserBranch, normalizeBranchName, getBranchIdentifiersForFilter, getBranchMonthlyTargetForIdentifiers } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { stateFromPincode } from '../utils/pincode-state.js'
+import { INV_AMOUNT_AQL, CC_AQL, SI_AQL } from '../utils/receipt-aggregates.js'
 
 const router = express.Router()
-
-// Investment amount per receipt: nested tree first (transaction.amount, product_details.fd), then legacy flat
-const INV_AMOUNT_AQL = `(
-  (TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0)
-  : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0)
-  : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0)
-  : (TO_NUMBER(receipt.fd_deposit_amount) || 0) != 0 ? (TO_NUMBER(receipt.fd_deposit_amount) || 0)
-  : (TO_NUMBER(receipt.service_price) || 0) != 0 ? (TO_NUMBER(receipt.service_price) || 0)
-  : 0
-)`
 
 // Category: nested product.category first, then legacy product_category, else "Other"
 const CATEGORY_BASE_AQL = `(receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : (receipt.product_category != null && receipt.product_category != "" ? receipt.product_category : "Other")`
@@ -31,12 +23,6 @@ const CATEGORY_AQL = `(
     CONTAINS(LOWER(TO_STRING(${FD_ISSUER_TYPE_AQL})), "postoffice")
   )) ? "GOVT_FD" : ${CATEGORY_BASE_AQL}
 )`
-
-// CC per receipt: tree total (total_cc) when set, else cc_amount+additional_cc, else legacy collection_credit/cc, else calculations.collection_credit/cc
-const CC_AQL = `(TO_NUMBER(receipt.total_cc) || 0) != 0 ? (TO_NUMBER(receipt.total_cc) || 0) : ((TO_NUMBER(receipt.cc_amount) || 0) + (TO_NUMBER(receipt.additional_cc) || 0)) != 0 ? ((TO_NUMBER(receipt.cc_amount) || 0) + (TO_NUMBER(receipt.additional_cc) || 0)) : (TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0) != 0 ? (TO_NUMBER(receipt.collection_credit || receipt.cc || 0) || 0) : (receipt.calculations != null && (receipt.calculations.collection_credit != null || receipt.calculations.cc != null)) ? (TO_NUMBER(receipt.calculations.collection_credit || receipt.calculations.cc || 0) || 0) : 0`
-
-// SI per receipt: tree total (total_si) when set, else si_amount+additional_si, else legacy service_income/si, else calculations.service_income/si
-const SI_AQL = `(TO_NUMBER(receipt.total_si) || 0) != 0 ? (TO_NUMBER(receipt.total_si) || 0) : ((TO_NUMBER(receipt.si_amount) || 0) + (TO_NUMBER(receipt.additional_si) || 0)) != 0 ? ((TO_NUMBER(receipt.si_amount) || 0) + (TO_NUMBER(receipt.additional_si) || 0)) : (TO_NUMBER(receipt.service_income || receipt.si || 0) || 0) != 0 ? (TO_NUMBER(receipt.service_income || receipt.si || 0) || 0) : (receipt.calculations != null && (receipt.calculations.service_income != null || receipt.calculations.si != null)) ? (TO_NUMBER(receipt.calculations.service_income || receipt.calculations.si || 0) || 0) : 0`
 
 // Get summary statistics
 router.get('/summary', requireAuth, async (req, res) => {
@@ -1511,7 +1497,9 @@ router.get('/investor-locations', requireAuth, async (req, res) => {
       filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
       bindVars.user_id = String(req.user.sub)
       bindVars.emp_code = req.user.emp_code || ''
-    } else if ((req.user.role === 'manager' || req.user.role === 'branch') && !branch_code) {
+    } else if (req.user.role === 'manager' || req.user.role === 'branch') {
+      // Managers/branch users are ALWAYS scoped to their own branch, regardless
+      // of any branch_code query param (preventing cross-branch data leaks).
       const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
       const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
       if (branchIdentifiers.length > 0) {
@@ -1529,20 +1517,26 @@ router.get('/investor-locations', requireAuth, async (req, res) => {
       bindVars.branch_code = branch_code
     }
     const filterClause = `FILTER ${filterConditions.join(' AND ')}`
-    const stateExpr = `(receipt.investor != null && receipt.investor.address != null && receipt.investor.address.state != null && receipt.investor.address.state != "") ? TRIM(receipt.investor.address.state) : "Other"`
+    // Collect raw rows; we derive the final state in JS so we can fall back to
+    // the investor pincode when the state field is missing/empty.
+    const stateExpr = `(receipt.investor != null && receipt.investor.address != null && receipt.investor.address.state != null && TRIM(receipt.investor.address.state) != "") ? TRIM(receipt.investor.address.state) : ""`
+    const pinExpr = `(receipt.investor != null && receipt.investor.address != null && receipt.investor.address.pin_code != null && TO_STRING(receipt.investor.address.pin_code) != "") ? TO_STRING(receipt.investor.address.pin_code) : (receipt.pin_code != null ? TO_STRING(receipt.pin_code) : (receipt.pinCode != null ? TO_STRING(receipt.pinCode) : ""))`
     const locationsQuery = `
       FOR receipt IN receipts
       ${filterClause}
-      LET state = ${stateExpr}
-      COLLECT s = state
-      AGGREGATE count = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL})
-      SORT amount DESC
-      RETURN { state: s, count, amount }
+      RETURN {
+        state: ${stateExpr},
+        pin: ${pinExpr},
+        amount: ${INV_AMOUNT_AQL}
+      }
     `
-    const rows = await q(locationsQuery, bindVars)
+    const rawRows = await q(locationsQuery, bindVars)
     const byState = {}
-    for (const row of rows) {
-      byState[row.state] = { count: row.count, amount: Number(row.amount) }
+    for (const row of rawRows) {
+      const resolved = (row.state && String(row.state).trim()) || stateFromPincode(row.pin) || 'Unknown'
+      if (!byState[resolved]) byState[resolved] = { count: 0, amount: 0 }
+      byState[resolved].count += 1
+      byState[resolved].amount += Number(row.amount) || 0
     }
     res.json({ byState })
   } catch (error) {
@@ -1550,5 +1544,119 @@ router.get('/investor-locations', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })
+
+// Stale open leads + stale customers (for manager hub queue / health widgets)
+router.get('/branch-queue-metrics', requireAuth, async (req, res) => {
+  try {
+    const staleDays = Math.min(90, Math.max(1, parseInt(String(req.query.stale_days || '14'), 10) || 14))
+    const branchFromQuery = req.query.branch_code != null ? String(req.query.branch_code).trim() : ''
+
+    const bindVars = { staleDays }
+    const parts = [
+      'lead.updated_at != null',
+      `lead.updated_at < DATE_SUBTRACT(DATE_NOW(), @staleDays, "day")`,
+      '(lead.stage == null || LOWER(lead.stage) NOT IN ["won", "lost"])',
+    ]
+
+    if (req.user.role === 'employee') {
+      return res.json({ stale_leads: 0, stale_customers: 0, stale_days: staleDays })
+    }
+
+    if (req.user.role === 'manager' || req.user.role === 'branch') {
+      const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
+      if (!userBranch) return res.json({ stale_leads: 0, stale_customers: 0, stale_days: staleDays })
+      const branchNorm = normalizeBranchName(userBranch) || String(userBranch).trim()
+      parts.push('lead.branch != null && UPPER(TRIM(lead.branch)) == UPPER(TRIM(@branchNorm))')
+      bindVars.branchNorm = branchNorm
+    } else if (req.user.role === 'admin') {
+      if (branchFromQuery) {
+        parts.push('lead.branch != null && UPPER(TRIM(lead.branch)) == UPPER(TRIM(@branchFilter))')
+        bindVars.branchFilter = branchFromQuery
+      }
+    } else {
+      return res.json({ stale_leads: 0, stale_customers: 0, stale_days: staleDays })
+    }
+
+    const filterClause = `FILTER ${parts.join(' AND ')}`
+    const query = `
+      FOR lead IN leads
+      ${filterClause}
+      COLLECT WITH COUNT INTO n
+      RETURN n
+    `
+    const [rows, staleCustomers] = await Promise.all([
+      q(query, bindVars),
+      countStaleCustomersForQueue(req, staleDays, branchFromQuery),
+    ])
+    res.json({
+      stale_leads: Number(rows?.[0]) || 0,
+      stale_customers: staleCustomers,
+      stale_days: staleDays,
+    })
+  } catch (error) {
+    console.error('Error fetching branch queue metrics:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+async function countStaleCustomersForQueue(req, staleDays, branchFromQuery) {
+  const custBind = { staleDays }
+  const base =
+    'customer.updated_at != null && customer.updated_at < DATE_SUBTRACT(DATE_NOW(), @staleDays, "day")'
+
+  if (req.user.role === 'manager' || req.user.role === 'branch') {
+    const userBranch = req.user.role === 'branch' ? (req.user.branch_code || req.user.branch) : await getUserBranch(req.user.sub)
+    if (!userBranch) return 0
+    const branchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
+    const normalizedUserBranch = normalizeBranchName(userBranch)
+    let filter = base
+    if (branchIdentifiers.length > 0) {
+      filter += ` && (
+        (IS_ARRAY(customer.branches) && LENGTH(INTERSECTION(customer.branches, @branchIdentifiers)) > 0)
+        || (customer.relationship_manager != null && (
+          (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @branchIdentifiers)) > 0)
+          || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager IN @branchIdentifiers)
+        ))
+      )`
+      custBind.branchIdentifiers = branchIdentifiers
+    } else if (normalizedUserBranch || userBranch) {
+      filter += ` && (
+        customer.relationship_manager == @userBranch
+        || (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager)
+      )`
+      custBind.userBranch = normalizedUserBranch || userBranch
+    } else {
+      return 0
+    }
+    const rows = await q(
+      `FOR customer IN customers FILTER ${filter} COLLECT WITH COUNT INTO n RETURN n`,
+      custBind
+    )
+    return Number(rows?.[0]) || 0
+  }
+
+  if (req.user.role === 'admin') {
+    if (!branchFromQuery) return 0
+    const branchIdentifiers = await getBranchIdentifiersForFilter(branchFromQuery)
+    if (!branchIdentifiers.length) return 0
+    const filter =
+      base +
+      ` && (
+      (IS_ARRAY(customer.branches) && LENGTH(INTERSECTION(customer.branches, @branchIdentifiers)) > 0)
+      || (customer.relationship_manager != null && (
+        (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @branchIdentifiers)) > 0)
+        || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager IN @branchIdentifiers)
+      ))
+    )`
+    custBind.branchIdentifiers = branchIdentifiers
+    const rows = await q(
+      `FOR customer IN customers FILTER ${filter} COLLECT WITH COUNT INTO n RETURN n`,
+      custBind
+    )
+    return Number(rows?.[0]) || 0
+  }
+
+  return 0
+}
 
 export default router

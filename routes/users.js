@@ -3,8 +3,26 @@ import bcrypt from 'bcryptjs'
 import { q, getCollection } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { validateEmail, validateEmpCode, validateMobile, validatePassword, validateRequired } from '../utils/validators.js'
+import {
+  normalizeBranchRef,
+  resolveBranchAliases,
+  getCurrentUserBranchRef
+} from '../utils/branch-scope.js'
 
 const router = express.Router()
+
+const AUDIT_COLLECTION = 'branch_audit_events'
+
+async function ensureAuditCollection() {
+  const col = getCollection(AUDIT_COLLECTION)
+  try {
+    const exists = await col.exists()
+    if (!exists) await col.create()
+  } catch (e) {
+    console.error('[Audit] ensureAuditCollection failed:', e?.message || e)
+  }
+  return col
+}
 
 // Allowed dashboard widget IDs for validation (single source of truth)
 const ALLOWED_DASHBOARD_WIDGETS = [
@@ -40,6 +58,55 @@ async function getUserBranchRefForUserId(userId) {
 
 function normalizeBranchRefForCompare(value) {
   return String(value ?? '').trim().toLowerCase()
+}
+
+// buildUserListFilter mirrors leads.js::buildListFilter but matches against both
+// `user.branch_code` AND `user.branch` (either may hold the canonical id, code,
+// or name depending on how the row was created). Returns everything callers need
+// to stitch into a `FOR user IN users ${filterAql} ...` query.
+//
+// Returns { filterAql, bindVars, activeOnly, sort, scope }.
+//   - activeOnly: true when we should hide deactivated users (manager + employee).
+//   - sort: AQL sort expression (without the SORT keyword).
+//   - scope: 'admin-all' | 'admin-branch' | 'manager' | 'employee' — for logging / auditing.
+async function buildUserListFilter(req) {
+  const role = req.user?.role
+  const sub = req.user?.sub
+
+  const BRANCH_MATCH = `FILTER (
+    (user.branch_code != null && UPPER(TRIM(TO_STRING(user.branch_code))) IN @bAliases)
+    OR (user.branch != null && UPPER(TRIM(TO_STRING(user.branch))) IN @bAliases)
+  )`
+
+  if (role === 'admin') {
+    const ref = String(req.query.branch_code || '').trim()
+    if (!ref) {
+      return { filterAql: '', bindVars: {}, activeOnly: false, sort: 'user.created_at DESC', scope: 'admin-all' }
+    }
+    const aliases = await resolveBranchAliases(ref)
+    if (!aliases.length) {
+      return { filterAql: 'FILTER false', bindVars: {}, activeOnly: false, sort: 'user.created_at DESC', scope: 'admin-branch' }
+    }
+    return { filterAql: BRANCH_MATCH, bindVars: { bAliases: aliases }, activeOnly: false, sort: 'user.name ASC', scope: 'admin-branch' }
+  }
+
+  if (role === 'manager') {
+    const me = await getCurrentUserBranchRef(sub)
+    if (!me?.aliases?.length) {
+      return { filterAql: 'FILTER false', bindVars: {}, activeOnly: true, sort: 'user.name ASC', scope: 'manager' }
+    }
+    return { filterAql: BRANCH_MATCH, bindVars: { bAliases: me.aliases }, activeOnly: true, sort: 'user.name ASC', scope: 'manager' }
+  }
+
+  // Employees (and any other role) see only themselves. Mirrors leads' employee
+  // clause which restricts rows to what the caller already owns.
+  return {
+    filterAql: 'FILTER user._key == @sub',
+    bindVars: { sub: sub || '' },
+    activeOnly: false,
+    sort: 'user.name ASC',
+    scope: 'employee'
+  }
 }
 
 async function enforcePersonalTargetCapForBranch({ branchRef, excludeUserId, nextPersonalTarget }) {
@@ -181,49 +248,24 @@ router.patch('/me', requireAuth, async (req, res) => {
   }
 })
 
-// Get users
-// - Admin: all users
-// - Manager: branch-scoped (active users only) when scope=branch
+// Get users (branch-scoped, leads-style)
+// - Admin: all users by default; pass ?branch_code=<key|code|name> to narrow.
+// - Manager: auto-scoped to their own branch (no scope= param required).
+// - Everyone else: sees themselves only.
+//
+// The legacy `?scope=branch` query param is still honored as a no-op for
+// backward compatibility with callers that set it.
 router.get('/', requireAuth, async (req, res) => {
-  const role = req.user?.role
-  const scope = String(req.query.scope || '').trim()
+  try {
+    const { filterAql, bindVars, activeOnly, sort } = await buildUserListFilter(req)
 
-  if (role === 'admin') {
-    const users = await q(`
-      FOR user IN users 
-      SORT user.created_at DESC
-      RETURN {
-        id: user._key,
-        emp_code: user.emp_code,
-        name: user.name,
-        email: user.email,
-        mobile: user.mobile,
-        branch: user.branch,
-        branch_code: user.branch_code,
-        role: user.role,
-        is_active: user.is_active,
-        last_login_at: user.last_login_at,
-        created_at: user.created_at,
-        dashboard_widgets: IS_ARRAY(user.dashboard_widgets) ? user.dashboard_widgets : null,
-        personal_monthly_target: user.personal_monthly_target != null ? TO_NUMBER(user.personal_monthly_target) : null
-      }
-    `)
-    return res.json(users)
-  }
-
-  if (role === 'manager' && scope === 'branch') {
-    const me = await getUserBranchRefForUserId(req.user.sub)
-    const myBranchRef = me.branch_code || me.branch
-    if (!myBranchRef) return res.json([])
-    const myBranchLower = normalizeBranchRefForCompare(myBranchRef)
-
+    const activeFilter = activeOnly ? 'FILTER user.is_active == true' : ''
     const users = await q(
       `
       FOR user IN users
-        FILTER user.is_active == true
-        LET uBranchRef = user.branch_code != null && TRIM(TO_STRING(user.branch_code)) != "" ? TRIM(TO_STRING(user.branch_code)) : (user.branch != null ? TRIM(TO_STRING(user.branch)) : "")
-        FILTER uBranchRef != "" AND LOWER(uBranchRef) == @myBranchLower
-        SORT user.name
+        ${activeFilter}
+        ${filterAql}
+        SORT ${sort}
         RETURN {
           id: user._key,
           emp_code: user.emp_code,
@@ -236,15 +278,17 @@ router.get('/', requireAuth, async (req, res) => {
           is_active: user.is_active,
           last_login_at: user.last_login_at,
           created_at: user.created_at,
+          dashboard_widgets: IS_ARRAY(user.dashboard_widgets) ? user.dashboard_widgets : null,
           personal_monthly_target: user.personal_monthly_target != null ? TO_NUMBER(user.personal_monthly_target) : null
         }
-    `,
-      { myBranchLower }
+      `,
+      bindVars
     )
-    return res.json(users)
+    res.json(users)
+  } catch (err) {
+    console.error('Error listing users:', err)
+    res.status(500).json({ error: 'server_error', detail: err.message })
   }
-
-  return res.status(403).json({ error: 'forbidden' })
 })
 
 // Audit users with missing/invalid branch mapping (admin only)
@@ -369,48 +413,27 @@ router.post('/branch-audit/fix', requireAuth, requireRole('admin'), async (req, 
   }
 })
 
-// Get users that the current user can assign tasks to (admin: all; manager: same branch; employee: self only)
+// Get users that the current user can assign tasks to.
+// - Admin: all active users; accepts ?branch_code=<ref> to narrow to a branch.
+// - Manager: active users in their own branch (alias-matched).
+// - Employee (or any other role): themselves only.
+//
+// Uses the same branch scope helper as GET /, so the two endpoints never drift.
 router.get('/assignable', requireAuth, async (req, res) => {
   try {
-    const role = req.user.role
-    const sub = req.user.sub
+    const { filterAql, bindVars } = await buildUserListFilter(req)
 
-    if (role === 'admin') {
-      const users = await q(`
-        FOR user IN users
-        FILTER user.is_active == true
-        SORT user.name
-        RETURN { id: user._key, emp_code: user.emp_code, name: user.name, branch: user.branch, role: user.role }
-      `)
-      return res.json(users)
-    }
-
-    if (role === 'manager') {
-      const me = await q(`
-        FOR user IN users
-        FILTER user._key == @id
-        LIMIT 1
-        RETURN user.branch
-      `, { id: sub })
-      const myBranch = me[0] ? String(me[0]).trim().toUpperCase() : null
-      if (!myBranch) return res.json([])
-      const users = await q(`
-        FOR user IN users
-        FILTER user.is_active == true
-        FILTER user.branch != null && UPPER(TRIM(user.branch)) == @myBranch
-        SORT user.name
-        RETURN { id: user._key, emp_code: user.emp_code, name: user.name, branch: user.branch, role: user.role }
-      `, { myBranch })
-      return res.json(users)
-    }
-
-    const self = await q(`
+    const users = await q(
+      `
       FOR user IN users
-      FILTER user._key == @id && user.is_active == true
-      LIMIT 1
-      RETURN { id: user._key, emp_code: user.emp_code, name: user.name, branch: user.branch, role: user.role }
-    `, { id: sub })
-    res.json(self || [])
+        FILTER user.is_active == true
+        ${filterAql}
+        SORT user.name
+        RETURN { id: user._key, emp_code: user.emp_code, name: user.name, branch: user.branch, role: user.role }
+      `,
+      bindVars
+    )
+    res.json(users)
   } catch (error) {
     console.error('Error listing assignable users:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
@@ -622,16 +645,20 @@ router.patch('/:id', requireAuth, async (req, res) => {
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no_updates' })
   
   try {
+    let auditContext = null
     // Manager: ensure the target user is active and in manager's branch.
+    // Uses the shared alias resolver so a manager whose row has `branch_name`
+    // can still update a teammate whose row has only `branch_code` (or vice
+    // versa) — matching the leads scoping contract.
     if (callerRole === 'manager') {
       const [me, targetRows] = await Promise.all([
-        getUserBranchRefForUserId(req.user.sub),
+        getCurrentUserBranchRef(req.user.sub),
         q(
           `
           FOR u IN users
             FILTER u._key == @id
             LIMIT 1
-            RETURN { is_active: u.is_active, branch_code: u.branch_code, branch: u.branch }
+            RETURN { is_active: u.is_active, branch_code: u.branch_code, branch: u.branch, emp_code: u.emp_code, personal_monthly_target: u.personal_monthly_target }
         `,
           { id }
         )
@@ -640,15 +667,18 @@ router.patch('/:id', requireAuth, async (req, res) => {
       const target = targetRows[0]
       if (target?.is_active !== true) return res.status(403).json({ error: 'forbidden', detail: 'Target user is inactive' })
 
-      const myBranchRef = me.branch_code || me.branch
-      const targetBranchRef = (target.branch_code != null && String(target.branch_code).trim() !== '')
+      const myAliases = me?.aliases || []
+      const targetRef = (target.branch_code != null && String(target.branch_code).trim() !== '')
         ? String(target.branch_code).trim()
         : (target.branch != null ? String(target.branch).trim() : '')
+      const targetAliases = targetRef ? await resolveBranchAliases(targetRef) : []
 
-      if (!myBranchRef || !targetBranchRef || normalizeBranchRefForCompare(myBranchRef) !== normalizeBranchRefForCompare(targetBranchRef)) {
+      const sameBranch = myAliases.length > 0 && targetAliases.some((a) => myAliases.includes(a))
+      if (!sameBranch) {
         return res.status(403).json({ error: 'forbidden', detail: 'Managers can only update users in their branch' })
       }
 
+      const myBranchRef = me?.branch_code || me?.branch
       const cap = await enforcePersonalTargetCapForBranch({
         branchRef: myBranchRef,
         excludeUserId: id,
@@ -656,6 +686,16 @@ router.patch('/:id', requireAuth, async (req, res) => {
       })
       if (!cap.ok) {
         return res.status(400).json({ error: 'validation_error', detail: cap.error })
+      }
+
+      if (updates.personal_monthly_target !== undefined) {
+        auditContext = {
+          branch_code: String(myBranchRef),
+          target_user_id: String(id),
+          target_emp_code: target?.emp_code != null ? String(target.emp_code) : null,
+          old_target: target?.personal_monthly_target != null && target.personal_monthly_target !== '' ? Number(target.personal_monthly_target) : null,
+          new_target: updates.personal_monthly_target === '' ? null : updates.personal_monthly_target
+        }
       }
     }
 
@@ -687,6 +727,28 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
 
     await getCollection('users').update(id, updates)
+
+    // Manager audit event (best-effort; do not fail update if logging fails)
+    if (callerRole === 'manager' && auditContext) {
+      try {
+        const col = await ensureAuditCollection()
+        await col.save({
+          type: 'user_personal_target_updated',
+          created_at: new Date().toISOString(),
+          branch_code: auditContext.branch_code,
+          actor_id: String(req.user.sub),
+          actor_emp_code: req.user.emp_code != null ? String(req.user.emp_code) : null,
+          target_user_id: auditContext.target_user_id,
+          target_emp_code: auditContext.target_emp_code,
+          old_target: auditContext.old_target,
+          new_target: auditContext.new_target,
+          summary: `${req.user.emp_code || req.user.sub} updated personal target for ${auditContext.target_emp_code || auditContext.target_user_id}: ${auditContext.old_target ?? '—'} → ${auditContext.new_target ?? '—'}`
+        })
+      } catch (e) {
+        console.error('[Audit] save failed:', e?.message || e)
+      }
+    }
+
     res.status(204).end()
   } catch (e) {
     res.status(404).json({ error: 'not_found' })

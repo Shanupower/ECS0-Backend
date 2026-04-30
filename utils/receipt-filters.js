@@ -58,7 +58,13 @@ export function bindSwitchOverModes(bindVars, legacySwitchOverMode = 'Switch Ove
  * Match Switch Over receipts including nested transaction.switch_over / transaction.type
  */
 export function aqlSwitchOverPositiveMatch() {
-  return `(receipt.txn_type == @switch_over_mode OR receipt.txn_type == @switch_over_mode_alt1 OR receipt.txn_type == @switch_over_mode_alt2 OR receipt.txn_type == @switch_over_mode_alt3 OR receipt.transaction_type == @switch_over_mode OR receipt.transaction_type == @switch_over_mode_alt1 OR receipt.transaction_type == @switch_over_mode_alt2 OR receipt.transaction_type == @switch_over_mode_alt3 OR receipt.switch_to_scheme_name != null OR receipt.mode == @legacy_switch_over_mode OR (receipt.transaction != null AND receipt.transaction.switch_over != null) OR (receipt.transaction != null AND (receipt.transaction.type == @switch_over_mode OR receipt.transaction.type == @switch_over_mode_alt1 OR receipt.transaction.type == @switch_over_mode_alt2 OR receipt.transaction.type == @switch_over_mode_alt3)))`
+  return `(
+    receipt.txn_type IN [@switch_over_mode, @switch_over_mode_alt1, @switch_over_mode_alt2, @switch_over_mode_alt3]
+    OR receipt.transaction_type IN [@switch_over_mode, @switch_over_mode_alt1, @switch_over_mode_alt2, @switch_over_mode_alt3]
+    OR receipt.mode == @legacy_switch_over_mode
+    OR (receipt.transaction != null AND receipt.transaction.switch_over != null)
+    OR (receipt.transaction != null AND receipt.transaction.type IN [@switch_over_mode, @switch_over_mode_alt1, @switch_over_mode_alt2, @switch_over_mode_alt3])
+  )`
 }
 
 /**
@@ -96,6 +102,18 @@ export function applyReceiptCategoryFilter(filterConditions, bindVars, category)
     bindVars.category = 'NCD'
     bindVars.bond_category = 'BOND'
     bindVars.bond_issuer_type = 'NCD'
+  } else if (catUpper === 'BOND') {
+    // Bonds only: exclude BOND receipts whose issuer.type is NCD (those belong to NCD category)
+    filterConditions.push(`(
+      ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+      AND UPPER(TO_STRING(
+        (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.issuer != null && receipt.product_details.bond.issuer.type != null)
+          ? receipt.product_details.bond.issuer.type
+          : ""
+      )) != @bond_issuer_ncd
+    )`)
+    bindVars.category = 'BOND'
+    bindVars.bond_issuer_ncd = 'NCD'
   } else {
     filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
     bindVars.category = category
@@ -126,6 +144,18 @@ export function appendCategoryToFilterString(filterClause, bindVars, category) {
             : ""
         )) == @bond_issuer_type
       )
+    )`
+  }
+  if (catUpper === 'BOND') {
+    bindVars.category = 'BOND'
+    bindVars.bond_issuer_ncd = 'NCD'
+    return `${filterClause} AND (
+      ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+      AND UPPER(TO_STRING(
+        (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.issuer != null && receipt.product_details.bond.issuer.type != null)
+          ? receipt.product_details.bond.issuer.type
+          : ""
+      )) != @bond_issuer_ncd
     )`
   }
   bindVars.category = category
@@ -216,6 +246,18 @@ export function appendExportCategoryQuery(query, bindVars, category) {
             : ""
         )) == @bond_issuer_type
       )
+    )`
+  }
+  if (catUpper === 'BOND') {
+    bindVars.category = 'BOND'
+    bindVars.bond_issuer_ncd = 'NCD'
+    return `${query} AND (
+      ((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)
+      AND UPPER(TO_STRING(
+        (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.issuer != null && receipt.product_details.bond.issuer.type != null)
+          ? receipt.product_details.bond.issuer.type
+          : ""
+      )) != @bond_issuer_ncd
     )`
   }
   bindVars.category = category

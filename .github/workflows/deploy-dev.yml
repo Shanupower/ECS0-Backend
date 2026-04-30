@@ -1,0 +1,106 @@
+name: Deploy to Dev (EC2)
+
+on:
+  push:
+    branches: [ Dev ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy frontend + backend to Dev EC2 (SSH)
+        env:
+          HOST: ${{ secrets.DEV_EC2_HOST }}
+          USERNAME: ${{ secrets.DEV_EC2_USER }}
+          KEY: ${{ secrets.DEV_EC2_SSH_KEY }}
+          KEY_B64: ${{ secrets.DEV_EC2_SSH_KEY_B64 }}
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y openssh-client
+
+          mkdir -p ~/.ssh
+          # Prefer base64 secret to avoid newline/formatting issues.
+          if [ -n "${KEY_B64:-}" ]; then
+            printf '%s' "$KEY_B64" | tr -d '\r\n ' | base64 -d > ~/.ssh/dev_deploy_key
+          else
+            printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/dev_deploy_key
+          fi
+          chmod 600 ~/.ssh/dev_deploy_key
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+          # Validate key can be parsed (fails fast with clear error)
+          ssh-keygen -y -f ~/.ssh/dev_deploy_key >/dev/null
+
+          ssh -i ~/.ssh/dev_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no "$USERNAME@$HOST" bash -s <<'EOF'
+          set -euo pipefail
+
+          echo "--- Backend: pull + npm i"
+          cd "/home/ubuntu/ECS0-Backend"
+          # Preserve server-specific env while still forcing code to match origin/Dev.
+          ENV_BAK_BACKEND="/tmp/ecs0_backend_env_$$.bak"
+          if [ -f .env ]; then cp .env "$ENV_BAK_BACKEND"; fi
+
+          git fetch origin
+          git checkout Dev
+          # Keep server deploys reproducible even if someone edited files on the box.
+          git reset --hard origin/Dev
+          git clean -fd
+
+          if [ -f "$ENV_BAK_BACKEND" ]; then mv "$ENV_BAK_BACKEND" .env; fi
+          npm i
+
+          echo "--- Frontend: pull + npm i"
+          # Stop frontend process before git clean/reset to avoid race with Vite temp files.
+          pm2 stop 0 || true
+          cd "/home/ubuntu/ECS0"
+          # Preserve server-specific env while still forcing code to match origin/Dev.
+          ENV_BAK="/tmp/ecs0_frontend_env_$$.bak"
+          if [ -f .env ]; then cp .env "$ENV_BAK"; fi
+
+          git fetch origin
+          git checkout Dev
+          git reset --hard origin/Dev
+          git clean -fd
+
+          if [ -f "$ENV_BAK" ]; then mv "$ENV_BAK" .env; fi
+          npm i
+
+          echo "--- PM2 restart"
+          pm2 restart 0
+
+          echo "--- PM2 restart backend (ensure production start, not --watch)"
+          pm2 delete "Dev-ECS-Backend" || true
+          pm2 start npm --name "Dev-ECS-Backend" --cwd "/home/ubuntu/ECS0-Backend" -- start
+          pm2 save || true
+
+          echo "--- Verify backend is serving locally"
+          BACKEND_PORT="$( (grep -E '^PORT=' "/home/ubuntu/ECS0-Backend/.env" || true) | tail -n 1 | cut -d= -f2 )"
+          BACKEND_PORT="${BACKEND_PORT:-8080}"
+
+          ok=0
+          for i in $(seq 1 15); do
+            if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/health" >/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+
+          if [ "$ok" -ne 1 ]; then
+            echo "Backend health check failed on http://127.0.0.1:${BACKEND_PORT}/api/health"
+            echo "--- Listening ports"
+            ss -ltnp || true
+            echo "--- PM2 status"
+            pm2 status || true
+            echo "--- PM2 logs (backend, last 200 lines)"
+            pm2 logs "Dev-ECS-Backend" --lines 200 --nostream || true
+            echo "--- Nginx routing (dapi/proxy_pass)"
+            sudo nginx -T 2>/dev/null | grep -n "dapi.ecsfinancial.tech\\|proxy_pass" || true
+            exit 1
+          fi
+          EOF
+

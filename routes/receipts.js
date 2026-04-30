@@ -11,6 +11,18 @@ import {
   applyMfTxnTypeOrModeFilter
 } from '../utils/receipt-filters.js'
 import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { publishEvent } from '../services/task-events.js'
+import {
+  submit as engineSubmit,
+  routeToTeam as engineRouteToTeam,
+  completeReceipt as engineCompleteReceipt,
+  rejectToCreator as engineRejectToCreator,
+  adminOverride as engineAdminOverride,
+  getReceiptHistory as engineGetHistory,
+  isReceiptEditable,
+  EngineError
+} from '../services/receipt-stage-engine.js'
+import { getAppConfig } from './app-config.js'
 
 function normalizeTenureUnit(u) {
   const v = String(u || '').trim().toLowerCase()
@@ -745,13 +757,17 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
 
     // Build structured receipt document — nested tree only; stats/list use product.category, transaction.amount, etc.
     const receiptEmpCode = d.empCode || d.emp_code || req.user.emp_code || null
+    const appCfgCreate = await getAppConfig()
+    const approvalV2Create = !!(appCfgCreate?.feature_flags?.receipts_approval_v2)
+
     const receiptDoc = {
       // ============================================
       // CORE METADATA
       // ============================================
       receipt_no: receiptNo,
       date: date,
-      status: 'Pending',
+      // Approval v2: start as Draft so submit engine can run (including auto-submit below).
+      status: approvalV2Create ? 'Draft' : 'Pending',
       branch: d.branch || null,
       user_id: req.user.sub,
       emp_code: receiptEmpCode,
@@ -811,9 +827,43 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       // Don't fail the receipt creation if PDF generation fails
     }
 
-    res.status(201).json({ 
+    publishEvent({
+      type: 'receipt.created',
+      payload: {
+        receipt_id: receiptId,
+        customer_id: receiptDoc.customer_id || null,
+        customer_name: receiptDoc.customer_name || null,
+        category: receiptDoc.category || null,
+        amount: calculations?.total || calculations?.amount || null,
+        branch: receiptDoc.branch || null,
+        branch_code: receiptDoc.branch_code || null
+      },
+      actor: { id: req.user.sub, emp_code: req.user.emp_code },
+      branch: receiptDoc.branch || null
+    })
+
+    let approval_warning = null
+    let submittedReceipt = null
+    let submittedTask = null
+    if (approvalV2Create) {
+      try {
+        const submitResult = await engineSubmit(receiptId, req.user)
+        submittedReceipt = submitResult.receipt
+        submittedTask = submitResult.task
+      } catch (err) {
+        approval_warning = err instanceof EngineError ? (err.detail || err.message) : (err?.message || String(err))
+        console.warn('[receipts] auto-submit after create failed:', approval_warning)
+      }
+    }
+
+    res.status(201).json({
       id: receiptId,
-      files: uploadedFiles
+      files: uploadedFiles,
+      ...(submittedReceipt && { receipt: submittedReceipt }),
+      ...(submittedTask && {
+        approval_task: { _key: submittedTask._key, title: submittedTask.title }
+      }),
+      ...(approval_warning && { approval_warning })
     })
   } catch (e) {
     console.error('Insert failed:', e)
@@ -1322,6 +1372,10 @@ router.get('/', requireAuth, async (req, res) => {
         filterConditions.push('receipt.status == @status')
       }
       bindVars.status = status
+    } else if (req.query.includePending === '0') {
+      // Global "Include pending" toggle is OFF → exclude pending / null-status receipts
+      // so listings stay consistent with KPIs/charts that also exclude them.
+      filterConditions.push('receipt.status == "Completed"')
     }
     applyMfTxnTypeOrModeFilter(filterConditions, bindVars, txn_type, mode)
     if (issuer) {
@@ -1623,7 +1677,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
     FOR receipt IN receipts
     FILTER receipt._key == @id
     LIMIT 1
-    RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status, product_category: receipt.product_category, receipt }
+    RETURN { id: receipt._key, user_id: receipt.user_id, emp_code: receipt.emp_code, status: receipt.status, product_category: receipt.product_category, receipt }
   `, { id })
   if (!own.length) return res.status(404).json({ error: 'not_found' })
   
@@ -1637,11 +1691,23 @@ router.patch('/:id', requireAuth, async (req, res) => {
   const existingReceipt = own[0].receipt || {}
   const isOwner = String(own[0].user_id) === String(req.user.sub)
   const isAdmin = req.user.role === 'admin'
-  const isPending = currentStatus === 'Pending'
-  
-  // Allow editing if: admin, owner, OR status is Pending (all users can edit pending receipts)
-  if (!(isAdmin || isOwner || isPending)) {
-    return res.status(403).json({ error: 'forbidden', detail: 'Only admins, owners, or pending receipts can be edited' })
+
+  // Edit-lock: when the approval workflow is active, only creator-in-Draft/Needs Changes
+  // (or admin) may edit. While the flag is off, keep the legacy admin/owner/Pending rule.
+  const flagOn = await approvalFlagOn()
+  if (flagOn) {
+    const editable = isReceiptEditable(
+      { _key: own[0].id, user_id: own[0].user_id, emp_code: own[0].emp_code, status: currentStatus },
+      req.user
+    )
+    if (!editable) {
+      return res.status(403).json({ error: 'forbidden', detail: 'Receipt is locked; only the creator may edit while it is Draft or Needs Changes' })
+    }
+  } else {
+    const isPending = currentStatus === 'Pending'
+    if (!(isAdmin || isOwner || isPending)) {
+      return res.status(403).json({ error: 'forbidden', detail: 'Only admins, owners, or pending receipts can be edited' })
+    }
   }
   
   const allowed = [
@@ -1878,53 +1944,167 @@ router.patch('/:id', requireAuth, async (req, res) => {
   res.status(204).end()
 })
 
-// Update receipt status
+// ---------------------------------------------------------------------------
+// Receipt approval workflow endpoints (v2, gated by feature flag).
+// See services/receipt-stage-engine.js for the state machine.
+// ---------------------------------------------------------------------------
+
+async function approvalFlagOn() {
+  try {
+    const cfg = await getAppConfig()
+    return !!(cfg?.feature_flags?.receipts_approval_v2)
+  } catch { return false }
+}
+
+async function requireApprovalFlag(req, res, next) {
+  if (!(await approvalFlagOn())) {
+    return res.status(404).json({ error: 'not_found', detail: 'Approval workflow is disabled' })
+  }
+  return next()
+}
+
+function sendEngineError(res, err) {
+  if (err instanceof EngineError) {
+    return res.status(err.status || 400).json({ error: err.code, detail: err.detail || err.message })
+  }
+  console.error('[receipts/engine] unexpected error:', err)
+  return res.status(500).json({ error: 'server_error', detail: err?.message || String(err) })
+}
+
+// POST /api/receipts/:id/submit — creator (or admin) submits a Draft/Needs Changes receipt to the intake team.
+router.post('/:id/submit', requireAuth, requireApprovalFlag, async (req, res) => {
+  try {
+    const { attachment_ids } = req.body || {}
+    const result = await engineSubmit(req.params.id, req.user, { attachmentIds: attachment_ids })
+    res.json({ receipt: result.receipt, task: { _key: result.task._key, title: result.task.title } })
+  } catch (err) { sendEngineError(res, err) }
+})
+
+// POST /api/receipts/:id/route — current team member approves and picks the next team.
+router.post('/:id/route', requireAuth, requireApprovalFlag, async (req, res) => {
+  try {
+    const { next_team_id, comment, attachment_ids } = req.body || {}
+    if (!next_team_id) return res.status(400).json({ error: 'validation_error', detail: 'next_team_id required' })
+    const result = await engineRouteToTeam(req.params.id, req.user, next_team_id, comment, { attachmentIds: attachment_ids })
+    res.json({ receipt: result.receipt, task: { _key: result.task._key, title: result.task.title } })
+  } catch (err) { sendEngineError(res, err) }
+})
+
+// POST /api/receipts/:id/complete — current team member approves & completes the receipt.
+router.post('/:id/complete', requireAuth, requireApprovalFlag, async (req, res) => {
+  try {
+    const { comment, attachment_ids } = req.body || {}
+    const result = await engineCompleteReceipt(req.params.id, req.user, comment, { attachmentIds: attachment_ids })
+    res.json({ receipt: result.receipt })
+  } catch (err) { sendEngineError(res, err) }
+})
+
+// POST /api/receipts/:id/reject — current team member rejects back to creator; comment required.
+router.post('/:id/reject', requireAuth, requireApprovalFlag, async (req, res) => {
+  try {
+    const { comment, attachment_ids } = req.body || {}
+    const result = await engineRejectToCreator(req.params.id, req.user, comment, { attachmentIds: attachment_ids })
+    res.json({ receipt: result.receipt })
+  } catch (err) { sendEngineError(res, err) }
+})
+
+// GET /api/receipts/:id/history — full approval trail (always available once flag is on).
+router.get('/:id/history', requireAuth, requireApprovalFlag, async (req, res) => {
+  try {
+    const history = await engineGetHistory(req.params.id)
+    res.json(history)
+  } catch (err) { sendEngineError(res, err) }
+})
+
+// Admin receipt-status override.
+//
+// When the v2 approval workflow is enabled, this endpoint is a thin wrapper
+// around `engine.adminOverride` and requires an `x-admin-reason` header for
+// audit. It accepts either the modern shape
+// ({ next_team_id?, complete?, reject?, comment? }) or a legacy
+// { status: 'Completed' | 'Cancelled' | 'Failed' | 'Pending' } body:
+//
+//   Completed          -> engine.adminOverride({ complete: true })
+//   Cancelled | Failed -> engine.adminOverride({ reject: true })
+//   Pending            -> engine.adminOverride({ /* re-submit to intake */ }) via submit path
+//
+// When the flag is OFF we keep the legacy direct-status write for
+// backwards compatibility with older clients.
 router.patch('/:id/status', requireAuth, async (req, res) => {
   try {
     const id = req.params.id
-    const { status } = req.body || {}
-    
-    if (!status) {
-      return res.status(400).json({ error: 'missing_status', detail: 'Status is required' })
+    const body = req.body || {}
+
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'forbidden', detail: 'Only admin users can update receipt status' })
     }
-    
-    // Validate status values
+
+    const receiptRows = await q(`
+      FOR receipt IN receipts FILTER receipt._key == @id LIMIT 1
+      RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status }
+    `, { id })
+    if (!receiptRows.length) return res.status(404).json({ error: 'not_found' })
+
+    if (await approvalFlagOn()) {
+      const reason = req.header('x-admin-reason') || body.admin_reason
+      if (!reason || !String(reason).trim()) {
+        return res.status(400).json({ error: 'comment_required', detail: 'x-admin-reason header (or admin_reason body field) is required for admin override' })
+      }
+
+      const override = {
+        nextTeamId: body.next_team_id || null,
+        complete: !!body.complete,
+        reject: !!body.reject,
+        comment: body.comment || reason,
+        attachmentIds: body.attachment_ids
+      }
+
+      if (body.status) {
+        const valid = ['Pending', 'Completed', 'Cancelled', 'Failed']
+        if (!valid.includes(body.status)) {
+          return res.status(400).json({ error: 'invalid_status', detail: `status must be one of: ${valid.join(', ')}` })
+        }
+        if (body.status === 'Completed') override.complete = true
+        else if (body.status === 'Cancelled' || body.status === 'Failed') override.reject = true
+        else if (body.status === 'Pending') {
+          // Re-submit: putting the receipt back in flight from a terminal state.
+          try {
+            const result = await engineSubmit(id, req.user)
+            return res.json({ message: 'Admin re-submitted receipt', receipt_id: id, receipt: result.receipt })
+          } catch (err) { return sendEngineError(res, err) }
+        }
+      }
+
+      try {
+        const result = await engineAdminOverride(id, req.user, override)
+        return res.json({
+          message: 'Admin override applied',
+          receipt_id: id,
+          new_status: result.receipt?.status,
+          receipt: result.receipt,
+          reason
+        })
+      } catch (err) { return sendEngineError(res, err) }
+    }
+
+    // Legacy path (flag off).
+    const { status } = body
+    if (!status) return res.status(400).json({ error: 'missing_status', detail: 'Status is required' })
     const validStatuses = ['Pending', 'Completed', 'Cancelled', 'Failed']
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'invalid_status', detail: `Status must be one of: ${validStatuses.join(', ')}` })
     }
-    
-    // Check if receipt exists and get ownership info
-    const receiptRows = await q(`
-      FOR receipt IN receipts
-      FILTER receipt._key == @id
-      LIMIT 1
-      RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status }
-    `, { id })
-    
-    if (!receiptRows.length) {
-      return res.status(404).json({ error: 'not_found' })
-    }
-    
-    const receipt = receiptRows[0]
-    
-    // Check permissions - only admin can update status
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'forbidden', detail: 'Only admin users can update receipt status' })
-    }
-    
-    // Update the receipt status
+
     await q(`
-      FOR receipt IN receipts
-      FILTER receipt._key == @id
-      UPDATE receipt WITH { 
+      FOR receipt IN receipts FILTER receipt._key == @id
+      UPDATE receipt WITH {
         status: @status,
         status_updated_at: DATE_ISO8601(DATE_NOW()),
         status_updated_by: @user_id
       } IN receipts
     `, { id, status, user_id: req.user.sub })
-    
-    res.status(200).json({ 
+
+    res.status(200).json({
       message: 'Status updated successfully',
       receipt_id: id,
       new_status: status
