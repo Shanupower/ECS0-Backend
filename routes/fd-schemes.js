@@ -16,6 +16,25 @@ function normalizeTenureUnit(u) {
   return 'months'
 }
 
+/** Per-slab optional BPS override; falls back to scheme-level values. */
+const SLAB_BONUS_BPS_KEYS = ['senior_citizen_bonus_bps', 'women_bonus_bps', 'renewal_bonus_bps']
+
+function effectiveBonusBps(slab, scheme, fieldName) {
+  const fromSlab = slab?.[fieldName]
+  if (Number.isFinite(fromSlab)) return fromSlab
+  const fromScheme = scheme?.[fieldName]
+  return Number.isFinite(fromScheme) ? fromScheme : 0
+}
+
+/** Excel cell → optional non-negative integer bps; undefined means omit from import patch. */
+function parseOptionalSlabBonusCell(cell) {
+  const v = cell?.value
+  if (v === null || v === undefined || v === '') return undefined
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v)
+  const n = parseInt(String(v).trim(), 10)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
+}
+
 function validateBusinessRules(data) {
   const errors = []
   
@@ -279,14 +298,30 @@ router.post('/calculate-rate', async (req, res) => {
     
     const baseRate = slab.base_interest_rate_pa
     let totalRate = baseRate
-    
-    // Calculate bonuses
+
+    const seniorBps = effectiveBonusBps(slab, scheme, 'senior_citizen_bonus_bps')
+    const womenBps = effectiveBonusBps(slab, scheme, 'women_bonus_bps')
+    const renewalBps = effectiveBonusBps(slab, scheme, 'renewal_bonus_bps')
+
+    // Calculate bonuses (% points from bps)
     const bonuses = {
-      senior_citizen: senior_citizen ? scheme.senior_citizen_bonus_bps / 100 : 0,
-      women: women ? scheme.women_bonus_bps / 100 : 0,
-      renewal: renewal ? scheme.renewal_bonus_bps / 100 : 0
+      senior_citizen: senior_citizen ? seniorBps / 100 : 0,
+      women: women ? womenBps / 100 : 0,
+      renewal: renewal ? renewalBps / 100 : 0
     }
-    
+
+    const bonuses_bps = {
+      senior_citizen: seniorBps,
+      women: womenBps,
+      renewal: renewalBps
+    }
+
+    const bonus_bps_source = {
+      senior_citizen: Number.isFinite(slab?.senior_citizen_bonus_bps) ? 'slab' : 'scheme',
+      women: Number.isFinite(slab?.women_bonus_bps) ? 'slab' : 'scheme',
+      renewal: Number.isFinite(slab?.renewal_bonus_bps) ? 'slab' : 'scheme'
+    }
+
     totalRate += bonuses.senior_citizen + bonuses.women + bonuses.renewal
     
     // Calculate effective yield for cumulative schemes
@@ -307,6 +342,8 @@ router.post('/calculate-rate', async (req, res) => {
       total_rate_pa: totalRate,
       effective_yield_pa: effective_yield_pa,
       bonuses,
+      bonuses_bps,
+      bonus_bps_source,
       slab: slab.slab_id,
       compounding_frequency: slab.compounding_frequency
     })
@@ -624,7 +661,18 @@ router.post('/issuer/:issuer_key/scheme/:scheme_id/slab', requireAuth, requireRo
         processedSlabData.effective_yield_pa = null
       }
     }
-    
+
+    for (const k of SLAB_BONUS_BPS_KEYS) {
+      const v = processedSlabData[k]
+      if (v === null || v === undefined || v === '') {
+        delete processedSlabData[k]
+      } else {
+        const n = Number(v)
+        if (Number.isFinite(n) && n >= 0) processedSlabData[k] = Math.round(n)
+        else delete processedSlabData[k]
+      }
+    }
+
     const updatedScheme = {
       ...scheme,
       rate_slabs: [...(scheme.rate_slabs || []), processedSlabData]
@@ -648,7 +696,7 @@ router.post('/issuer/:issuer_key/scheme/:scheme_id/slab', requireAuth, requireRo
     const collection = getCollection('fd_issuers')
     await collection.update(issuer_key, updatedIssuer)
     
-    res.json(slabData)
+    res.json(processedSlabData)
   } catch (error) {
     console.error('Error adding rate slab:', error)
     res.status(500).json({ error: 'Failed to add rate slab' })
@@ -695,8 +743,25 @@ router.put('/issuer/:issuer_key/scheme/:scheme_id/slab/:slab_id', requireAuth, r
         processedUpdateData.effective_yield_pa = null
       }
     }
-    
+
+    for (const k of SLAB_BONUS_BPS_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(processedUpdateData, k)) continue
+      const v = processedUpdateData[k]
+      if (v === null || v === '') {
+        delete processedUpdateData[k]
+      } else {
+        const n = Number(v)
+        if (Number.isFinite(n) && n >= 0) processedUpdateData[k] = Math.round(n)
+        else delete processedUpdateData[k]
+      }
+    }
+
     const updatedSlab = { ...scheme.rate_slabs[slabIndex], ...processedUpdateData }
+    for (const k of SLAB_BONUS_BPS_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(updateData, k) && (updateData[k] === null || updateData[k] === '')) {
+        delete updatedSlab[k]
+      }
+    }
     const updatedScheme = {
       ...scheme,
       rate_slabs: [
@@ -830,7 +895,10 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
               notes_public_display: slab.notes_public_display || '',
               is_active: slab.is_active !== false ? 'Yes' : 'No',
               cc: slab.cc ?? 0,
-              si: slab.si ?? 0
+              si: slab.si ?? 0,
+              senior_citizen_bonus_bps: slab.senior_citizen_bonus_bps ?? '',
+              women_bonus_bps: slab.women_bonus_bps ?? '',
+              renewal_bonus_bps: slab.renewal_bonus_bps ?? ''
             })
           })
         })
@@ -861,7 +929,10 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       { header: 'Notes (public)', key: 'notes_public_display', width: 35, protection: { locked: false } },
       { header: 'Is Active', key: 'is_active', width: 12, protection: { locked: false } },
       { header: 'CC %', key: 'cc', width: 12, protection: { locked: false }, style: { numFmt: '0.00000' } },
-      { header: 'SI %', key: 'si', width: 12, protection: { locked: false }, style: { numFmt: '0.00000' } }
+      { header: 'SI %', key: 'si', width: 12, protection: { locked: false }, style: { numFmt: '0.00000' } },
+      { header: 'Senior bonus BPS (slab override)', key: 'senior_citizen_bonus_bps', width: 32, protection: { locked: false } },
+      { header: 'Women bonus BPS (slab override)', key: 'women_bonus_bps', width: 32, protection: { locked: false } },
+      { header: 'Renewal bonus BPS (slab override)', key: 'renewal_bonus_bps', width: 32, protection: { locked: false } }
     ]
     
     // Style header row
@@ -880,11 +951,11 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
         row.getCell(col).protection = { locked: true }
         row.getCell(col).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } }
       }
-      for (let col = 7; col <= 18; col++) {
+      for (let col = 7; col <= 22; col++) {
         row.getCell(col).protection = { locked: false }
       }
-      row.getCell(17).numFmt = '0.00000'
       row.getCell(18).numFmt = '0.00000'
+      row.getCell(19).numFmt = '0.00000'
     })
     
     // Protect worksheet but allow editing unlocked cells
@@ -947,7 +1018,8 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
     // 1=issuer_key, 2=issuer_legal_name, 3=issuer_short_name, 4=scheme_id, 5=scheme_name, 6=slab_id,
     // 7=tenure_unit, 8=tenure_min_months, 9=tenure_max_months, 10=tenure_min_days, 11=tenure_max_days,
     // 12=payout_frequency_type, 13=base_interest_rate_pa, 14=compounding_frequency, 15=effective_yield_pa,
-    // 16=notes_public_display, 17=is_active, 18=cc, 19=si
+    // 16=notes_public_display, 17=is_active, 18=cc, 19=si,
+    // 20=senior_citizen_bonus_bps, 21=women_bonus_bps, 22=renewal_bonus_bps (optional slab overrides)
     worksheet.eachRow((row, rowNum) => {
       rowNumber = rowNum
       if (rowNum === 1) return
@@ -1002,7 +1074,14 @@ router.post('/import/excel', requireAuth, requireRole('admin'), uploadExcel, asy
         if (is_active !== undefined) updateData.is_active = is_active
         updateData.cc = cc
         updateData.si = si
-        
+
+        const seniorOv = parseOptionalSlabBonusCell(row.getCell(20))
+        const womenOv = parseOptionalSlabBonusCell(row.getCell(21))
+        const renewalOv = parseOptionalSlabBonusCell(row.getCell(22))
+        if (seniorOv !== undefined) updateData.senior_citizen_bonus_bps = seniorOv
+        if (womenOv !== undefined) updateData.women_bonus_bps = womenOv
+        if (renewalOv !== undefined) updateData.renewal_bonus_bps = renewalOv
+
         updates.push({ issuer_key, scheme_id, slab_id, updateData, row: rowNum })
       } catch (err) {
         errors.push({ row: rowNum, error: `Parsing error: ${err.message}` })

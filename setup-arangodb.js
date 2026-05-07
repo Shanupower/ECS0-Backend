@@ -402,7 +402,10 @@ async function setupDatabase() {
                     "compounding_frequency": { "type": ["string", "null"], "enum": ["Quarterly", "Half-Yearly", "Yearly", null] },
                     "effective_yield_pa": { "type": ["number", "null"], "minimum": 0, "maximum": 30, "multipleOf": 0.01 },
                     "notes_public_display": { "type": ["string", "null"] },
-                    "is_active": { "type": "boolean" }
+                    "is_active": { "type": "boolean" },
+                    "senior_citizen_bonus_bps": { "type": "number", "minimum": 0, "multipleOf": 1 },
+                    "women_bonus_bps": { "type": "number", "minimum": 0, "multipleOf": 1 },
+                    "renewal_bonus_bps": { "type": "number", "minimum": 0, "multipleOf": 1 }
                   }
                 }
               }
