@@ -35,6 +35,7 @@ import fdSchemeRoutes from './routes/fd-schemes.js'
 import ncdBondSchemeRoutes from './routes/ncd-bonds-schemes.js'
 import insuranceSchemeRoutes from './routes/insurance-schemes.js'
 import miscServicesSchemeRoutes from './routes/misc-services-schemes.js'
+import reportsRoutes from './routes/reports.js'
 
 const app = express()
 
@@ -94,6 +95,7 @@ app.use('/api/fd-schemes', fdSchemeRoutes) // FD Schemes routes
 app.use('/api/ncd-bonds-schemes', ncdBondSchemeRoutes) // NCD/Bond Schemes routes
 app.use('/api/insurance-schemes', insuranceSchemeRoutes) // Insurance Schemes routes
 app.use('/api/misc-services-schemes', miscServicesSchemeRoutes) // Misc Services Schemes routes
+app.use('/api/reports', reportsRoutes)
 
 // Health endpoint for database connection
 app.get('/health', async (req, res) => {

@@ -88,6 +88,12 @@ export function receiptProductCategory(receipt) {
   return s || null
 }
 
+function receiptEntryMode(receipt) {
+  const raw = receipt?.payment?.entry_mode ?? ''
+  const s = String(raw).trim().toUpperCase()
+  return s || null
+}
+
 /**
  * Resolve intake team for a receipt from per-category map, then fallback to receipt_intake_team_id.
  * NCD may fall back to BOND’s team if NCD is unmapped.
@@ -97,13 +103,23 @@ export async function resolveIntakeTeam(receipt) {
   const map = (cfg?.receipt_intake_teams_by_category && typeof cfg.receipt_intake_teams_by_category === 'object')
     ? cfg.receipt_intake_teams_by_category
     : {}
+  const entryMode = receipt ? receiptEntryMode(receipt) : null
   const cat = receipt ? receiptProductCategory(receipt) : null
   let intakeId = null
-  if (cat && map[cat]) {
-    intakeId = String(map[cat]).trim()
+  // Offline/Others override: ignore product and send to single configured team.
+  if (entryMode === 'OFFLINE' || entryMode === 'OTHERS') {
+    intakeId = cfg?.receipt_intake_non_online_team_id
+      ? String(cfg.receipt_intake_non_online_team_id).trim()
+      : ''
   }
-  if (!intakeId && cat === 'NCD' && map.BOND) {
-    intakeId = String(map.BOND).trim()
+  // Online (or missing/unknown): use per-product map.
+  if (!intakeId) {
+    if (cat && map[cat]) {
+      intakeId = String(map[cat]).trim()
+    }
+    if (!intakeId && cat === 'NCD' && map.BOND) {
+      intakeId = String(map.BOND).trim()
+    }
   }
   if (!intakeId) {
     intakeId = cfg?.receipt_intake_team_id ? String(cfg.receipt_intake_team_id).trim() : ''
