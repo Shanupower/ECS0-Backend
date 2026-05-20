@@ -118,7 +118,7 @@ export async function buildReceiptScopeFilter(user, query = {}) {
   return { filterConditions, bindVars }
 }
 
-/** Completed-only (stats KPI-style) vs inclusive (list/export-style: all except terminal failures). */
+/** Completed-only vs inclusive (active pipeline: pending, draft, needs changes, legacy null; exclude terminal failures). */
 export function appendReceiptStatusFilter(filterConditions, includePending) {
   if (!includePending) {
     filterConditions.push('receipt.status == "Completed"')
@@ -127,4 +127,20 @@ export function appendReceiptStatusFilter(filterConditions, includePending) {
       '(receipt.status == null OR receipt.status NOT IN ["Failed", "Rejected", "Cancelled"])'
     )
   }
+}
+
+/** Dashboard status-breakdown bucket (maps workflow statuses into Pending). */
+export const RECEIPT_STATUS_BUCKET_AQL = `(
+  receipt.status == "Completed" ? "Completed"
+  : receipt.status == "Pending" ? "Pending"
+  : receipt.status == "Draft" ? "Pending"
+  : receipt.status == "Needs Changes" ? "Pending"
+  : receipt.status == "Failed" ? "Failed"
+  : receipt.status == "Rejected" ? "Rejected"
+  : receipt.status == "Cancelled" ? "Cancelled"
+  : (receipt.status == null ? "Pending" : "Other")
+)`
+
+export function parseIncludePending(query = {}) {
+  return query.includePending === '1' || query.include_pending === '1'
 }

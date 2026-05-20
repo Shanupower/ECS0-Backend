@@ -4,6 +4,11 @@ import { requireAuth, requireRole } from '../middleware/auth.js'
 import { effectiveDateExprAql } from '../utils/date-basis.js'
 import { stateFromPincode } from '../utils/pincode-state.js'
 import { INV_AMOUNT_AQL, CC_AQL, SI_AQL } from '../utils/receipt-aggregates.js'
+import {
+  appendReceiptStatusFilter,
+  RECEIPT_STATUS_BUCKET_AQL,
+  parseIncludePending
+} from '../services/reports/receipt-scope-filter.js'
 
 const router = express.Router()
 
@@ -157,27 +162,14 @@ router.get('/summary', requireAuth, async (req, res) => {
     filterClause = `FILTER ${filterConditions.join(' AND ')}\n`
   }
   
-  // Include pending transactions if requested
-  const includePending = req.query.includePending === '1'
+  const includePending = parseIncludePending(req.query)
 
-  // Build status filter - applies to totals (counts/amounts) to keep KPIs consistent.
-  // Important: Status breakdown should remain visible for failed/rejected records even
-  // when includePending is false, so status breakdown will use a different filter below.
-  let statusFilterConditions = []
-  if (!includePending) {
-    // Only include completed receipts when includePending is false
-    statusFilterConditions.push('receipt.status == "Completed"')
-  } else {
-    // When includePending is true, include both "Completed" and "Pending" statuses
-    // Also include null for legacy receipts that may not have status set
-    statusFilterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
-  }
-  
-  // Combine base filter with status filter for all queries (total_receipts and investment amounts)
-  let allFilterConditions = [...filterConditions, ...statusFilterConditions]
+  // KPI totals, by-category, by-day, and status breakdown share the same status scope.
+  const kpiFilterConditions = [...filterConditions]
+  appendReceiptStatusFilter(kpiFilterConditions, includePending)
   let allFilterClause = ''
-  if (allFilterConditions.length > 0) {
-    allFilterClause = `FILTER ${allFilterConditions.join(' AND ')}\n`
+  if (kpiFilterConditions.length > 0) {
+    allFilterClause = `FILTER ${kpiFilterConditions.join(' AND ')}\n`
   }
   
   // Query for total receipts count - now respects includePending toggle
@@ -246,28 +238,10 @@ router.get('/summary', requireAuth, async (req, res) => {
     RETURN { date, n, amount }
   `
   
-  // Status counts: include failed/rejected/cancelled categories even when includePending=false.
-  // When includePending=false we exclude only Pending/null, but still include all other statuses.
-  // This keeps the "Status breakdown" widget informative.
-  const statusCountsFilterConditions = [...filterConditions]
-  if (!includePending) {
-    statusCountsFilterConditions.push('receipt.status != "Pending" AND receipt.status != null')
-  }
-  const statusCountsFilterClause = statusCountsFilterConditions.length > 0
-    ? `FILTER ${statusCountsFilterConditions.join(' AND ')}\n`
-    : ''
-
   const statusCountsQuery = `
     FOR receipt IN receipts
-    ${statusCountsFilterClause}
-    COLLECT status = (
-      receipt.status == "Completed" ? "Completed"
-      : receipt.status == "Pending" ? "Pending"
-      : receipt.status == "Failed" ? "Failed"
-      : receipt.status == "Rejected" ? "Rejected"
-      : receipt.status == "Cancelled" ? "Cancelled"
-      : (receipt.status == null ? "Pending" : "Other")
-    )
+    ${allFilterClause}
+    COLLECT status = ${RECEIPT_STATUS_BUCKET_AQL}
     WITH COUNT INTO count
     RETURN { status, count }
   `
@@ -722,16 +696,7 @@ router.get('/by-category', requireAuth, async (req, res) => {
   if (!(req.user.role === 'admin' && includeDeleted === '1')) {
     filterConditions.push('receipt.is_deleted == false')
   }
-  // Include pending transactions if requested
-  const includePending = req.query.includePending === '1'
-  if (!includePending) {
-    // Only include completed receipts when includePending is false
-    filterConditions.push('receipt.status == "Completed"')
-  } else {
-    // When includePending is true, include both "Completed" and "Pending" statuses
-    // Also include null for legacy receipts that may not have status set
-    filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
-  }
+  appendReceiptStatusFilter(filterConditions, parseIncludePending(req.query))
   
   if (filterConditions.length > 0) {
     filterClause = `FILTER ${filterConditions.join(' AND ')}\n`
@@ -861,16 +826,7 @@ router.get('/by-day', requireAuth, async (req, res) => {
   if (!(req.user.role === 'admin' && includeDeleted === '1')) {
     filterConditions.push('receipt.is_deleted == false')
   }
-  // Include pending transactions if requested
-  const includePending = req.query.includePending === '1'
-  if (!includePending) {
-    // Only include completed receipts when includePending is false
-    filterConditions.push('receipt.status == "Completed"')
-  } else {
-    // When includePending is true, include both "Completed" and "Pending" statuses
-    // Also include null for legacy receipts that may not have status set
-    filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
-  }
+  appendReceiptStatusFilter(filterConditions, parseIncludePending(req.query))
   
   if (filterConditions.length > 0) {
     filterClause = `FILTER ${filterConditions.join(' AND ')}\n`
@@ -957,9 +913,7 @@ router.get('/monthly-cc-si', requireAuth, async (req, res) => {
     } else { filterConditions.push('1 == 0') }
   } else if (req.user.role !== 'admin') { filterConditions.push('1 == 0') }
   if (includeDeleted !== '1') filterConditions.push('receipt.is_deleted == false')
-  const includePending = req.query.includePending === '1'
-  if (includePending) filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
-  else filterConditions.push('receipt.status == "Completed"')
+  appendReceiptStatusFilter(filterConditions, parseIncludePending(req.query))
   const filterClause = filterConditions.length ? `FILTER ${filterConditions.join(' AND ')}` : ''
   const monthExpr = `SUBSTRING(${dateExpr}, 0, 7)`
   const qry = `
@@ -993,13 +947,7 @@ router.get('/branches', requireAuth, async (req, res) => {
     if (includeDeleted !== '1') {
       filterConditions.push('receipt.is_deleted == false')
     }
-    // Include pending transactions if requested (same logic as summary)
-    const includePending = req.query.includePending === '1'
-    if (!includePending) {
-      filterConditions.push('receipt.status == "Completed"')
-    } else {
-      filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
-    }
+    appendReceiptStatusFilter(filterConditions, parseIncludePending(req.query))
     
     if (filterConditions.length > 0) {
       dateFilter = `FILTER ${filterConditions.join(' AND ')}\n`
@@ -1204,11 +1152,7 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
     // (including users with 0 receipts in the period), so we compute aggregates user-first below.
     // We therefore do NOT add a receipt.branch filter here for the branch_code path.
     
-    if (includePending !== '1') {
-      filterConditions.push('receipt.status == "Completed"')
-    } else {
-      filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
-    }
+    appendReceiptStatusFilter(filterConditions, parseIncludePending(req.query))
     
     filterConditions.push('receipt.is_deleted == false')
     // Keep legacy guard for receipt-driven mode (no branch_code path). For user-driven mode we may
@@ -1488,11 +1432,7 @@ router.get('/investor-locations', requireAuth, async (req, res) => {
     const dateExpr = effectiveDateExprAql(date_basis)
     if (from) { filterConditions.push(`${dateExpr} >= @from`); bindVars.from = from }
     if (to) { filterConditions.push(`${dateExpr} <= @to`); bindVars.to = to }
-    if (includePending === '1') {
-      filterConditions.push('(receipt.status == "Completed" OR receipt.status == "Pending" OR receipt.status == null)')
-    } else {
-      filterConditions.push('receipt.status == "Completed"')
-    }
+    appendReceiptStatusFilter(filterConditions, parseIncludePending(req.query))
     if (req.user.role === 'employee') {
       filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
       bindVars.user_id = String(req.user.sub)
