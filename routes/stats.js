@@ -461,7 +461,7 @@ router.get('/summary', requireAuth, async (req, res) => {
     viewMode === 'personal' ||
     (req.user.role === 'employee' && viewMode !== 'branch') ||
     ((req.user.role === 'manager' || req.user.role === 'branch') && viewMode === 'personal') ||
-    (req.user.role === 'admin' && emp_code && (viewMode === 'personal' || !viewMode))
+    (req.user.role === 'admin' && viewMode === 'personal')
 
   if (isPersonalScope) {
     let personalTarget = null

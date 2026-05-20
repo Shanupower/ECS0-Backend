@@ -25,11 +25,117 @@ async function ensureAuditCollection() {
 }
 
 // Allowed dashboard widget IDs for validation (single source of truth)
-const ALLOWED_DASHBOARD_WIDGETS = [
-  'kpi_cards', 'overdue_tasks', 'by_category', 'daily_timeline', 'branch_performance',
-  'target_vs_actual', 'recent_receipts', 'status_breakdown', 'category_donut', 'monthly_cc_si',
-  'top_employees', 'leads_snapshot', 'issues_snapshot', 'average_ticket', 'cc_vs_si', 'investor_heatmap'
+const LEGACY_KPI_BLOCK = 'kpi_cards'
+const KPI_WIDGET_IDS = [
+  'total_receipts',
+  'total_investments',
+  'total_customers',
+  'collection_credit_earned',
+  'service_income_earned'
 ]
+const ALLOWED_DASHBOARD_WIDGETS = [
+  LEGACY_KPI_BLOCK,
+  ...KPI_WIDGET_IDS,
+  'overdue_tasks',
+  'by_category',
+  'daily_timeline',
+  'branch_performance',
+  'target_vs_actual',
+  'recent_receipts',
+  'status_breakdown',
+  'category_donut',
+  'monthly_cc_si',
+  'top_employees',
+  'leads_snapshot',
+  'issues_snapshot',
+  'average_ticket',
+  'cc_vs_si',
+  'pending_approvals'
+]
+
+const DASHBOARD_LAYOUT_COLS = 15
+const REMOVED_DASHBOARD_WIDGETS = new Set(['investor_heatmap'])
+
+function migrateDashboardWidgets(widgets) {
+  if (widgets == null) return null
+  if (!Array.isArray(widgets)) return widgets
+  let out = widgets.map((id) => String(id).trim()).filter(Boolean)
+  out = out.filter((id) => !REMOVED_DASHBOARD_WIDGETS.has(id))
+  if (!out.includes(LEGACY_KPI_BLOCK)) return out
+  out = out.filter((id) => id !== LEGACY_KPI_BLOCK)
+  for (const kid of KPI_WIDGET_IDS) {
+    if (!out.includes(kid)) out.push(kid)
+  }
+  return out
+}
+
+function validateDashboardLayout(layout) {
+  if (layout === null) return { ok: true, value: null }
+  if (typeof layout !== 'object' || layout === null || Array.isArray(layout)) {
+    return { ok: false, error: 'dashboard_layout must be an object or null' }
+  }
+  const lg = layout.lg
+  if (!Array.isArray(lg)) {
+    return { ok: false, error: 'dashboard_layout.lg must be an array' }
+  }
+  const seen = new Set()
+  const normalized = []
+  for (const item of lg) {
+    if (!item || typeof item !== 'object') {
+      return { ok: false, error: 'Each layout item must be an object' }
+    }
+    const i = typeof item.i === 'string' ? item.i.trim() : ''
+    if (!i || REMOVED_DASHBOARD_WIDGETS.has(i)) continue
+    if (!ALLOWED_DASHBOARD_WIDGETS.includes(i)) {
+      return { ok: false, error: `Invalid layout widget id: ${item.i}` }
+    }
+    if (seen.has(i)) {
+      return { ok: false, error: `Duplicate layout widget id: ${i}` }
+    }
+    seen.add(i)
+    const x = Number(item.x)
+    const y = Number(item.y)
+    const w = Number(item.w)
+    const h = Number(item.h)
+    if (![x, y, w, h].every((n) => Number.isInteger(n) && n >= 0)) {
+      return { ok: false, error: `Layout item ${i} requires integer x, y, w, h >= 0` }
+    }
+    if (w < 1 || h < 1) {
+      return { ok: false, error: `Layout item ${i} requires w and h >= 1` }
+    }
+    if (x + w > DASHBOARD_LAYOUT_COLS) {
+      return { ok: false, error: `Layout item ${i} exceeds grid width (${DASHBOARD_LAYOUT_COLS} columns)` }
+    }
+    normalized.push({ i, x, y, w, h })
+  }
+  const value = { lg: normalized }
+  const layoutVersion = Number(layout.layoutVersion)
+  if (Number.isInteger(layoutVersion) && layoutVersion >= 1) {
+    value.layoutVersion = layoutVersion
+  }
+  return { ok: true, value }
+}
+
+function serializeDashboardLayout(layout) {
+  if (layout == null) return null
+  if (typeof layout === 'object' && Array.isArray(layout.lg)) {
+    const out = {
+      lg: layout.lg.map((item) => ({
+        i: item.i,
+        x: Number(item.x),
+        y: Number(item.y),
+        w: Number(item.w),
+        h: Number(item.h)
+      }))
+    }
+    const layoutVersion = Number(layout.layoutVersion)
+    if (Number.isInteger(layoutVersion) && layoutVersion >= 1) {
+      out.layoutVersion = layoutVersion
+    }
+    return out
+  }
+  return null
+}
 
 function parseOptionalNonNegativeNumber(value, fieldLabel) {
   if (value === undefined) return { ok: true, value: undefined }
@@ -204,15 +310,18 @@ router.get('/me', requireAuth, async (req, res) => {
     last_login_at: user.last_login_at,
     created_at: user.created_at,
     must_change_password: !!mustChangePassword,
-    dashboard_widgets: Array.isArray(user.dashboard_widgets) ? user.dashboard_widgets : null,
+    dashboard_widgets: migrateDashboardWidgets(
+      Array.isArray(user.dashboard_widgets) ? user.dashboard_widgets : null
+    ),
+    dashboard_layout: serializeDashboardLayout(user.dashboard_layout),
     personal_monthly_target: user.personal_monthly_target != null ? Number(user.personal_monthly_target) : null
   })
 })
 
-// Update current user profile (email, mobile, dashboard_widgets)
+// Update current user profile (email, mobile, dashboard_widgets, dashboard_layout)
 router.patch('/me', requireAuth, async (req, res) => {
   const id = req.user.sub
-  const { email, mobile, dashboard_widgets } = req.body || {}
+  const { email, mobile, dashboard_widgets, dashboard_layout } = req.body || {}
   const updates = {}
   
   if (email !== undefined) {
@@ -232,10 +341,18 @@ router.patch('/me', requireAuth, async (req, res) => {
       if (invalid.length > 0) {
         return res.status(400).json({ error: 'validation_error', detail: `Invalid dashboard_widgets: ${invalid.join(', ')}` })
       }
-      updates.dashboard_widgets = dashboard_widgets.map(id => id.trim())
+      updates.dashboard_widgets = migrateDashboardWidgets(dashboard_widgets.map(id => id.trim()))
     } else {
       return res.status(400).json({ error: 'validation_error', detail: 'dashboard_widgets must be an array or null' })
     }
+  }
+
+  if (dashboard_layout !== undefined) {
+    const layoutCheck = validateDashboardLayout(dashboard_layout)
+    if (!layoutCheck.ok) {
+      return res.status(400).json({ error: 'validation_error', detail: layoutCheck.error })
+    }
+    updates.dashboard_layout = layoutCheck.value
   }
   
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no_updates' })
@@ -542,7 +659,7 @@ router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
 // - Admin: full update (existing behavior)\n+// - Manager: can update personal_monthly_target for active users in their own branch only
 router.patch('/:id', requireAuth, async (req, res) => {
   const id = req.params.id
-  const { name, email, mobile, branch, role, is_active, dashboard_widgets, personal_monthly_target } = req.body || {}
+  const { name, email, mobile, branch, role, is_active, dashboard_widgets, dashboard_layout, personal_monthly_target } = req.body || {}
   const callerRole = req.user?.role
 
   if (!(callerRole === 'admin' || callerRole === 'manager')) {
@@ -579,10 +696,15 @@ router.patch('/:id', requireAuth, async (req, res) => {
       } else if (Array.isArray(dashboard_widgets)) {
         const invalid = dashboard_widgets.filter(w => typeof w !== 'string' || !w.trim() || !ALLOWED_DASHBOARD_WIDGETS.includes(w.trim()))
         if (invalid.length > 0) return res.status(400).json({ error: 'validation_error', detail: `Invalid dashboard_widgets: ${invalid.join(', ')}` })
-        updates.dashboard_widgets = dashboard_widgets.map(w => w.trim())
+        updates.dashboard_widgets = migrateDashboardWidgets(dashboard_widgets.map(w => w.trim()))
       } else {
         return res.status(400).json({ error: 'validation_error', detail: 'dashboard_widgets must be an array or null' })
       }
+    }
+    if (dashboard_layout !== undefined) {
+      const layoutCheck = validateDashboardLayout(dashboard_layout)
+      if (!layoutCheck.ok) return res.status(400).json({ error: 'validation_error', detail: layoutCheck.error })
+      updates.dashboard_layout = layoutCheck.value
     }
   }
 

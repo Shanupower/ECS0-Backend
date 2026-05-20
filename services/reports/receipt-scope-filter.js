@@ -129,16 +129,22 @@ export function appendReceiptStatusFilter(filterConditions, includePending) {
   }
 }
 
-/** Dashboard status-breakdown bucket (maps workflow statuses into Pending). */
+/**
+ * Dashboard status-breakdown bucket.
+ * Approval v2 stores team names in receipt.status while in flight — treat those as Pending
+ * when current_team_id is set, not "Other".
+ */
 export const RECEIPT_STATUS_BUCKET_AQL = `(
   receipt.status == "Completed" ? "Completed"
-  : receipt.status == "Pending" ? "Pending"
-  : receipt.status == "Draft" ? "Pending"
-  : receipt.status == "Needs Changes" ? "Pending"
   : receipt.status == "Failed" ? "Failed"
   : receipt.status == "Rejected" ? "Rejected"
   : receipt.status == "Cancelled" ? "Cancelled"
-  : (receipt.status == null ? "Pending" : "Other")
+  : receipt.status == "Pending" ? "Pending"
+  : receipt.status == "Draft" ? "Pending"
+  : receipt.status == "Needs Changes" ? "Pending"
+  : receipt.status == null ? "Pending"
+  : receipt.current_team_id != null ? "Pending"
+  : "Other"
 )`
 
 export function parseIncludePending(query = {}) {
