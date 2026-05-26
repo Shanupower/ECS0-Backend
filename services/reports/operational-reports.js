@@ -1,15 +1,21 @@
 import { q } from '../../config/database.js'
 import { effectiveDateExprAql } from '../../utils/date-basis.js'
-import { INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
+import { CC_AQL, INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
 import {
   CATEGORY_AQL,
   MF_SCHEME_CATEGORY_AQL,
-  ISSUER_NAME_AQL
+  ISSUER_NAME_AQL,
+  SCHEME_NAME_AQL
 } from '../../utils/report-aql-fragments.js'
 import { applyReceiptCategoryFilter } from '../../utils/receipt-filters.js'
 import { buildReceiptScopeFilter } from './receipt-scope-filter.js'
 import { buildReceiptReportFilters, parsePagination, canViewServiceIncome } from './report-query-builders.js'
 import { cashFlowBucketForReceipt } from './cashflow-buckets.js'
+import {
+  computeNextSipDueDate,
+  dateWindowContains,
+  normalizeReportDateBasis
+} from './report-date-helpers.js'
 
 /** Product-wise sales */
 export async function runProductWiseSales(user, query) {
@@ -19,9 +25,9 @@ export async function runProductWiseSales(user, query) {
     ${filterClause}
     LET cat = ${CATEGORY_AQL}
     COLLECT product_type = cat
-    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), incentive_amount = SUM(${SI_AQL})
+    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
     SORT amount DESC
-    RETURN { product_type, applications, amount, incentive_amount }
+    RETURN { product_type, applications, amount, collection_credit, incentive_amount }
   `
   const rows = await q(aql, bindVars)
   return rows.map((r) => ({
@@ -39,9 +45,9 @@ export async function runCategoryWiseMf(user, query) {
     FILTER UPPER(TO_STRING(cat)) IN ["MF","SIF","PMS","AIF","GIFT_CITY_FUNDS"]
     LET mf_cat = ${MF_SCHEME_CATEGORY_AQL}
     COLLECT category = mf_cat
-    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), incentive_amount = SUM(${SI_AQL})
+    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
     SORT amount DESC
-    RETURN { category, applications, amount, incentive_amount }
+    RETURN { category, applications, amount, collection_credit, incentive_amount }
   `
   const rows = await q(aql, bindVars)
   return rows.map((r) => ({
@@ -60,10 +66,10 @@ export async function runFundWiseMf(user, query) {
     FILTER UPPER(TO_STRING(cat)) IN ["MF","SIF","PMS","AIF","GIFT_CITY_FUNDS"]
     LET fund = (${scheme})
     COLLECT fund_name = (fund != null && fund != "" ? fund : "Unknown")
-    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), incentive_amount = SUM(${SI_AQL})
+    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
     SORT amount DESC
     LIMIT 500
-    RETURN { fund_name, applications, amount, incentive_amount }
+    RETURN { fund_name, applications, amount, collection_credit, incentive_amount }
   `
   const rows = await q(aql, bindVars)
   return rows.map((r) => ({
@@ -94,9 +100,182 @@ const SIP_MATCH_AQL = `(
   OR (receipt.transaction != null && receipt.transaction.type != null && LIKE(LOWER(TO_STRING(receipt.transaction.type)), "sip"))
 )`
 
-export async function runSipReport(user, query) {
+const INVESTOR_ID_AQL = `((receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id)`
+const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name)`
+const PAN_AQL = `((receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan)`
+const STATUS_AQL = `(receipt.status != null && receipt.status != "" ? receipt.status : "Pending")`
+const BRANCH_CODE_AQL = `(
+  LET raw_branch = receipt.branch
+  LET branch_doc = FIRST(
+    FOR branch IN branches
+      FILTER branch._key == raw_branch
+        OR (branch.branch_code != null && LOWER(TRIM(TO_STRING(branch.branch_code))) == LOWER(TRIM(TO_STRING(raw_branch))))
+        OR (branch.branch_name != null && LOWER(TRIM(TO_STRING(branch.branch_name))) == LOWER(TRIM(TO_STRING(raw_branch))))
+      LIMIT 1
+      RETURN branch
+  )
+  RETURN branch_doc != null && branch_doc.branch_code != null && TO_STRING(branch_doc.branch_code) != ""
+    ? TO_STRING(branch_doc.branch_code)
+    : TO_STRING(raw_branch)
+)[0]`
+const FD_MATURITY_DATE_AQL = `(
+  (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.maturity != null && receipt.product_details.fd.maturity.date != null)
+    ? receipt.product_details.fd.maturity.date
+    : receipt.fd_maturity_date
+)`
+const FD_MATURITY_AMOUNT_AQL = `(
+  (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.maturity != null && receipt.product_details.fd.maturity.amount != null)
+    ? receipt.product_details.fd.maturity.amount
+    : receipt.fd_maturity_amount
+)`
+const FD_IS_CUMULATIVE_AQL = `(
+  (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.scheme != null && receipt.product_details.fd.scheme.is_cumulative != null)
+    ? receipt.product_details.fd.scheme.is_cumulative
+    : receipt.fd_is_cumulative
+)`
+const FD_PAYOUT_AQL = `(
+  (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.payout_frequency != null)
+    ? receipt.product_details.fd.deposit.payout_frequency
+    : receipt.fd_payout_frequency
+)`
+const SCHEME_TYPE_AQL = `(
+  UPPER(TO_STRING(${CATEGORY_AQL})) IN ["FD","GOVT_FD"]
+    ? (${FD_IS_CUMULATIVE_AQL} == true ? "Cumulative" : "Non Cumulative")
+    : (UPPER(TO_STRING(${CATEGORY_AQL})) IN ["MF","SIF","PMS","AIF","GIFT_CITY_FUNDS"] ? ${MF_SCHEME_CATEGORY_AQL} : "")
+)`
+
+export async function runProductDetailReport(user, query) {
+  const { filterClause, bindVars, dateExpr } = await buildReceiptReportFilters(user, query, {})
+  const exportMode = query.format != null
+  const { page, pageSize, offset } = parsePagination(query, { maxPageSize: exportMode ? 50000 : 200 })
+  const countQ = `RETURN LENGTH(FOR receipt IN receipts ${filterClause} RETURN 1)`
+  const dataQ = `
+    FOR receipt IN receipts
+    ${filterClause}
+    SORT ${dateExpr} DESC, receipt._key DESC
+    LIMIT @offset, @limit
+    RETURN {
+      date: ${dateExpr},
+      receipt_number: receipt.receipt_no,
+      client_id: ${INVESTOR_ID_AQL},
+      client_name: ${INVESTOR_NAME_AQL},
+      pan: ${PAN_AQL},
+      product_category: ${CATEGORY_AQL},
+      issuer: ${ISSUER_NAME_AQL},
+      scheme_name: ${SCHEME_NAME_AQL},
+      amount: ${INV_AMOUNT_AQL},
+      collection_credit: ${CC_AQL},
+      incentive_amount: ${SI_AQL},
+      branch_code: ${BRANCH_CODE_AQL},
+      emp_code: receipt.emp_code,
+      status: ${STATUS_AQL}
+    }
+  `
+  const bind = { ...bindVars, offset, limit: pageSize }
+  const [countArr, rows] = await Promise.all([q(countQ, bindVars), q(dataQ, bind)])
+  const total = typeof countArr[0] === 'number' ? countArr[0] : 0
+  return {
+    rows: rows.map((r) => ({
+      ...r,
+      incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
+    })),
+    total: total || 0,
+    page,
+    page_size: pageSize
+  }
+}
+
+export async function runCategoryWiseAllProducts(user, query) {
   const { filterClause, bindVars } = await buildReceiptReportFilters(user, query, {})
-  const { page, pageSize, offset } = parsePagination(query)
+  const aql = `
+    FOR receipt IN receipts
+    ${filterClause}
+    LET category = ${CATEGORY_AQL}
+    LET issuer = ${ISSUER_NAME_AQL}
+    LET scheme = ${SCHEME_NAME_AQL}
+    LET scheme_type = ${SCHEME_TYPE_AQL}
+    LET payout_frequency = UPPER(TO_STRING(category)) IN ["FD","GOVT_FD"] ? ${FD_PAYOUT_AQL} : ""
+    COLLECT product_category = category,
+      issuer_name = (issuer != null && issuer != "" ? issuer : "Unknown"),
+      scheme_name = (scheme != null && scheme != "" ? scheme : "Unknown"),
+      type = (scheme_type != null ? scheme_type : ""),
+      fd_payout_frequency = (payout_frequency != null ? payout_frequency : "")
+    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
+    SORT product_category ASC, amount DESC
+    RETURN { product_category, issuer_name, scheme_name, type, fd_payout_frequency, applications, amount, collection_credit, incentive_amount }
+  `
+  const rows = await q(aql, bindVars)
+  return rows.map((r) => ({
+    ...r,
+    incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
+  }))
+}
+
+export async function runFdMaturityReport(user, query) {
+  const dateBasis = normalizeReportDateBasis(query.date_basis || query.dateBasis)
+  const { filterClause, bindVars } = await buildReceiptReportFilters(user, query, {
+    dateExprOverride: dateBasis === 'fd_maturity' ? FD_MATURITY_DATE_AQL : null
+  })
+  const exportMode = query.format != null
+  const { page, pageSize, offset } = parsePagination(query, { maxPageSize: exportMode ? 50000 : 200 })
+  const maturityFilter = `FILTER mat_date != null && TO_STRING(mat_date) != ""`
+  const countQ = `
+    RETURN LENGTH(
+      FOR receipt IN receipts
+      ${filterClause}
+      LET mat_date = ${FD_MATURITY_DATE_AQL}
+      ${maturityFilter}
+      RETURN 1
+    )
+  `
+  const dataQ = `
+    FOR receipt IN receipts
+    ${filterClause}
+    LET mat_date = ${FD_MATURITY_DATE_AQL}
+    ${maturityFilter}
+    SORT mat_date ASC, receipt._key DESC
+    LIMIT @offset, @limit
+    RETURN {
+      receipt_date: ${effectiveDateExprAql('receipt')},
+      maturity_date: mat_date,
+      product_category: ${CATEGORY_AQL},
+      issuer: ${ISSUER_NAME_AQL},
+      scheme_name: ${SCHEME_NAME_AQL},
+      type: ${SCHEME_TYPE_AQL},
+      fd_payout_frequency: ${FD_PAYOUT_AQL},
+      client_id: ${INVESTOR_ID_AQL},
+      client_name: ${INVESTOR_NAME_AQL},
+      amount: ${INV_AMOUNT_AQL},
+      maturity_amount: ${FD_MATURITY_AMOUNT_AQL},
+      collection_credit: ${CC_AQL},
+      incentive_amount: ${SI_AQL},
+      branch_code: ${BRANCH_CODE_AQL},
+      emp_code: receipt.emp_code,
+      receipt_number: receipt.receipt_no,
+      status: ${STATUS_AQL}
+    }
+  `
+  const bind = { ...bindVars, offset, limit: pageSize }
+  const [countArr, rows] = await Promise.all([q(countQ, bindVars), q(dataQ, bind)])
+  const total = typeof countArr[0] === 'number' ? countArr[0] : 0
+  return {
+    rows: rows.map((r) => ({
+      ...r,
+      incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
+    })),
+    total: total || 0,
+    page,
+    page_size: pageSize
+  }
+}
+
+export async function runSipReport(user, query) {
+  const dateBasis = normalizeReportDateBasis(query.date_basis || query.dateBasis)
+  const usesComputedDate = dateBasis === 'sip_due' || dateBasis === 'sip_end'
+  const filterQuery = usesComputedDate ? { ...query, from: '', to: '' } : query
+  const { filterClause, bindVars, dateExpr } = await buildReceiptReportFilters(user, filterQuery, {})
+  const exportMode = query.format != null
+  const { page, pageSize, offset } = parsePagination(query, { maxPageSize: exportMode ? 50000 : 200 })
 
   const inner = filterClause.includes('FILTER')
     ? filterClause.replace(/\n$/, '') + ` AND ${SIP_MATCH_AQL}\n`
@@ -112,13 +291,19 @@ export async function runSipReport(user, query) {
   const dataQ = `
     FOR receipt IN receipts
     ${inner}
-    SORT receipt.date DESC
-    LIMIT @offset, @limit
+    SORT ${dateExpr} DESC, receipt._key DESC
+    ${usesComputedDate ? '' : 'LIMIT @offset, @limit'}
     RETURN {
+      date: ${dateExpr},
+      product_category: ${CATEGORY_AQL},
+      issuer: ${ISSUER_NAME_AQL},
       client_name: ((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name),
+      client_id: ((receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id),
       folio: receipt.folio_policy_no,
       scheme: ((receipt.product != null && receipt.product.name != null) ? receipt.product.name : receipt.scheme_name),
       sip_amount: ${INV_AMOUNT_AQL},
+      collection_credit: ${CC_AQL},
+      incentive_amount: ${SI_AQL},
       frequency: ${SIP_FREQ_AQL},
       start_date: ${SIP_START_AQL},
       end_date: ${SIP_END_AQL},
@@ -126,13 +311,36 @@ export async function runSipReport(user, query) {
       next_due_date: null,
       status: "Running",
       receipt_id: receipt._key,
-      emp_code: receipt.emp_code
+      receipt_number: receipt.receipt_no,
+      emp_code: receipt.emp_code,
+      branch_code: ${BRANCH_CODE_AQL}
     }
   `
   const bind = { ...bindVars, offset, limit: pageSize }
-  const [countArr, rows] = await Promise.all([q(countQ, bindVars), q(dataQ, bind)])
+  const [countArr, rows] = await Promise.all([
+    usesComputedDate ? Promise.resolve([0]) : q(countQ, bindVars),
+    q(dataQ, bind)
+  ])
+  const asOf = new Date().toISOString().slice(0, 10)
+  const enriched = rows.map((r) => ({
+    ...r,
+    next_due_date: computeNextSipDueDate(r.start_date, r.frequency, asOf, r.end_date),
+    incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
+  }))
+  if (usesComputedDate) {
+    const filtered = enriched.filter((r) => {
+      const targetDate = dateBasis === 'sip_end' ? r.end_date : r.next_due_date
+      return dateWindowContains(targetDate, query.from, query.to)
+    })
+    return {
+      rows: filtered.slice(offset, offset + pageSize),
+      total: filtered.length,
+      page,
+      page_size: pageSize
+    }
+  }
   const total = typeof countArr[0] === 'number' ? countArr[0] : 0
-  return { rows, total: total || 0, page, page_size: pageSize }
+  return { rows: enriched, total: total || 0, page, page_size: pageSize }
 }
 
 export async function runCashFlowReport(user, query) {

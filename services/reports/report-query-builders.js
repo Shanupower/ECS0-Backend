@@ -10,12 +10,13 @@ export async function buildReceiptReportFilters(user, query, options = {}) {
     // Match receipt list + export when no status is passed: include null / Pending / Completed.
     // Set include_pending=0 or completed_only=1 for stats-style "Completed only" totals.
     includePendingDefault = true,
-    skipStatusFilter = false
+    skipStatusFilter = false,
+    dateExprOverride = null
   } = options
 
   const { filterConditions: scopeConditions, bindVars } = await buildReceiptScopeFilter(user, query)
   const filterConditions = [...scopeConditions]
-  const dateExpr = effectiveDateExprAql(query.date_basis || query.dateBasis)
+  const dateExpr = dateExprOverride || effectiveDateExprAql(query.date_basis || query.dateBasis)
 
   if (query.from) {
     filterConditions.push(`${dateExpr} >= @from`)

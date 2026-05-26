@@ -1,5 +1,5 @@
 import { q } from '../../config/database.js'
-import { INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
+import { CC_AQL, INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
 import {
   CATEGORY_AQL,
   ISSUER_NAME_AQL
@@ -50,6 +50,21 @@ function groupCollectKey(groupBy) {
   }
 }
 
+const BRANCH_CODE_AQL = `(
+  LET raw_branch = receipt.branch
+  LET branch_doc = FIRST(
+    FOR branch IN branches
+      FILTER branch._key == raw_branch
+        OR (branch.branch_code != null && LOWER(TRIM(TO_STRING(branch.branch_code))) == LOWER(TRIM(TO_STRING(raw_branch))))
+        OR (branch.branch_name != null && LOWER(TRIM(TO_STRING(branch.branch_name))) == LOWER(TRIM(TO_STRING(raw_branch))))
+      LIMIT 1
+      RETURN branch
+  )
+  RETURN branch_doc != null && branch_doc.branch_code != null && TO_STRING(branch_doc.branch_code) != ""
+    ? TO_STRING(branch_doc.branch_code)
+    : TO_STRING(raw_branch)
+)[0]`
+
 /**
  * Detailed Transaction MIS — paginated rows and optional grouping.
  * Column set aligns with export transaction shape (routes/export.js) and
@@ -62,18 +77,42 @@ export async function runMisTransactions(user, query) {
   const groupBy = String(query.group_by || query.groupBy || '')
     .toLowerCase()
     .trim()
-  const { page, pageSize, offset } = parsePagination(query)
+  const exportMode = query.format != null
+  const { page, pageSize, offset } = parsePagination(query, { maxPageSize: exportMode ? 50000 : 200 })
 
   const gKey = groupCollectKey(groupBy)
   if (gKey) {
-    const groupQuery = `
-      FOR receipt IN receipts
-      ${filterClause}
-      COLLECT group_key = ${gKey}
-      AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), incentive_amount = SUM(${SI_AQL})
-      SORT amount DESC
-      RETURN { group_key, applications, amount, incentive_amount }
-    `
+    const groupQuery =
+      groupBy === 'rm'
+        ? `
+          FOR receipt IN receipts
+          ${filterClause}
+          COLLECT group_key = ${gKey}
+          AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
+          LET user_doc = FIRST(
+            FOR user IN users
+              FILTER user.emp_code == group_key
+              LIMIT 1
+              RETURN user
+          )
+          SORT amount DESC
+          RETURN {
+            group_key,
+            employee_name: user_doc != null && user_doc.name != null ? user_doc.name : "",
+            applications,
+            amount,
+            collection_credit,
+            incentive_amount
+          }
+        `
+        : `
+          FOR receipt IN receipts
+          ${filterClause}
+          COLLECT group_key = ${groupBy === 'branch' ? BRANCH_CODE_AQL : gKey}
+          AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
+          SORT amount DESC
+          RETURN { group_key, applications, amount, collection_credit, incentive_amount }
+        `
     const allGroups = await q(groupQuery, bindVars)
     const total = allGroups.length
     const slice = allGroups.slice(offset, offset + pageSize)
@@ -107,6 +146,7 @@ export async function runMisTransactions(user, query) {
       months: ${MONTHS_AQL},
       transaction_type: ${TXN_TYPE_AQL},
       investment_amount: ${INV_AMOUNT_AQL},
+      collection_credit: ${CC_AQL},
       incentive_paid: ${SI_AQL},
       application_number: ${APP_NO_AQL},
       emp_code: receipt.emp_code,
@@ -134,6 +174,7 @@ export function misTransactionExportHeaders() {
     'Months',
     'Transaction Type',
     'Investment Amount',
+    'CC',
     'Incentive Paid',
     'Application Number',
     'RM Code',
@@ -152,6 +193,7 @@ export function misTransactionRowToArray(r) {
     r.months ?? '',
     r.transaction_type ?? '',
     r.investment_amount ?? 0,
+    r.collection_credit ?? 0,
     r.incentive_paid ?? '',
     r.application_number ?? '',
     r.emp_code ?? '',

@@ -1,5 +1,5 @@
 import { q } from '../../config/database.js'
-import { INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
+import { CC_AQL, INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
 import {
   CATEGORY_AQL,
   MF_SCHEME_CATEGORY_AQL,
@@ -35,9 +35,9 @@ export async function runMisSummary(user, query) {
     ${filterClause}
     LET cat = ${CATEGORY_AQL}
     COLLECT product_type = cat
-    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), incentive_amount = SUM(${SI_AQL})
+    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
     SORT amount DESC
-    RETURN { product_type, applications, amount, incentive_amount }
+    RETURN { product_type, applications, amount, collection_credit, incentive_amount }
   `
 
   const mfCatQuery = `
@@ -47,9 +47,9 @@ export async function runMisSummary(user, query) {
     FILTER UPPER(TO_STRING(cat)) IN ["MF","SIF","PMS","AIF","GIFT_CITY_FUNDS"]
     LET mf_cat = ${MF_SCHEME_CATEGORY_AQL}
     COLLECT category = mf_cat
-    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), incentive_amount = SUM(${SI_AQL})
+    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
     SORT amount DESC
-    RETURN { category, applications, amount, incentive_amount }
+    RETURN { category, applications, amount, collection_credit, incentive_amount }
   `
 
   const issuerQuery = `
@@ -58,10 +58,10 @@ export async function runMisSummary(user, query) {
     LET issuer_raw = ${ISSUER_NAME_AQL}
     LET issuer = (issuer_raw != null && TO_STRING(issuer_raw) != "") ? TRIM(TO_STRING(issuer_raw)) : "Unknown"
     COLLECT company_fund_name = issuer
-    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), incentive_amount = SUM(${SI_AQL})
+    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
     SORT amount DESC
     LIMIT 500
-    RETURN { company_fund_name, applications, amount, incentive_amount }
+    RETURN { company_fund_name, applications, amount, collection_credit, incentive_amount }
   `
 
   const { from: pmFrom, to: pmTo } = previousMonthWindow(query.to)
@@ -74,8 +74,8 @@ export async function runMisSummary(user, query) {
   const prevTotalsQuery = `
     FOR receipt IN receipts
     ${prevFilterClause}
-    COLLECT AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), incentive_amount = SUM(${SI_AQL})
-    RETURN { applications, amount, incentive_amount, period_from: @from, period_to: @to }
+    COLLECT AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
+    RETURN { applications, amount, collection_credit, incentive_amount, period_from: @from, period_to: @to }
   `
 
   const [product_summary, mf_category_summary, issuer_sales, prevArr] = await Promise.all([
@@ -88,6 +88,7 @@ export async function runMisSummary(user, query) {
   const previous_month_totals = prevArr[0] || {
     applications: 0,
     amount: 0,
+    collection_credit: 0,
     incentive_amount: 0,
     period_from: pmFrom,
     period_to: pmTo

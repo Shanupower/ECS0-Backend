@@ -5,6 +5,7 @@ import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.j
 import { uploadCsv } from '../middleware/upload.js'
 import { normalizeReceiptCategory } from '../utils/receipt-category.js'
 import { appendExportCategoryQuery, appendMfTxnTypeToExportQuery } from '../utils/receipt-filters.js'
+import { effectiveDateExprAql } from '../utils/date-basis.js'
 
 const router = express.Router()
 
@@ -43,7 +44,8 @@ async function buildBranchNameResolver() {
 // Export receipts to CSV
 router.get('/receipts', requireAuth, async (req, res) => {
   try {
-    const { from, to, branch_code } = req.query
+    const { from, to, branch_code, date_basis } = req.query
+    const dateExpr = effectiveDateExprAql(date_basis)
     let query = `
       FOR receipt IN receipts
       FILTER receipt.is_deleted == false
@@ -51,11 +53,11 @@ router.get('/receipts', requireAuth, async (req, res) => {
     let bindVars = {}
     
     if (from) {
-      query += ` AND receipt.created_at >= @from`
+      query += ` AND ${dateExpr} >= @from`
       bindVars.from = from
     }
     if (to) {
-      query += ` AND receipt.created_at <= @to`
+      query += ` AND ${dateExpr} <= @to`
       bindVars.to = to
     }
     if (branch_code) {
@@ -64,9 +66,10 @@ router.get('/receipts', requireAuth, async (req, res) => {
     }
     
     query += `
-      SORT receipt.created_at DESC
+      SORT ${dateExpr} DESC
       RETURN {
         receipt_id: receipt._key,
+        receipt_date: ${dateExpr},
         investor_id: (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id,
         investor_name: (receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name,
         investor_pan: (receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan,
@@ -102,7 +105,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
     
     // Convert to CSV
     const headers = [
-      'Receipt ID', 'Investor ID', 'Investor Name', 'PAN', 'Phone', 'Email',
+      'Receipt ID', 'Receipt Date', 'Investor ID', 'Investor Name', 'PAN', 'Phone', 'Email',
       'Amount', 'Category', 'Payment Method', 'Branch Code', 'Branch Name',
       'Created By', 'Created At', 'Status', 'Notes', 'CC', 'SI'
     ]
@@ -121,6 +124,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
     receipts.forEach(receipt => {
       const row = [
         receipt.receipt_id,
+        receipt.receipt_date || '',
         receipt.investor_id,
         `"${receipt.investor_name}"`,
         receipt.investor_pan,
@@ -173,8 +177,10 @@ router.get('/transactions', requireAuth, async (req, res) => {
       mode,
       txn_type,
       search,
+      date_basis,
       format = 'csv'
     } = req.query
+    const dateExpr = effectiveDateExprAql(date_basis)
 
     let query = `
       FOR receipt IN receipts
@@ -214,11 +220,11 @@ router.get('/transactions', requireAuth, async (req, res) => {
     }
 
     if (from) {
-      query += ` AND receipt.date >= @from`
+      query += ` AND ${dateExpr} >= @from`
       bindVars.from = from
     }
     if (to) {
-      query += ` AND receipt.date <= @to`
+      query += ` AND ${dateExpr} <= @to`
       bindVars.to = to
     }
     if (branch_code) {
@@ -264,11 +270,11 @@ router.get('/transactions', requireAuth, async (req, res) => {
     }
 
     query += `
-      SORT receipt.date DESC
+      SORT ${dateExpr} DESC
       RETURN {
         receipt_id: receipt._key,
         receipt_no: receipt.receipt_no,
-        date: receipt.date,
+        date: ${dateExpr},
         branch: receipt.branch,
         emp_code: receipt.emp_code,
         investor_id: (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id,

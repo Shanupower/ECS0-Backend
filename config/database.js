@@ -201,12 +201,17 @@ export const canAccessCustomer = async (userId, customerBranchesOrRm) => {
     const userBranch = await getUserBranch(userId)
     const canonicalKey = await getCanonicalBranchKey(userBranch)
     if (!canonicalKey) return false
+    const allowedBranchIdentifiers = new Set(
+      [canonicalKey, ...(await getBranchIdentifiersForFilter(userBranch))]
+        .filter(Boolean)
+        .map((x) => String(x).trim())
+    )
 
     if (Array.isArray(customerBranchesOrRm)) {
-      return customerBranchesOrRm.some(b => String(b) === canonicalKey)
+      return customerBranchesOrRm.some(b => allowedBranchIdentifiers.has(String(b).trim()))
     }
     if (customerBranchesOrRm != null && customerBranchesOrRm !== '') {
-      return String(customerBranchesOrRm) === canonicalKey
+      return allowedBranchIdentifiers.has(String(customerBranchesOrRm).trim())
     }
     return false
   } catch (error) {
