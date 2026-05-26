@@ -19,6 +19,7 @@ import {
   rejectToCreator as engineRejectToCreator,
   adminOverride as engineAdminOverride,
   getReceiptHistory as engineGetHistory,
+  resolveIntakeTeam as engineResolveIntakeTeam,
   isReceiptEditable,
   EngineError
 } from '../services/receipt-stage-engine.js'
@@ -1971,6 +1972,32 @@ function sendEngineError(res, err) {
   return res.status(500).json({ error: 'server_error', detail: err?.message || String(err) })
 }
 
+function normalizeEntryMode(v) {
+  const s = String(v || '').trim().toUpperCase()
+  return s || null
+}
+
+function entryModeMatches(receipt, filter) {
+  if (filter === 'all') return true
+  const mode = normalizeEntryMode(receipt?.payment?.entry_mode)
+  if (filter === 'non_online_only') return mode === 'OFFLINE' || mode === 'OTHERS'
+  if (filter === 'online_only') return mode === 'ONLINE'
+  return true
+}
+
+async function loadIntakeStageTeamIds(cfg) {
+  const ids = new Set()
+  if (cfg?.receipt_intake_team_id) ids.add(String(cfg.receipt_intake_team_id))
+  if (cfg?.receipt_intake_non_online_team_id) ids.add(String(cfg.receipt_intake_non_online_team_id))
+  const map = (cfg?.receipt_intake_teams_by_category && typeof cfg.receipt_intake_teams_by_category === 'object')
+    ? cfg.receipt_intake_teams_by_category
+    : {}
+  for (const v of Object.values(map)) {
+    if (v != null && String(v).trim() !== '') ids.add(String(v))
+  }
+  return ids
+}
+
 // POST /api/receipts/:id/submit — creator (or admin) submits a Draft/Needs Changes receipt to the intake team.
 router.post('/:id/submit', requireAuth, requireApprovalFlag, async (req, res) => {
   try {
@@ -2013,6 +2040,127 @@ router.get('/:id/history', requireAuth, requireApprovalFlag, async (req, res) =>
   try {
     const history = await engineGetHistory(req.params.id)
     res.json(history)
+  } catch (err) { sendEngineError(res, err) }
+})
+
+// POST /api/receipts/approvals/migrate-intake
+//
+// Server-side migration helper for new intake routing rules.
+// - Draft/Needs Changes: submit() (starts new cycle + creates intake task)
+// - In-flight intake-stage only: adminOverride(nextTeamId=resolved intake team)
+router.post('/approvals/migrate-intake', requireAuth, requireRole('admin', 'manager'), requireApprovalFlag, async (req, res) => {
+  try {
+    const body = req.body || {}
+    const dryRun = body.dry_run !== false
+    const filterEntryMode = body.filter_entry_mode || 'all'
+    const includeDraft = body.include_draft !== false
+    const includeNeedsChanges = body.include_needs_changes !== false
+    const includeInFlightIntakeStage = body.include_in_flight_intake_stage !== false
+    const reason = String(body.reason || '').trim()
+    const limit = Math.min(200, Math.max(1, parseInt(body.limit ?? '200', 10) || 200))
+
+    if (!dryRun && !reason) {
+      return res.status(400).json({ error: 'validation_error', detail: 'reason is required when dry_run=false' })
+    }
+
+    const cfg = await getAppConfig()
+    const intakeStageIds = await loadIntakeStageTeamIds(cfg)
+    const includeStatuses = []
+    if (includeDraft) includeStatuses.push('Draft')
+    if (includeNeedsChanges) includeStatuses.push('Needs Changes')
+
+    // Candidate query: optionally includes in-flight intake-stage receipts.
+    const candidates = await q(`
+      LET base = (
+        FOR r IN receipts
+          FILTER r.is_deleted != true
+          FILTER (
+            (${includeStatuses.length ? 'r.status IN @terminalStatuses' : 'false'})
+            OR (${includeInFlightIntakeStage ? 'r.current_team_id != null && r.current_team_id != "" && r.current_team_id IN @intakeStageIds' : 'false'})
+          )
+          SORT r.created_at ASC
+          LIMIT @limit
+          RETURN r
+      )
+      RETURN base
+    `, {
+      terminalStatuses: includeStatuses,
+      intakeStageIds: [...intakeStageIds],
+      limit
+    })
+
+    const list = Array.isArray(candidates?.[0]) ? candidates[0] : []
+    const filtered = list.filter((r) => entryModeMatches(r, filterEntryMode))
+
+    const preview = []
+    let processed = 0
+    let moved = 0
+    let skipped = 0
+    const errors = []
+
+    for (const r of filtered) {
+      processed++
+      const id = r._key
+      const isInFlight = r.current_team_id != null && String(r.current_team_id).trim() !== ''
+      const isTerminal = r.status === 'Draft' || r.status === 'Needs Changes'
+      let target = null
+      try {
+        const resolved = await engineResolveIntakeTeam(r)
+        target = resolved?.team?._key || null
+      } catch (err) {
+        errors.push({ id, code: err?.code, detail: err?.detail || err?.message || String(err) })
+        continue
+      }
+
+      const action =
+        isTerminal ? 'submit'
+          : (includeInFlightIntakeStage && isInFlight ? 'override_to_intake' : 'skip')
+
+      preview.push({
+        id,
+        status: r.status,
+        entry_mode: r?.payment?.entry_mode ?? null,
+        current_team_id: r.current_team_id ?? null,
+        target_team_id: target,
+        action
+      })
+
+      if (dryRun) continue
+
+      try {
+        if (action === 'submit') {
+          await engineSubmit(id, req.user)
+          moved++
+        } else if (action === 'override_to_intake') {
+          if (target && String(target) !== String(r.current_team_id)) {
+            await engineAdminOverride(id, req.user, { nextTeamId: target, comment: reason })
+            moved++
+          } else {
+            skipped++
+          }
+        } else {
+          skipped++
+        }
+      } catch (err) {
+        errors.push({ id, code: err?.code, detail: err?.detail || err?.message || String(err) })
+      }
+    }
+
+    return res.json({
+      dry_run: dryRun,
+      filter_entry_mode: filterEntryMode,
+      limit,
+      counts: {
+        candidates: list.length,
+        filtered: filtered.length,
+        processed,
+        moved,
+        skipped,
+        errors: errors.length
+      },
+      preview: preview.slice(0, 100),
+      errors: errors.slice(0, 50)
+    })
   } catch (err) { sendEngineError(res, err) }
 })
 
