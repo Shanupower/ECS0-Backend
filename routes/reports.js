@@ -19,6 +19,13 @@ import {
 } from '../services/reports/operational-reports.js'
 import { sendCsvReport, sendXlsxReport } from '../services/reports/report-export.js'
 import { runReportFilterOptions } from '../services/reports/filter-options.js'
+import {
+  runCustomerDetailReport,
+  buildCustomerDetailCsvRows,
+  customerDetailCsvHeaders,
+  sendCustomerDetailXlsx,
+  CustomerDetailReportError
+} from '../services/reports/customer-detail-report.js'
 
 const router = express.Router()
 
@@ -99,6 +106,14 @@ const REPORT_REGISTRY = [
     description: 'Non-completed receipts with days pending.',
     path: '/api/reports/pending-receipts',
     icon: 'Clock'
+  },
+  {
+    id: 'customer-detail',
+    title: 'Customer Detail Report',
+    description: 'Selected customers with product, category, fund, and transaction breakdowns.',
+    path: '/api/reports/customer-detail',
+    icon: 'Users',
+    group: 'Customers Report'
   }
 ]
 
@@ -378,6 +393,33 @@ router.get('/pending-receipts', async (req, res) => {
     res.json(data)
   } catch (e) {
     console.error('[reports] pending-receipts', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/customer-detail', async (req, res) => {
+  try {
+    const fmt = exportFormat(req.query)
+    const query =
+      fmt != null
+        ? { ...req.query, page: '1', page_size: '50000' }
+        : req.query
+    const data = await runCustomerDetailReport(req.user, query)
+    if (fmt === 'csv') {
+      sendCsvReport(res, 'customer_detail', customerDetailCsvHeaders, buildCustomerDetailCsvRows(data))
+      return
+    }
+    if (fmt === 'xlsx') {
+      await sendCustomerDetailXlsx(res, 'customer_detail', data)
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    if (e instanceof CustomerDetailReportError) {
+      res.status(e.status || 400).json({ error: e.message })
+      return
+    }
+    console.error('[reports] customer-detail', e)
     res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
   }
 })
