@@ -5,6 +5,7 @@ import {
   ISSUER_NAME_AQL
 } from '../../utils/report-aql-fragments.js'
 import { buildReceiptReportFilters, parsePagination, canViewServiceIncome } from './report-query-builders.js'
+import { maskServiceIncomeTotals, sumNumericFields } from './report-totals.js'
 
 const TXN_TYPE_AQL = `(
   (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
@@ -115,12 +116,16 @@ export async function runMisTransactions(user, query) {
         `
     const allGroups = await q(groupQuery, bindVars)
     const total = allGroups.length
+    const totals = maskServiceIncomeTotals(
+      user,
+      sumNumericFields(allGroups, ['applications', 'amount', 'collection_credit', 'incentive_amount'])
+    )
     const slice = allGroups.slice(offset, offset + pageSize)
     const rows = slice.map((r) => ({
       ...r,
       incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
     }))
-    return { rows, total, page, page_size: pageSize, group_by: groupBy }
+    return { rows, total, page, page_size: pageSize, group_by: groupBy, totals }
   }
 
   const countQuery = `
@@ -153,14 +158,25 @@ export async function runMisTransactions(user, query) {
       product_category: ${CATEGORY_AQL}
     }
   `
+  const totalsQuery = `
+    FOR receipt IN receipts
+    ${filterClause}
+    COLLECT AGGREGATE investment_amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_paid = SUM(${SI_AQL})
+    RETURN { investment_amount, collection_credit, incentive_paid }
+  `
   const bind = { ...bindVars, offset, limit: pageSize }
-  const [countArr, rows] = await Promise.all([q(countQuery, bindVars), q(dataQuery, bind)])
+  const [countArr, rows, totalsArr] = await Promise.all([q(countQuery, bindVars), q(dataQuery, bind), q(totalsQuery, bindVars)])
   const total = typeof countArr[0] === 'number' ? countArr[0] : countArr[0]?.total ?? 0
+  const totals = maskServiceIncomeTotals(user, totalsArr[0] || {
+    investment_amount: 0,
+    collection_credit: 0,
+    incentive_paid: 0
+  })
   const masked = rows.map((r) => ({
     ...r,
     incentive_paid: canViewServiceIncome(user) ? r.incentive_paid : null
   }))
-  return { rows: masked, total: total || 0, page, page_size: pageSize }
+  return { rows: masked, total: total || 0, page, page_size: pageSize, totals }
 }
 
 export function misTransactionExportHeaders() {

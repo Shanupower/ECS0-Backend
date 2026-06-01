@@ -51,13 +51,34 @@ export function computeNextSipDueDate(startDate, frequency, asOfDate = new Date(
   const end = ymdToUtcDate(endDate)
   const step = sipStep(frequency)
   let due = start
-  let guard = 0
-  while (due < asOf && guard < 1200) {
-    due = step.unit === 'days' ? addDays(due, step.value) : addMonths(due, step.value)
-    guard += 1
+  if (step.unit === 'days' && due < asOf) {
+    const diffDays = Math.floor((asOf.getTime() - due.getTime()) / 86400000)
+    const intervals = Math.ceil(diffDays / step.value)
+    due = addDays(due, intervals * step.value)
+  } else {
+    let guard = 0
+    while (due < asOf && guard < 1200) {
+      due = addMonths(due, step.value)
+      guard += 1
+    }
   }
   if (end && due > end) return ''
   return toYmd(due)
+}
+
+export function computeNextSipDueDateInWindow(
+  startDate,
+  frequency,
+  from = '',
+  to = '',
+  fallbackAsOfDate = new Date().toISOString().slice(0, 10),
+  endDate = ''
+) {
+  const windowStart = ymdToUtcDate(from)
+    ? String(from).slice(0, 10)
+    : (ymdToUtcDate(to) ? String(startDate || '').slice(0, 10) : fallbackAsOfDate)
+  const due = computeNextSipDueDate(startDate, frequency, windowStart, endDate)
+  return dateWindowContains(due, from, to) ? due : ''
 }
 
 export function dateWindowContains(value, from = '', to = '') {

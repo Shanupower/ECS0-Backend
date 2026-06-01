@@ -56,7 +56,8 @@ export const DEFAULT_APP_CONFIG = {
   receipt_intake_teams_by_category: {},
   receipt_final_status_label: 'Completed',
   feature_flags: {
-    receipts_approval_v2: false          // flipped on during Phase 4 cutover
+    receipts_approval_v2: false,         // flipped on during Phase 4 cutover
+    dashboard_editable_layout: true
   },
   task_labels: [],        // [{ key, label, color }] - admin editable
   task_sla_tiers: [
