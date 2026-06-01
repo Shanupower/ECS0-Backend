@@ -7,11 +7,17 @@ import {
   ISSUER_NAME_AQL,
   SCHEME_NAME_AQL
 } from '../../utils/report-aql-fragments.js'
-import { applyReceiptCategoryFilter } from '../../utils/receipt-filters.js'
 import { buildReceiptScopeFilter } from './receipt-scope-filter.js'
-import { buildReceiptReportFilters, parsePagination, canViewServiceIncome } from './report-query-builders.js'
-import { cashFlowBucketForReceipt } from './cashflow-buckets.js'
 import {
+  appendReceiptContentFilters,
+  buildReceiptReportFilters,
+  parsePagination,
+  canViewServiceIncome
+} from './report-query-builders.js'
+import { cashFlowBucketForReceipt } from './cashflow-buckets.js'
+import { maskServiceIncomeTotals, sumNumericFields } from './report-totals.js'
+import {
+  computeNextSipDueDateInWindow,
   computeNextSipDueDate,
   dateWindowContains,
   normalizeReportDateBasis
@@ -118,12 +124,22 @@ const BRANCH_CODE_AQL = `(
     ? TO_STRING(branch_doc.branch_code)
     : TO_STRING(raw_branch)
 )[0]`
-const FD_MATURITY_DATE_AQL = `(
+export const MATURITY_DATE_AQL = `(
   (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.maturity != null && receipt.product_details.fd.maturity.date != null)
     ? receipt.product_details.fd.maturity.date
-    : receipt.fd_maturity_date
+    : (receipt.fd_maturity_date != null && TO_STRING(receipt.fd_maturity_date) != "")
+      ? receipt.fd_maturity_date
+      : (receipt.product_details != null && receipt.product_details.bond != null && receipt.product_details.bond.instrument != null && receipt.product_details.bond.instrument.maturity_date != null)
+        ? receipt.product_details.bond.instrument.maturity_date
+        : (receipt.bond_maturity_date != null && TO_STRING(receipt.bond_maturity_date) != "")
+          ? receipt.bond_maturity_date
+          : (receipt.renewal_due_date != null && TO_STRING(receipt.renewal_due_date) != "")
+            ? receipt.renewal_due_date
+            : (receipt.product_details != null && receipt.product_details.insurance != null && receipt.product_details.insurance.coverage != null && receipt.product_details.insurance.coverage.maturity_date != null)
+              ? receipt.product_details.insurance.coverage.maturity_date
+              : receipt.insurance_maturity_date
 )`
-const FD_MATURITY_AMOUNT_AQL = `(
+export const MATURITY_AMOUNT_AQL = `(
   (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.maturity != null && receipt.product_details.fd.maturity.amount != null)
     ? receipt.product_details.fd.maturity.amount
     : receipt.fd_maturity_amount
@@ -171,8 +187,14 @@ export async function runProductDetailReport(user, query) {
       status: ${STATUS_AQL}
     }
   `
+  const totalsQ = `
+    FOR receipt IN receipts
+    ${filterClause}
+    COLLECT AGGREGATE amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
+    RETURN { amount, collection_credit, incentive_amount }
+  `
   const bind = { ...bindVars, offset, limit: pageSize }
-  const [countArr, rows] = await Promise.all([q(countQ, bindVars), q(dataQ, bind)])
+  const [countArr, rows, totalsArr] = await Promise.all([q(countQ, bindVars), q(dataQ, bind), q(totalsQ, bindVars)])
   const total = typeof countArr[0] === 'number' ? countArr[0] : 0
   return {
     rows: rows.map((r) => ({
@@ -180,6 +202,7 @@ export async function runProductDetailReport(user, query) {
       incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
     })),
     total: total || 0,
+    totals: maskServiceIncomeTotals(user, totalsArr[0] || { amount: 0, collection_credit: 0, incentive_amount: 0 }),
     page,
     page_size: pageSize
   }
@@ -214,7 +237,7 @@ export async function runCategoryWiseAllProducts(user, query) {
 export async function runFdMaturityReport(user, query) {
   const dateBasis = normalizeReportDateBasis(query.date_basis || query.dateBasis)
   const { filterClause, bindVars } = await buildReceiptReportFilters(user, query, {
-    dateExprOverride: dateBasis === 'fd_maturity' ? FD_MATURITY_DATE_AQL : null
+    dateExprOverride: dateBasis === 'fd_maturity' ? MATURITY_DATE_AQL : null
   })
   const exportMode = query.format != null
   const { page, pageSize, offset } = parsePagination(query, { maxPageSize: exportMode ? 50000 : 200 })
@@ -223,7 +246,7 @@ export async function runFdMaturityReport(user, query) {
     RETURN LENGTH(
       FOR receipt IN receipts
       ${filterClause}
-      LET mat_date = ${FD_MATURITY_DATE_AQL}
+      LET mat_date = ${MATURITY_DATE_AQL}
       ${maturityFilter}
       RETURN 1
     )
@@ -231,7 +254,7 @@ export async function runFdMaturityReport(user, query) {
   const dataQ = `
     FOR receipt IN receipts
     ${filterClause}
-    LET mat_date = ${FD_MATURITY_DATE_AQL}
+    LET mat_date = ${MATURITY_DATE_AQL}
     ${maturityFilter}
     SORT mat_date ASC, receipt._key DESC
     LIMIT @offset, @limit
@@ -246,7 +269,7 @@ export async function runFdMaturityReport(user, query) {
       client_id: ${INVESTOR_ID_AQL},
       client_name: ${INVESTOR_NAME_AQL},
       amount: ${INV_AMOUNT_AQL},
-      maturity_amount: ${FD_MATURITY_AMOUNT_AQL},
+      maturity_amount: ${MATURITY_AMOUNT_AQL},
       collection_credit: ${CC_AQL},
       incentive_amount: ${SI_AQL},
       branch_code: ${BRANCH_CODE_AQL},
@@ -255,8 +278,19 @@ export async function runFdMaturityReport(user, query) {
       status: ${STATUS_AQL}
     }
   `
+  const totalsQ = `
+    FOR receipt IN receipts
+    ${filterClause}
+    LET mat_date = ${MATURITY_DATE_AQL}
+    ${maturityFilter}
+    COLLECT AGGREGATE amount = SUM(${INV_AMOUNT_AQL}),
+      maturity_amount = SUM(TO_NUMBER(${MATURITY_AMOUNT_AQL})),
+      collection_credit = SUM(${CC_AQL}),
+      incentive_amount = SUM(${SI_AQL})
+    RETURN { amount, maturity_amount, collection_credit, incentive_amount }
+  `
   const bind = { ...bindVars, offset, limit: pageSize }
-  const [countArr, rows] = await Promise.all([q(countQ, bindVars), q(dataQ, bind)])
+  const [countArr, rows, totalsArr] = await Promise.all([q(countQ, bindVars), q(dataQ, bind), q(totalsQ, bindVars)])
   const total = typeof countArr[0] === 'number' ? countArr[0] : 0
   return {
     rows: rows.map((r) => ({
@@ -264,6 +298,12 @@ export async function runFdMaturityReport(user, query) {
       incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
     })),
     total: total || 0,
+    totals: maskServiceIncomeTotals(user, totalsArr[0] || {
+      amount: 0,
+      maturity_amount: 0,
+      collection_credit: 0,
+      incentive_amount: 0
+    }),
     page,
     page_size: pageSize
   }
@@ -316,15 +356,24 @@ export async function runSipReport(user, query) {
       branch_code: ${BRANCH_CODE_AQL}
     }
   `
-  const bind = { ...bindVars, offset, limit: pageSize }
-  const [countArr, rows] = await Promise.all([
+  const totalsQ = `
+    FOR receipt IN receipts
+    ${inner}
+    COLLECT AGGREGATE sip_amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
+    RETURN { sip_amount, collection_credit, incentive_amount }
+  `
+  const bind = usesComputedDate ? bindVars : { ...bindVars, offset, limit: pageSize }
+  const [countArr, rows, totalsArr] = await Promise.all([
     usesComputedDate ? Promise.resolve([0]) : q(countQ, bindVars),
-    q(dataQ, bind)
+    q(dataQ, bind),
+    usesComputedDate ? Promise.resolve([]) : q(totalsQ, bindVars)
   ])
   const asOf = new Date().toISOString().slice(0, 10)
   const enriched = rows.map((r) => ({
     ...r,
-    next_due_date: computeNextSipDueDate(r.start_date, r.frequency, asOf, r.end_date),
+    next_due_date: dateBasis === 'sip_due'
+      ? computeNextSipDueDateInWindow(r.start_date, r.frequency, query.from, query.to, asOf, r.end_date)
+      : computeNextSipDueDate(r.start_date, r.frequency, asOf, r.end_date),
     incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
   }))
   if (usesComputedDate) {
@@ -332,15 +381,30 @@ export async function runSipReport(user, query) {
       const targetDate = dateBasis === 'sip_end' ? r.end_date : r.next_due_date
       return dateWindowContains(targetDate, query.from, query.to)
     })
+    const totals = maskServiceIncomeTotals(
+      user,
+      sumNumericFields(filtered, ['sip_amount', 'collection_credit', 'incentive_amount'])
+    )
     return {
       rows: filtered.slice(offset, offset + pageSize),
       total: filtered.length,
+      totals,
       page,
       page_size: pageSize
     }
   }
   const total = typeof countArr[0] === 'number' ? countArr[0] : 0
-  return { rows: enriched, total: total || 0, page, page_size: pageSize }
+  return {
+    rows: enriched,
+    total: total || 0,
+    totals: maskServiceIncomeTotals(user, totalsArr[0] || {
+      sip_amount: 0,
+      collection_credit: 0,
+      incentive_amount: 0
+    }),
+    page,
+    page_size: pageSize
+  }
 }
 
 export async function runCashFlowReport(user, query) {
@@ -412,16 +476,7 @@ export async function runPendingReceiptsReport(user, query) {
   filterConditions.push(
     '(receipt.status == null OR receipt.status == "Pending" OR receipt.status == "Needs Changes" OR receipt.status == "Draft")'
   )
-  if (query.search && String(query.search).trim()) {
-    const s = String(query.search).trim()
-    filterConditions.push(`(
-      LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true)
-      OR LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true)
-    )`)
-    bindVars.search = s
-  }
-  const cat = query.product_type || query.category || query.product_category
-  if (cat) applyReceiptCategoryFilter(filterConditions, bindVars, cat)
+  appendReceiptContentFilters(filterConditions, bindVars, query)
 
   const { page, pageSize, offset } = parsePagination(query)
   const filterClause = `FILTER ${filterConditions.join(' AND ')}\n`
@@ -442,15 +497,21 @@ export async function runPendingReceiptsReport(user, query) {
       status: receipt.status
     }
   `
+  const totalsQ = `
+    FOR receipt IN receipts
+    ${filterClause}
+    COLLECT AGGREGATE amount = SUM(${INV_AMOUNT_AQL})
+    RETURN { amount }
+  `
   const bind = { ...bindVars, offset, limit: pageSize }
   const today = new Date().toISOString().slice(0, 10)
-  const [countArr, rows] = await Promise.all([q(countQ, bindVars), q(dataQ, bind)])
+  const [countArr, rows, totalsArr] = await Promise.all([q(countQ, bindVars), q(dataQ, bind), q(totalsQ, bindVars)])
   const total = typeof countArr[0] === 'number' ? countArr[0] : 0
   const withDays = rows.map((r) => {
     const c = r.created_at ? new Date(r.created_at).getTime() : 0
     const days = c ? Math.max(0, Math.floor((Date.now() - c) / 86400000)) : null
     return { ...r, days_pending: days, as_of: today }
   })
-  return { rows: withDays, total: total || 0, page, page_size: pageSize }
+  return { rows: withDays, total: total || 0, totals: totalsArr[0] || { amount: 0 }, page, page_size: pageSize }
 }
 

@@ -121,6 +121,35 @@ export function applyReceiptCategoryFilter(filterConditions, bindVars, category)
 }
 
 /**
+ * OR together multiple product category filters (GOVT_FD / NCD / BOND rules per category).
+ */
+export function applyReceiptCategoryFilters(filterConditions, bindVars, categories) {
+  const list = (Array.isArray(categories) ? categories : [])
+    .map((c) => String(c).trim())
+    .filter(Boolean)
+  if (!list.length) return
+  if (list.length === 1) {
+    applyReceiptCategoryFilter(filterConditions, bindVars, list[0])
+    return
+  }
+  const orParts = []
+  list.forEach((cat, i) => {
+    const subConditions = []
+    const subVars = {}
+    applyReceiptCategoryFilter(subConditions, subVars, cat)
+    if (!subConditions.length) return
+    let clause = subConditions[0]
+    for (const [key, val] of Object.entries(subVars)) {
+      const suffixed = `${key}_mc${i}`
+      bindVars[suffixed] = val
+      clause = clause.replace(new RegExp(`@${key}\\b`, 'g'), `@${suffixed}`)
+    }
+    orParts.push(`(${clause})`)
+  })
+  if (orParts.length) filterConditions.push(`(${orParts.join(' OR ')})`)
+}
+
+/**
  * Append GOVT_FD category clause to a string filterClause (branch route style: starts with "FILTER ...")
  */
 export function appendCategoryToFilterString(filterClause, bindVars, category) {

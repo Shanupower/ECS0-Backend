@@ -1,6 +1,50 @@
 import { effectiveDateExprAql } from '../../utils/date-basis.js'
-import { applyReceiptCategoryFilter } from '../../utils/receipt-filters.js'
+import { applyReceiptCategoryFilters } from '../../utils/receipt-filters.js'
+import { MF_SCHEME_CATEGORY_AQL } from '../../utils/report-aql-fragments.js'
+import {
+  parseInvestorIds,
+  parseProductCategories,
+  parseSchemeCategories
+} from '../../utils/query-list.js'
 import { buildReceiptScopeFilter, appendReceiptStatusFilter } from './receipt-scope-filter.js'
+
+/** Investor text search + category / scheme category filters (shared by standard and pending reports). */
+export function appendReceiptContentFilters(filterConditions, bindVars, query) {
+  const investorIds = parseInvestorIds(query)
+  if (investorIds.length > 0) {
+    filterConditions.push(`(
+      receipt.investor_id IN @investor_ids
+      OR (receipt.investor != null && receipt.investor.id IN @investor_ids)
+      OR (receipt.investor != null && TO_STRING(receipt.investor.id) IN @investor_ids)
+    )`)
+    bindVars.investor_ids = investorIds
+  } else if (query.search && String(query.search).trim()) {
+    const s = String(query.search).trim()
+    filterConditions.push(`(
+      (receipt.receipt_no != null && LIKE(TO_STRING(receipt.receipt_no), CONCAT("%", @search, "%"), true))
+      OR (receipt.investor != null && (
+        (receipt.investor.name != null && LIKE(TO_STRING(receipt.investor.name), CONCAT("%", @search, "%"), true))
+        OR (receipt.investor.id != null && LIKE(TO_STRING(receipt.investor.id), CONCAT("%", @search, "%"), true))
+        OR (receipt.investor.pan != null && LIKE(TO_STRING(receipt.investor.pan), CONCAT("%", @search, "%"), true))
+      ))
+      OR (receipt.investor_name != null && LIKE(TO_STRING(receipt.investor_name), CONCAT("%", @search, "%"), true))
+      OR (receipt.investor_id != null && LIKE(TO_STRING(receipt.investor_id), CONCAT("%", @search, "%"), true))
+      OR (receipt.pan != null && LIKE(TO_STRING(receipt.pan), CONCAT("%", @search, "%"), true))
+    )`)
+    bindVars.search = s
+  }
+
+  const productCategories = parseProductCategories(query)
+  if (productCategories.length > 0) {
+    applyReceiptCategoryFilters(filterConditions, bindVars, productCategories)
+  }
+
+  const schemeCategories = parseSchemeCategories(query)
+  if (schemeCategories.length > 0) {
+    filterConditions.push(`(${MF_SCHEME_CATEGORY_AQL} IN @scheme_categories)`)
+    bindVars.scheme_categories = schemeCategories
+  }
+}
 
 /**
  * Standard receipt report filters: RBAC scope, date range, optional search/category, status.
@@ -41,24 +85,7 @@ export async function buildReceiptReportFilters(user, query, options = {}) {
     appendReceiptStatusFilter(filterConditions, includePending)
   }
 
-  if (query.search && String(query.search).trim()) {
-    const s = String(query.search).trim()
-    filterConditions.push(`(
-      LIKE(receipt.receipt_no, CONCAT("%", @search, "%"), true)
-      OR (receipt.investor != null && (
-        LIKE(receipt.investor.name, CONCAT("%", @search, "%"), true)
-        OR LIKE(receipt.investor.id, CONCAT("%", @search, "%"), true)
-        OR LIKE(receipt.investor.pan, CONCAT("%", @search, "%"), true)
-      ))
-      OR LIKE(receipt.investor_name, CONCAT("%", @search, "%"), true)
-      OR LIKE(receipt.investor_id, CONCAT("%", @search, "%"), true)
-      OR LIKE(receipt.pan, CONCAT("%", @search, "%"), true)
-    )`)
-    bindVars.search = s
-  }
-
-  const cat = query.product_type || query.category || query.product_category
-  if (cat) applyReceiptCategoryFilter(filterConditions, bindVars, cat)
+  appendReceiptContentFilters(filterConditions, bindVars, query)
 
   const filterClause =
     filterConditions.length > 0 ? `FILTER ${filterConditions.join(' AND ')}\n` : ''

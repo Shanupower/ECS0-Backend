@@ -1,4 +1,68 @@
 import { q, getUserBranch, normalizeBranchName, getBranchIdentifiersForFilter } from '../../config/database.js'
+import { parseBranchCodes, parseEmpCodes } from '../../utils/query-list.js'
+
+async function resolveBranchIdentifiersUnion(branchCodes) {
+  const allIds = new Set()
+  for (const code of branchCodes) {
+    const ids = await getBranchIdentifiersForFilter(code)
+    if (ids.length > 0) {
+      ids.forEach((id) => allIds.add(id))
+    } else {
+      const normalized = normalizeBranchName(code) || code
+      if (normalized) allIds.add(String(normalized))
+    }
+  }
+  return [...allIds]
+}
+
+async function appendAdminBranchFilter(filterConditions, bindVars, branchCodes) {
+  const identifiers = await resolveBranchIdentifiersUnion(branchCodes)
+  if (identifiers.length > 0) {
+    filterConditions.push('receipt.branch IN @branchIdentifiers')
+    bindVars.branchIdentifiers = identifiers
+  } else {
+    filterConditions.push('1 == 0')
+  }
+}
+
+async function appendAdminEmpFilter(filterConditions, bindVars, user, empCodes) {
+  const codes = [...new Set(empCodes.map((c) => String(c).trim()).filter(Boolean))]
+  if (!codes.length) return
+
+  const orParts = []
+  if (codes.includes(user.emp_code)) {
+    orParts.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
+    bindVars.user_id = String(user.sub)
+    bindVars.emp_code = user.emp_code || ''
+  }
+
+  const otherCodes = codes.filter((c) => c !== user.emp_code)
+  if (otherCodes.length > 0) {
+    const userKeys = await q(
+      `
+      FOR u IN users
+        FILTER u.emp_code IN @emp_codes
+        RETURN u._key
+    `,
+      { emp_codes: otherCodes }
+    )
+    if (userKeys.length > 0) {
+      orParts.push('receipt.user_id IN @filter_user_ids')
+      orParts.push('(receipt.emp_code != null && receipt.emp_code IN @filter_emp_codes)')
+      bindVars.filter_user_ids = userKeys.map((k) => String(k))
+      bindVars.filter_emp_codes = otherCodes
+    } else if (!codes.includes(user.emp_code)) {
+      filterConditions.push('1 == 0')
+      return
+    }
+  }
+
+  if (orParts.length === 1) {
+    filterConditions.push(orParts[0])
+  } else if (orParts.length > 1) {
+    filterConditions.push(`(${orParts.join(' OR ')})`)
+  }
+}
 
 /**
  * Build receipt filter conditions mirroring stats/export scoping (no date/status here).
@@ -10,8 +74,10 @@ export async function buildReceiptScopeFilter(user, query = {}) {
   const filterConditions = []
   const bindVars = {}
   const viewMode = query.viewMode || query.view_mode
-  const empCodeParam = query.emp_code
-  const branchCodeParam = query.branch_code
+  const branchCodes = parseBranchCodes(query)
+  const empCodes = parseEmpCodes(query)
+  const hasBranchFilter = branchCodes.length > 0
+  const hasEmpFilter = empCodes.length > 0
 
   if (user.role === 'employee') {
     if (viewMode === 'branch') {
@@ -52,45 +118,24 @@ export async function buildReceiptScopeFilter(user, query = {}) {
       }
     }
   } else if (user.role === 'admin') {
-    if (branchCodeParam) {
-      const branchIdentifiers = await getBranchIdentifiersForFilter(branchCodeParam)
-      if (branchIdentifiers.length > 0) {
-        filterConditions.push('receipt.branch IN @branchIdentifiers')
-        bindVars.branchIdentifiers = branchIdentifiers
-      } else {
-        filterConditions.push('receipt.branch == @admin_branch')
-        bindVars.admin_branch = normalizeBranchName(branchCodeParam) || branchCodeParam
-      }
+    if (hasBranchFilter) {
+      await appendAdminBranchFilter(filterConditions, bindVars, branchCodes)
     }
-    if (empCodeParam) {
-      if (user.emp_code === empCodeParam) {
-        filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')
-        bindVars.user_id = String(user.sub)
-        bindVars.emp_code = user.emp_code || ''
-      } else {
-        const userResult = await q(`
-          FOR u IN users
-            FILTER u.emp_code == @emp_code
-            LIMIT 1
-            RETURN u._key
-        `, { emp_code: empCodeParam })
-        if (userResult.length > 0) {
-          filterConditions.push('receipt.user_id == @filter_user_id')
-          bindVars.filter_user_id = String(userResult[0])
-        } else {
-          filterConditions.push('1 == 0')
-        }
-      }
+    if (hasEmpFilter) {
+      await appendAdminEmpFilter(filterConditions, bindVars, user, empCodes)
     }
-    if (viewMode === 'branch' && !branchCodeParam) {
+    if (viewMode === 'branch' && !hasBranchFilter) {
       let userBranch = null
-      if (empCodeParam) {
-        const empBranchRows = await q(`
+      if (hasEmpFilter) {
+        const empBranchRows = await q(
+          `
           FOR u IN users
-            FILTER u.emp_code == @emp_code
+            FILTER u.emp_code IN @emp_codes
             LIMIT 1
             RETURN u.branch
-        `, { emp_code: empCodeParam })
+        `,
+          { emp_codes: empCodes }
+        )
         userBranch = empBranchRows?.[0] ?? null
       }
       if (!userBranch) userBranch = await getUserBranch(user.sub)
