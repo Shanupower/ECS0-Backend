@@ -2,9 +2,17 @@ import { q } from '../../config/database.js'
 import { CC_AQL, INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
 import {
   CATEGORY_AQL,
-  ISSUER_NAME_AQL
+  FD_DEPOSIT_DATE_AQL,
+  FD_TENURE_DISPLAY_AQL,
+  ISSUER_NAME_AQL,
+  MIS_PERIOD_AQL,
+  SIP_END_DATE_AQL,
+  SIP_IS_PERPETUAL_AQL,
+  SIP_START_DATE_AQL
 } from '../../utils/report-aql-fragments.js'
+import { MATURITY_DATE_AQL } from './operational-reports.js'
 import { buildReceiptReportFilters, parsePagination, canViewServiceIncome } from './report-query-builders.js'
+import { computeMisMonthsFromRow } from './report-date-helpers.js'
 import { maskServiceIncomeTotals, sumNumericFields } from './report-totals.js'
 
 const TXN_TYPE_AQL = `(
@@ -16,16 +24,6 @@ const TXN_TYPE_AQL = `(
 
 const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name)`
 const SCHEME_AQL = `((receipt.product != null && receipt.product.name != null) ? receipt.product.name : receipt.scheme_name)`
-const PERIOD_AQL = `(
-  (receipt.transaction != null && receipt.transaction.period_installments != null)
-    ? receipt.transaction.period_installments
-    : receipt.period_installments
-)`
-const MONTHS_AQL = `(
-  (receipt.transaction != null && receipt.transaction.installments_count != null)
-    ? receipt.transaction.installments_count
-    : receipt.installments_count
-)`
 const APP_NO_AQL = `(
   (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.application != null && receipt.product_details.fd.application.number != null)
     ? receipt.product_details.fd.application.number
@@ -70,7 +68,7 @@ const BRANCH_CODE_AQL = `(
  * Detailed Transaction MIS — paginated rows and optional grouping.
  * Column set aligns with export transaction shape (routes/export.js) and
  * typical MIS detail PDFs: Date, Branch, Receipt #, Investor, Scheme, Period,
- * Months, Transaction type, Investment amount, Incentive (SI), Application #, RM, Product.
+ * Months, SIP dates, FD maturity/tenure, Transaction type, amounts, Application #, RM, Product.
  * @returns {Promise<{ rows: object[], total: number, page: number, page_size: number, group_by?: string }>}
  */
 export async function runMisTransactions(user, query) {
@@ -147,8 +145,13 @@ export async function runMisTransactions(user, query) {
       receipt_id: receipt._key,
       investor_name: ${INVESTOR_NAME_AQL},
       scheme_name: ${SCHEME_AQL},
-      period: ${PERIOD_AQL},
-      months: ${MONTHS_AQL},
+      period: ${MIS_PERIOD_AQL},
+      sip_start_date: ${SIP_START_DATE_AQL},
+      sip_end_date: ${SIP_END_DATE_AQL},
+      sip_is_perpetual: ${SIP_IS_PERPETUAL_AQL},
+      fd_deposit_date: ${FD_DEPOSIT_DATE_AQL},
+      fd_maturity_date: ${MATURITY_DATE_AQL},
+      fd_tenure: ${FD_TENURE_DISPLAY_AQL},
       transaction_type: ${TXN_TYPE_AQL},
       investment_amount: ${INV_AMOUNT_AQL},
       collection_credit: ${CC_AQL},
@@ -174,6 +177,7 @@ export async function runMisTransactions(user, query) {
   })
   const masked = rows.map((r) => ({
     ...r,
+    months: computeMisMonthsFromRow(r),
     incentive_paid: canViewServiceIncome(user) ? r.incentive_paid : null
   }))
   return { rows: masked, total: total || 0, page, page_size: pageSize, totals }
@@ -188,6 +192,10 @@ export function misTransactionExportHeaders() {
     'Scheme Name',
     'Period',
     'Months',
+    'SIP Start Date',
+    'SIP End Date',
+    'FD Maturity Date',
+    'FD Tenure',
     'Transaction Type',
     'Investment Amount',
     'CC',
@@ -207,6 +215,10 @@ export function misTransactionRowToArray(r) {
     r.scheme_name ?? '',
     r.period ?? '',
     r.months ?? '',
+    r.sip_start_date ?? '',
+    r.sip_end_date ?? '',
+    r.fd_maturity_date ?? '',
+    r.fd_tenure ?? '',
     r.transaction_type ?? '',
     r.investment_amount ?? 0,
     r.collection_credit ?? 0,

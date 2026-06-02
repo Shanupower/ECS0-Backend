@@ -44,6 +44,14 @@ export function parseSchemeCategories(query = {}) {
   return parseQueryList(query, 'scheme_categories', 'scheme_category')
 }
 
+export function parseIssuerNames(query = {}) {
+  return parseQueryList(query, 'issuer_names', 'issuer_name', 'issuers')
+}
+
+export function parseSchemeNames(query = {}) {
+  return parseQueryList(query, 'scheme_names', 'scheme_name', 'schemes')
+}
+
 export function parseInvestorIds(query = {}) {
   return parseQueryList(query, 'investor_ids', 'investor_id')
 }

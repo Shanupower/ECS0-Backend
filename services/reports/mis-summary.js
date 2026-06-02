@@ -55,13 +55,14 @@ export async function runMisSummary(user, query) {
   const issuerQuery = `
     FOR receipt IN receipts
     ${filterClause}
+    LET cat = ${CATEGORY_AQL}
     LET issuer_raw = ${ISSUER_NAME_AQL}
     LET issuer = (issuer_raw != null && TO_STRING(issuer_raw) != "") ? TRIM(TO_STRING(issuer_raw)) : "Unknown"
-    COLLECT company_fund_name = issuer
+    COLLECT product_type = cat, company_fund_name = issuer
     AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
-    SORT amount DESC
+    SORT product_type ASC, amount DESC
     LIMIT 500
-    RETURN { company_fund_name, applications, amount, collection_credit, incentive_amount }
+    RETURN { product_type, company_fund_name, applications, amount, collection_credit, incentive_amount }
   `
 
   const { from: pmFrom, to: pmTo } = previousMonthWindow(query.to)

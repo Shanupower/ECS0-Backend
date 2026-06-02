@@ -1,7 +1,7 @@
 import { q, getUserBranch, normalizeBranchName, getBranchIdentifiersForFilter } from '../../config/database.js'
 import { parseBranchCodes, parseEmpCodes } from '../../utils/query-list.js'
 
-async function resolveBranchIdentifiersUnion(branchCodes) {
+export async function resolveBranchIdentifiersUnion(branchCodes) {
   const allIds = new Set()
   for (const code of branchCodes) {
     const ids = await getBranchIdentifiersForFilter(code)
@@ -195,3 +195,6 @@ export const RECEIPT_STATUS_BUCKET_AQL = `(
 export function parseIncludePending(query = {}) {
   return query.includePending === '1' || query.include_pending === '1'
 }
+
+/** Non-terminal receipts still in the approval pipeline (legacy + approval v2 team-name statuses). */
+export const PENDING_RECEIPT_FILTER_AQL = `(${RECEIPT_STATUS_BUCKET_AQL} == "Pending")`

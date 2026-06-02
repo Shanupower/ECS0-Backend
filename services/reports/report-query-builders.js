@@ -1,10 +1,16 @@
-import { effectiveDateExprAql } from '../../utils/date-basis.js'
+import {
+  effectiveDateExprAql,
+  normalizeDateForCompareAql,
+  normalizeQueryDate
+} from '../../utils/date-basis.js'
 import { applyReceiptCategoryFilters } from '../../utils/receipt-filters.js'
-import { MF_SCHEME_CATEGORY_AQL } from '../../utils/report-aql-fragments.js'
+import { MF_SCHEME_CATEGORY_AQL, ISSUER_NAME_AQL, SCHEME_NAME_AQL } from '../../utils/report-aql-fragments.js'
 import {
   parseInvestorIds,
   parseProductCategories,
-  parseSchemeCategories
+  parseSchemeCategories,
+  parseIssuerNames,
+  parseSchemeNames
 } from '../../utils/query-list.js'
 import { buildReceiptScopeFilter, appendReceiptStatusFilter } from './receipt-scope-filter.js'
 
@@ -44,6 +50,19 @@ export function appendReceiptContentFilters(filterConditions, bindVars, query) {
     filterConditions.push(`(${MF_SCHEME_CATEGORY_AQL} IN @scheme_categories)`)
     bindVars.scheme_categories = schemeCategories
   }
+
+  const issuerNames = parseIssuerNames(query).map((s) => String(s).trim().toLowerCase())
+  if (issuerNames.length > 0) {
+    // Normalise to lower-case for consistent matching across receipt sources.
+    filterConditions.push(`(LOWER(TRIM(TO_STRING(${ISSUER_NAME_AQL}))) IN @issuer_names)`)
+    bindVars.issuer_names = issuerNames
+  }
+
+  const schemeNames = parseSchemeNames(query).map((s) => String(s).trim().toLowerCase())
+  if (schemeNames.length > 0) {
+    filterConditions.push(`(LOWER(TRIM(TO_STRING(${SCHEME_NAME_AQL}))) IN @scheme_names)`)
+    bindVars.scheme_names = schemeNames
+  }
 }
 
 /**
@@ -61,14 +80,17 @@ export async function buildReceiptReportFilters(user, query, options = {}) {
   const { filterConditions: scopeConditions, bindVars } = await buildReceiptScopeFilter(user, query)
   const filterConditions = [...scopeConditions]
   const dateExpr = dateExprOverride || effectiveDateExprAql(query.date_basis || query.dateBasis)
+  const dateKey = normalizeDateForCompareAql(dateExpr)
 
-  if (query.from) {
-    filterConditions.push(`${dateExpr} >= @from`)
-    bindVars.from = query.from
+  const from = normalizeQueryDate(query.from)
+  if (from) {
+    filterConditions.push(`${dateKey} >= @from`)
+    bindVars.from = from
   }
-  if (query.to) {
-    filterConditions.push(`${dateExpr} <= @to`)
-    bindVars.to = query.to
+  const to = normalizeQueryDate(query.to)
+  if (to) {
+    filterConditions.push(`${dateKey} <= @to`)
+    bindVars.to = to
   }
 
   if (!skipStatusFilter) {

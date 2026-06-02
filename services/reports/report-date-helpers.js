@@ -88,3 +88,39 @@ export function dateWindowContains(value, from = '', to = '') {
   if (to && s > String(to).slice(0, 10)) return false
   return true
 }
+
+function firstYmd(...values) {
+  for (const v of values) {
+    const s = String(v ?? '').trim().slice(0, 10)
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  }
+  return ''
+}
+
+/** Calendar months between two YYYY-MM-DD dates (end inclusive span length). */
+export function computeMonthsBetweenDates(startDate, endDate) {
+  const start = ymdToUtcDate(startDate)
+  const end = ymdToUtcDate(endDate)
+  if (!start || !end || end < start) return null
+  let months = (end.getUTCFullYear() - start.getUTCFullYear()) * 12 + (end.getUTCMonth() - start.getUTCMonth())
+  if (end.getUTCDate() < start.getUTCDate()) months -= 1
+  return months
+}
+
+/** MIS "Months" — derived from start/end dates on the row, not stored installment counts. */
+export function computeMisMonthsFromRow(row = {}) {
+  const start = firstYmd(
+    row.sip_start_date,
+    row.start_date,
+    row.swp_start_date,
+    row.stp_start_date,
+    row.fd_deposit_date,
+    row.fd_booking_date
+  )
+  let end = firstYmd(row.sip_end_date, row.end_date, row.fd_maturity_date, row.maturity_date)
+  if (!end && start && row.sip_is_perpetual) {
+    const perpetualStart = ymdToUtcDate(start)
+    if (perpetualStart) end = toYmd(addMonths(perpetualStart, 40 * 12))
+  }
+  return computeMonthsBetweenDates(start, end)
+}

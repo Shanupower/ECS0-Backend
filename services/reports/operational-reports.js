@@ -3,11 +3,16 @@ import { effectiveDateExprAql } from '../../utils/date-basis.js'
 import { CC_AQL, INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
 import {
   CATEGORY_AQL,
+  FD_DEPOSIT_DATE_AQL,
   MF_SCHEME_CATEGORY_AQL,
   ISSUER_NAME_AQL,
-  SCHEME_NAME_AQL
+  MIS_PERIOD_AQL,
+  SCHEME_NAME_AQL,
+  SIP_END_DATE_AQL,
+  SIP_IS_PERPETUAL_AQL,
+  SIP_START_DATE_AQL
 } from '../../utils/report-aql-fragments.js'
-import { buildReceiptScopeFilter } from './receipt-scope-filter.js'
+import { buildReceiptScopeFilter, PENDING_RECEIPT_FILTER_AQL } from './receipt-scope-filter.js'
 import {
   appendReceiptContentFilters,
   buildReceiptReportFilters,
@@ -17,53 +22,16 @@ import {
 import { cashFlowBucketForReceipt } from './cashflow-buckets.js'
 import { maskServiceIncomeTotals, sumNumericFields } from './report-totals.js'
 import {
+  computeMisMonthsFromRow,
   computeNextSipDueDateInWindow,
   computeNextSipDueDate,
   dateWindowContains,
   normalizeReportDateBasis
 } from './report-date-helpers.js'
 
-/** Product-wise sales */
-export async function runProductWiseSales(user, query) {
-  const { filterClause, bindVars } = await buildReceiptReportFilters(user, query, {})
-  const aql = `
-    FOR receipt IN receipts
-    ${filterClause}
-    LET cat = ${CATEGORY_AQL}
-    COLLECT product_type = cat
-    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
-    SORT amount DESC
-    RETURN { product_type, applications, amount, collection_credit, incentive_amount }
-  `
-  const rows = await q(aql, bindVars)
-  return rows.map((r) => ({
-    ...r,
-    incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
-  }))
-}
-
-export async function runCategoryWiseMf(user, query) {
-  const { filterClause, bindVars } = await buildReceiptReportFilters(user, query, {})
-  const aql = `
-    FOR receipt IN receipts
-    ${filterClause}
-    LET cat = ${CATEGORY_AQL}
-    FILTER UPPER(TO_STRING(cat)) IN ["MF","SIF","PMS","AIF","GIFT_CITY_FUNDS"]
-    LET mf_cat = ${MF_SCHEME_CATEGORY_AQL}
-    COLLECT category = mf_cat
-    AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
-    SORT amount DESC
-    RETURN { category, applications, amount, collection_credit, incentive_amount }
-  `
-  const rows = await q(aql, bindVars)
-  return rows.map((r) => ({
-    ...r,
-    incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
-  }))
-}
-
 export async function runFundWiseMf(user, query) {
   const { filterClause, bindVars } = await buildReceiptReportFilters(user, query, {})
+  const exportMode = query.format != null
   const scheme = `((receipt.product != null && receipt.product.name != null) ? receipt.product.name : receipt.scheme_name)`
   const aql = `
     FOR receipt IN receipts
@@ -74,7 +42,7 @@ export async function runFundWiseMf(user, query) {
     COLLECT fund_name = (fund != null && fund != "" ? fund : "Unknown")
     AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
     SORT amount DESC
-    LIMIT 500
+    ${exportMode ? '' : 'LIMIT 500'}
     RETURN { fund_name, applications, amount, collection_credit, incentive_amount }
   `
   const rows = await q(aql, bindVars)
@@ -179,6 +147,12 @@ export async function runProductDetailReport(user, query) {
       product_category: ${CATEGORY_AQL},
       issuer: ${ISSUER_NAME_AQL},
       scheme_name: ${SCHEME_NAME_AQL},
+      period: ${MIS_PERIOD_AQL},
+      sip_start_date: ${SIP_START_DATE_AQL},
+      sip_end_date: ${SIP_END_DATE_AQL},
+      sip_is_perpetual: ${SIP_IS_PERPETUAL_AQL},
+      fd_deposit_date: ${FD_DEPOSIT_DATE_AQL},
+      fd_maturity_date: ${MATURITY_DATE_AQL},
       amount: ${INV_AMOUNT_AQL},
       collection_credit: ${CC_AQL},
       incentive_amount: ${SI_AQL},
@@ -199,6 +173,7 @@ export async function runProductDetailReport(user, query) {
   return {
     rows: rows.map((r) => ({
       ...r,
+      months: computeMisMonthsFromRow(r),
       incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
     })),
     total: total || 0,
@@ -264,6 +239,12 @@ export async function runFdMaturityReport(user, query) {
       product_category: ${CATEGORY_AQL},
       issuer: ${ISSUER_NAME_AQL},
       scheme_name: ${SCHEME_NAME_AQL},
+      period: ${MIS_PERIOD_AQL},
+      sip_start_date: ${SIP_START_DATE_AQL},
+      sip_end_date: ${SIP_END_DATE_AQL},
+      sip_is_perpetual: ${SIP_IS_PERPETUAL_AQL},
+      fd_deposit_date: ${FD_DEPOSIT_DATE_AQL},
+      maturity_date: mat_date,
       type: ${SCHEME_TYPE_AQL},
       fd_payout_frequency: ${FD_PAYOUT_AQL},
       client_id: ${INVESTOR_ID_AQL},
@@ -295,6 +276,7 @@ export async function runFdMaturityReport(user, query) {
   return {
     rows: rows.map((r) => ({
       ...r,
+      months: computeMisMonthsFromRow({ ...r, fd_maturity_date: r.maturity_date }),
       incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
     })),
     total: total || 0,
@@ -345,8 +327,10 @@ export async function runSipReport(user, query) {
       collection_credit: ${CC_AQL},
       incentive_amount: ${SI_AQL},
       frequency: ${SIP_FREQ_AQL},
+      period: ${MIS_PERIOD_AQL},
       start_date: ${SIP_START_AQL},
       end_date: ${SIP_END_AQL},
+      sip_is_perpetual: ${SIP_IS_PERPETUAL_AQL},
       last_installment_date: (receipt.payment != null && receipt.payment.transaction_date != null ? receipt.payment.transaction_date : receipt.txn_date),
       next_due_date: null,
       status: "Running",
@@ -371,6 +355,7 @@ export async function runSipReport(user, query) {
   const asOf = new Date().toISOString().slice(0, 10)
   const enriched = rows.map((r) => ({
     ...r,
+    months: computeMisMonthsFromRow(r),
     next_due_date: dateBasis === 'sip_due'
       ? computeNextSipDueDateInWindow(r.start_date, r.frequency, query.from, query.to, asOf, r.end_date)
       : computeNextSipDueDate(r.start_date, r.frequency, asOf, r.end_date),
@@ -473,12 +458,11 @@ export async function runPendingReceiptsReport(user, query) {
     filterConditions.push(`${dateExpr} <= @to`)
     bindVars.to = query.to
   }
-  filterConditions.push(
-    '(receipt.status == null OR receipt.status == "Pending" OR receipt.status == "Needs Changes" OR receipt.status == "Draft")'
-  )
+  filterConditions.push(PENDING_RECEIPT_FILTER_AQL)
   appendReceiptContentFilters(filterConditions, bindVars, query)
 
-  const { page, pageSize, offset } = parsePagination(query)
+  const exportMode = query.format != null
+  const { page, pageSize, offset } = parsePagination(query, { maxPageSize: exportMode ? 50000 : 200 })
   const filterClause = `FILTER ${filterConditions.join(' AND ')}\n`
   const countQ = `RETURN LENGTH(FOR receipt IN receipts ${filterClause} RETURN 1)`
   const dataQ = `

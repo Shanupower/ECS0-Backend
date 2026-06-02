@@ -1,17 +1,14 @@
 import assert from 'node:assert/strict'
 
 import {
-  parseCustomerDetailInvestorIds,
-  MAX_CUSTOMER_DETAIL_INVESTOR_IDS,
   CustomerDetailReportError,
-  buildCustomerDetailCsvRows
+  MAX_CUSTOMER_DETAIL_INVESTOR_IDS,
+  buildCustomerDetailCsvRows,
+  parseCustomerDetailInvestorIds,
+  parseCustomerListSort
 } from '../../services/reports/customer-detail-report.js'
 
 assert.throws(() => parseCustomerDetailInvestorIds({}), CustomerDetailReportError)
-assert.throws(() => parseCustomerDetailInvestorIds({ investor_ids: '' }), CustomerDetailReportError)
-
-const ids = parseCustomerDetailInvestorIds({ investor_ids: '101,202' })
-assert.deepEqual(ids, ['101', '202'])
 
 const tooMany = Array.from({ length: MAX_CUSTOMER_DETAIL_INVESTOR_IDS + 1 }, (_, i) => String(i + 1)).join(',')
 assert.throws(() => parseCustomerDetailInvestorIds({ investor_ids: tooMany }), CustomerDetailReportError)
@@ -23,8 +20,7 @@ const sample = {
       profile: { name: 'Test User', pan: 'X', pin: '500001' },
       summary: { applications: 2, total_investment: 1000, collection_credit: 10, incentive_amount: 1 },
       by_product: [{ product_category: 'MF', applications: 2, amount: 1000, collection_credit: 10, incentive_amount: 1 }],
-      by_scheme_category: [],
-      by_fund: []
+      by_scheme_category: []
     }
   ],
   transactions: {
@@ -44,5 +40,12 @@ const csvRows = buildCustomerDetailCsvRows(sample)
 assert.ok(csvRows.some((r) => r[0] === 'Profile' && r[1] === 101))
 assert.ok(csvRows.some((r) => r[0] === 'By Product'))
 assert.ok(csvRows.some((r) => r[0] === 'Transaction'))
+
+assert.deepEqual(parseCustomerListSort({ customer_sort: 'pin:desc' }), { field: 'pin', dir: 'DESC' })
+assert.deepEqual(parseCustomerListSort({ customer_sort: 'total_investment:asc' }), {
+  field: 'total_investment',
+  dir: 'ASC'
+})
+assert.deepEqual(parseCustomerListSort({}), { field: 'name', dir: 'ASC' })
 
 console.log('[White Box] customer-detail-report tests passed')

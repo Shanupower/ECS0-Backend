@@ -1,11 +1,11 @@
 import express from 'express'
-import ExcelJS from 'exceljs'
 import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName, getUserBranch } from '../config/database.js'
 import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.js'
 import { uploadCsv } from '../middleware/upload.js'
 import { normalizeReceiptCategory } from '../utils/receipt-category.js'
 import { appendExportCategoryQuery, appendMfTxnTypeToExportQuery } from '../utils/receipt-filters.js'
 import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { buildExportMeta, sendCsvReport, sendXlsxReport } from '../services/reports/report-export.js'
 
 const router = express.Router()
 
@@ -103,14 +103,11 @@ router.get('/receipts', requireAuth, async (req, res) => {
     })
     const resolveBranchName = await buildBranchNameResolver()
     
-    // Convert to CSV
     const headers = [
       'Receipt ID', 'Receipt Date', 'Investor ID', 'Investor Name', 'PAN', 'Phone', 'Email',
       'Amount', 'Category', 'Payment Method', 'Branch Code', 'Branch Name',
       'Created By', 'Created At', 'Status', 'Notes', 'CC', 'SI'
     ]
-    
-    const csvRows = [headers.join(',')]
 
     const normalizeTxnTypeToModeDisplay = (raw) => {
       const v = String(raw || '').trim()
@@ -118,53 +115,42 @@ router.get('/receipts', requireAuth, async (req, res) => {
       const upper = v.toUpperCase()
       if (v === 'Lump Sum' || v === 'Lumpsum' || v === 'LumpSum' || upper === 'LUMPSUM') return 'Lump Sum'
       if (v === 'Switch Over' || upper === 'SWITCH_OVER' || v === 'SwitchOver' || upper === 'SWITCHOVER') return 'Switch Over'
-      return v // SIP / SWP / STP or anything else
+      return v
     }
-    
-    receipts.forEach(receipt => {
-      const row = [
-        receipt.receipt_id,
-        receipt.receipt_date || '',
-        receipt.investor_id,
-        `"${receipt.investor_name}"`,
-        receipt.investor_pan,
-        receipt.investor_phone,
-        receipt.investor_email,
-        receipt.amount,
-        receipt.category,
-        normalizeTxnTypeToModeDisplay(receipt.payment_method),
-        receipt.branch_code,
-        `"${resolveBranchName(receipt.branch_name || receipt.branch_code).replace(/"/g, '""')}"`,
-        receipt.created_by,
-        receipt.created_at,
-        receipt.status,
-        `"${receipt.notes || ''}"`,
-        receipt.cc || 0,
-        // Hide SI from non-admins
-        req.user.role === 'admin' ? (receipt.si || 0) : ''
-      ]
-      csvRows.push(row.join(','))
+
+    const rows = receipts.map((receipt) => [
+      receipt.receipt_id,
+      receipt.receipt_date || '',
+      receipt.investor_id,
+      receipt.investor_name,
+      receipt.investor_pan,
+      receipt.investor_phone,
+      receipt.investor_email,
+      receipt.amount,
+      receipt.category,
+      normalizeTxnTypeToModeDisplay(receipt.payment_method),
+      receipt.branch_code,
+      resolveBranchName(receipt.branch_name || receipt.branch_code),
+      receipt.created_by,
+      receipt.created_at,
+      receipt.status,
+      receipt.notes || '',
+      receipt.cc || 0,
+      req.user.role === 'admin' ? (receipt.si || 0) : ''
+    ])
+
+    const meta = buildExportMeta({
+      reportTitle: 'Receipts Export',
+      from,
+      to
     })
-    
-    const csv = csvRows.join('\n')
-    
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="receipts_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+    sendCsvReport(res, 'receipts', headers, rows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export receipts' })
   }
 })
 
-function escapeCsvField(v) {
-  if (v == null || v === '') return ''
-  const s = String(v)
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
-  return s
-}
-
-// Export detailed transaction history (CSV or XLSX)
 router.get('/transactions', requireAuth, async (req, res) => {
   try {
     const {
@@ -401,7 +387,6 @@ router.get('/transactions', requireAuth, async (req, res) => {
 
     const fmt = String(format || '').toLowerCase()
     const outFmt = fmt === 'xlsx' ? 'xlsx' : (fmt === 'json' ? 'json' : 'csv')
-    const stamp = new Date().toISOString().split('T')[0]
 
     if (outFmt === 'json') {
       const data = rows.map(r => {
@@ -452,25 +437,20 @@ router.get('/transactions', requireAuth, async (req, res) => {
       return
     }
 
+    const meta = buildExportMeta({
+      reportTitle: 'Transaction History',
+      from,
+      to
+    })
+
     if (outFmt === 'xlsx') {
-      const workbook = new ExcelJS.Workbook()
-      const sheet = workbook.addWorksheet('Transactions')
-      sheet.addRow(headers)
-      rows.forEach(r => sheet.addRow(buildRowArray(r)))
-      const buf = await workbook.xlsx.writeBuffer()
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-      res.setHeader('Content-Disposition', `attachment; filename="transactions_${stamp}.xlsx"`)
-      res.send(Buffer.from(buf))
+      const dataRows = rows.map((r) => buildRowArray(r))
+      await sendXlsxReport(res, 'transactions', headers, dataRows, meta)
       return
     }
 
-    const csvLines = [headers.map(escapeCsvField).join(',')]
-    rows.forEach(r => {
-      csvLines.push(buildRowArray(r).map(escapeCsvField).join(','))
-    })
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-    res.setHeader('Content-Disposition', `attachment; filename="transactions_${stamp}.csv"`)
-    res.send('\uFEFF' + csvLines.join('\n'))
+    const dataRows = rows.map((r) => buildRowArray(r))
+    sendCsvReport(res, 'transactions', headers, dataRows, meta)
   } catch (error) {
     console.error('CSV transaction export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export transactions' })
@@ -505,10 +485,8 @@ router.get('/customers', requireAuth, requireRole('admin'), requireMasterKey, as
       'Investor ID', 'Name', 'PAN', 'Email', 'Mobile', 'Address1', 'Address2', 'Address3',
       'City', 'State', 'Pin', 'Branch(es)', 'Created At'
     ]
-    
-    const csvRows = [headers.join(',')]
-    
-    customers.forEach(customer => {
+
+    const dataRows = customers.map((customer) => {
       const branchVal = customer.relationship_manager_display != null
         ? (Array.isArray(customer.relationship_manager_display)
             ? customer.relationship_manager_display.join('; ')
@@ -516,29 +494,25 @@ router.get('/customers', requireAuth, requireRole('admin'), requireMasterKey, as
         : (Array.isArray(customer.relationship_manager)
             ? customer.relationship_manager.join('; ')
             : customer.relationship_manager || '')
-      const row = [
+      return [
         customer.investor_id,
-        `"${(customer.name || '').replace(/"/g, '""')}"`,
+        customer.name || '',
         customer.pan || '',
         customer.email || '',
         customer.mobile || '',
-        `"${(customer.address1 || '').replace(/"/g, '""')}"`,
-        `"${(customer.address2 || '').replace(/"/g, '""')}"`,
-        `"${(customer.address3 || '').replace(/"/g, '""')}"`,
-        `"${(customer.city || '').replace(/"/g, '""')}"`,
-        `"${(customer.state || '').replace(/"/g, '""')}"`,
+        customer.address1 || '',
+        customer.address2 || '',
+        customer.address3 || '',
+        customer.city || '',
+        customer.state || '',
         customer.pin || '',
-        `"${String(branchVal).replace(/"/g, '""')}"`,
+        String(branchVal),
         customer.created_at || ''
       ]
-      csvRows.push(row.join(','))
     })
-    
-    const csv = csvRows.join('\n')
-    
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="customers_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+
+    const meta = buildExportMeta({ reportTitle: 'Customer Master' })
+    sendCsvReport(res, 'customers', headers, dataRows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export customers' })
@@ -704,28 +678,20 @@ router.get('/users', requireAuth, requireRole('admin'), async (req, res) => {
     const headers = [
       'Employee Code', 'Name', 'Email', 'Role', 'Branch', 'Active', 'Created At', 'Last Login'
     ]
-    
-    const csvRows = [headers.join(',')]
-    
-    users.forEach(user => {
-      const row = [
-        user.emp_code,
-        `"${user.name}"`,
-        user.email,
-        user.role,
-        `"${user.branch || ''}"`,
-        user.is_active,
-        user.created_at,
-        user.last_login_at || ''
-      ]
-      csvRows.push(row.join(','))
-    })
-    
-    const csv = csvRows.join('\n')
-    
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="users_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+
+    const dataRows = users.map((user) => [
+      user.emp_code,
+      user.name,
+      user.email,
+      user.role,
+      user.branch || '',
+      user.is_active,
+      user.created_at,
+      user.last_login_at || ''
+    ])
+
+    const meta = buildExportMeta({ reportTitle: 'Users Export' })
+    sendCsvReport(res, 'users', headers, dataRows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export users' })
@@ -751,27 +717,19 @@ router.get('/branches', requireAuth, requireRole('admin'), async (req, res) => {
     const headers = [
       'Branch Code', 'Branch Name', 'Type', 'Address', 'Phone', 'Email', 'Created At'
     ]
-    
-    const csvRows = [headers.join(',')]
-    
-    branches.forEach(branch => {
-      const row = [
-        branch.branch_code,
-        `"${branch.branch_name}"`,
-        branch.branch_type,
-        `"${branch.address || ''}"`,
-        branch.phone,
-        branch.email,
-        branch.created_at
-      ]
-      csvRows.push(row.join(','))
-    })
-    
-    const csv = csvRows.join('\n')
-    
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="branches_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+
+    const dataRows = branches.map((branch) => [
+      branch.branch_code,
+      branch.branch_name,
+      branch.branch_type,
+      branch.address || '',
+      branch.phone,
+      branch.email,
+      branch.created_at
+    ])
+
+    const meta = buildExportMeta({ reportTitle: 'Branches Export' })
+    sendCsvReport(res, 'branches', headers, dataRows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export branches' })
