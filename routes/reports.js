@@ -14,7 +14,15 @@ import {
   runFdMaturityReport,
   runPendingReceiptsReport
 } from '../services/reports/operational-reports.js'
-import { buildExportMeta, sendCsvReport, sendXlsxReport, sendPdfReport } from '../services/reports/report-export.js'
+import {
+  buildExportMeta,
+  sendCsvReport,
+  sendXlsxReport,
+  sendPdfReport,
+  sendMisSummaryCsvReport,
+  sendMisSummaryXlsxReport,
+  sendMisSummaryPdfReport
+} from '../services/reports/report-export.js'
 import { runReportFilterOptions } from '../services/reports/filter-options.js'
 import {
   runCustomerDetailReport,
@@ -150,25 +158,6 @@ async function sendReportRows(res, filenameBase, headers, rows, fmt, query = {},
   else sendCsvReport(res, filenameBase, filtered.headers, filtered.rows, meta)
 }
 
-function misSummaryExport(data) {
-  const rows = []
-  for (const r of data.product_summary || []) {
-    rows.push(['Product Summary', r.product_type ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '', '', ''])
-  }
-  for (const r of data.mf_category_summary || []) {
-    rows.push(['MF Category Summary', r.category ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '', '', ''])
-  }
-  for (const r of data.issuer_sales || []) {
-    const section = r.product_type
-      ? `Company / Fund Sales (${r.product_type})`
-      : 'Company / Fund Sales'
-    rows.push([section, r.company_fund_name ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '', '', ''])
-  }
-  const pm = data.previous_month_totals || {}
-  rows.push(['Previous Month Totals', 'Previous Month', pm.applications ?? 0, pm.amount ?? 0, pm.collection_credit ?? 0, pm.incentive_amount ?? '', pm.period_from ?? '', pm.period_to ?? ''])
-  return rows
-}
-
 const aggregateHeaders = ['Name', 'Applications', 'Amount', 'CC', 'Incentive']
 const aggregateRow = (nameKey) => (r) => [
   r[nameKey] ?? '',
@@ -178,8 +167,8 @@ const aggregateRow = (nameKey) => (r) => [
   r.incentive_amount ?? ''
 ]
 
-const productDetailHeaders = ['Date', 'Receipt Number', 'Client ID', 'Client Name', 'PAN', 'Product Category', 'Issuer', 'Scheme', 'Period', 'Month', 'Amount', 'CC', 'SI', 'Branch Code', 'RM Code', 'Status']
-const productDetailRow = (r) => [r.date ?? '', r.receipt_number ?? '', r.client_id ?? '', r.client_name ?? '', r.pan ?? '', r.product_category ?? '', r.issuer ?? '', r.scheme_name ?? '', r.period ?? '', r.months ?? '', r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '', r.branch_code ?? '', r.emp_code ?? '', r.status ?? '']
+const productDetailHeaders = ['Date', 'Receipt Number', 'Client ID', 'Client Name', 'PAN', 'Phone Number', 'Email Address', 'Product Category', 'Issuer', 'Scheme', 'Period', 'Month', 'Amount', 'CC', 'SI', 'Branch Code', 'RM Code', 'Status']
+const productDetailRow = (r) => [r.date ?? '', r.receipt_number ?? '', r.client_id ?? '', r.client_name ?? '', r.pan ?? '', r.client_phone ?? '', r.client_email ?? '', r.product_category ?? '', r.issuer ?? '', r.scheme_name ?? '', r.period ?? '', r.months ?? '', r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '', r.branch_code ?? '', r.emp_code ?? '', r.status ?? '']
 
 const categorySummaryHeaders = ['Product Category', 'Issuer', 'Scheme', 'FD Payout Frequency', 'Applications', 'Amount', 'CC', 'SI']
 const categorySummaryRow = (r) => [r.product_category ?? '', r.issuer_name ?? '', r.scheme_name ?? '', r.fd_payout_frequency ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '']
@@ -190,8 +179,8 @@ const sipRow = (r) => [r.date ?? '', r.product_category ?? '', r.issuer ?? '', r
 const fdMaturityHeaders = ['Receipt Date', 'Maturity Date', 'Product Category', 'Issuer', 'Scheme', 'Tenure/Period', 'Month', 'Type', 'FD Payout Frequency', 'Client ID', 'Client Name', 'Amount', 'Maturity Amount', 'CC', 'SI', 'Branch Code', 'RM Code', 'Receipt Number', 'Status']
 const fdMaturityRow = (r) => [r.receipt_date ?? '', r.maturity_date ?? '', r.product_category ?? '', r.issuer ?? '', r.scheme_name ?? '', r.period ?? '', r.months ?? '', r.type ?? '', r.fd_payout_frequency ?? '', r.client_id ?? '', r.client_name ?? '', r.amount ?? 0, r.maturity_amount ?? '', r.collection_credit ?? 0, r.incentive_amount ?? '', r.branch_code ?? '', r.emp_code ?? '', r.receipt_number ?? '', r.status ?? '']
 
-const pendingHeaders = ['Receipt ID', 'Client', 'Product', 'Amount', 'Stage', 'Assigned', 'Created At', 'Days Pending', 'As Of']
-const pendingRow = (r) => [r.receipt_id ?? '', r.client_name ?? '', r.product_type ?? '', r.amount ?? 0, r.current_stage ?? '', r.assigned_to ?? '', r.created_at ?? '', r.days_pending ?? '', r.as_of ?? '']
+const pendingHeaders = ['Receipt Number', 'Client', 'Product', 'Amount', 'Stage', 'Assigned', 'Created At', 'Days Pending', 'As Of']
+const pendingRow = (r) => [r.receipt_number ?? '', r.client_name ?? '', r.product_type ?? '', r.amount ?? 0, r.current_stage ?? '', r.assigned_to ?? '', r.created_at ?? '', r.days_pending ?? '', r.as_of ?? '']
 
 // All report endpoints are admin-only (MIS / operational analytics).
 router.use(requireAuth, requireRole('admin'))
@@ -202,7 +191,7 @@ router.get('/registry', (req, res) => {
 
 router.get('/filter-options', async (req, res) => {
   try {
-    const data = await runReportFilterOptions()
+    const data = await runReportFilterOptions(req.query)
     res.json(data)
   } catch (e) {
     console.error('[reports] filter-options', e)
@@ -215,15 +204,10 @@ router.get('/mis-summary', async (req, res) => {
     const fmt = exportFormat(req.query)
     const data = await runMisSummary(req.user, req.query)
     if (fmt) {
-      await sendReportRows(
-        res,
-        'mis_summary',
-        ['Section', 'Name', 'Applications', 'Amount', 'CC', 'Incentive', 'Period From', 'Period To'],
-        misSummaryExport(data),
-        fmt,
-        req.query,
-        'mis-summary'
-      )
+      const meta = exportMetaFromQuery('mis-summary', req.query)
+      if (fmt === 'xlsx') await sendMisSummaryXlsxReport(res, 'mis_summary', data, meta)
+      else if (fmt === 'pdf') await sendMisSummaryPdfReport(res, 'mis_summary', data, meta)
+      else sendMisSummaryCsvReport(res, 'mis_summary', data, meta)
       return
     }
     res.json(data)

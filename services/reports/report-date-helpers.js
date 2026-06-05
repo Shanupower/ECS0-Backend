@@ -107,6 +107,21 @@ export function computeMonthsBetweenDates(startDate, endDate) {
   return months
 }
 
+/** Perpetual SIP end date — start + 40 years (480 months). */
+export function computePerpetualSipEndDate(startDate) {
+  const start = ymdToUtcDate(startDate)
+  if (!start) return ''
+  return toYmd(addMonths(start, 40 * 12))
+}
+
+function resolveSipEndDate(row = {}) {
+  const end = firstYmd(row.sip_end_date, row.end_date, row.fd_maturity_date, row.maturity_date)
+  if (end) return end
+  const start = firstYmd(row.sip_start_date, row.start_date, row.swp_start_date, row.stp_start_date)
+  if (start && row.sip_is_perpetual) return computePerpetualSipEndDate(start)
+  return ''
+}
+
 /** MIS "Months" — derived from start/end dates on the row, not stored installment counts. */
 export function computeMisMonthsFromRow(row = {}) {
   const start = firstYmd(
@@ -117,10 +132,11 @@ export function computeMisMonthsFromRow(row = {}) {
     row.fd_deposit_date,
     row.fd_booking_date
   )
-  let end = firstYmd(row.sip_end_date, row.end_date, row.fd_maturity_date, row.maturity_date)
-  if (!end && start && row.sip_is_perpetual) {
-    const perpetualStart = ymdToUtcDate(start)
-    if (perpetualStart) end = toYmd(addMonths(perpetualStart, 40 * 12))
-  }
+  const end = resolveSipEndDate(row)
   return computeMonthsBetweenDates(start, end)
+}
+
+/** Display end date for SIP rows, including computed perpetual end dates. */
+export function resolveSipDisplayEndDate(row = {}) {
+  return resolveSipEndDate(row)
 }

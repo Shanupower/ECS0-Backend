@@ -17,7 +17,7 @@ import {
   canViewServiceIncome
 } from './report-query-builders.js'
 import { maskServiceIncomeTotals } from './report-totals.js'
-import { resolveBranchIdentifiersUnion } from './receipt-scope-filter.js'
+import { RECEIPT_STATUS_BUCKET_AQL, resolveBranchIdentifiersUnion } from './receipt-scope-filter.js'
 
 export const MAX_CUSTOMER_DETAIL_INVESTOR_IDS = 150
 export const CUSTOMER_LIST_DEFAULT_PAGE_SIZE = 50
@@ -38,7 +38,7 @@ const INVESTOR_ID_AQL = `((receipt.investor != null && receipt.investor.id != nu
 const INVESTOR_ID_STR_AQL = `TO_STRING(${INVESTOR_ID_AQL})`
 const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name)`
 const PAN_AQL = `((receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan)`
-const STATUS_AQL = `(receipt.status != null && receipt.status != "" ? receipt.status : "Pending")`
+const STATUS_AQL = RECEIPT_STATUS_BUCKET_AQL
 const TXN_TYPE_AQL = `(
   (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
     ? receipt.transaction.type

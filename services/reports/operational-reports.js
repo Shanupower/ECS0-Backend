@@ -12,7 +12,11 @@ import {
   SIP_IS_PERPETUAL_AQL,
   SIP_START_DATE_AQL
 } from '../../utils/report-aql-fragments.js'
-import { buildReceiptScopeFilter, PENDING_RECEIPT_FILTER_AQL } from './receipt-scope-filter.js'
+import {
+  buildReceiptScopeFilter,
+  PENDING_RECEIPT_FILTER_AQL,
+  RECEIPT_STATUS_BUCKET_AQL
+} from './receipt-scope-filter.js'
 import {
   appendReceiptContentFilters,
   buildReceiptReportFilters,
@@ -26,7 +30,8 @@ import {
   computeNextSipDueDateInWindow,
   computeNextSipDueDate,
   dateWindowContains,
-  normalizeReportDateBasis
+  normalizeReportDateBasis,
+  resolveSipDisplayEndDate
 } from './report-date-helpers.js'
 
 export async function runFundWiseMf(user, query) {
@@ -77,7 +82,9 @@ const SIP_MATCH_AQL = `(
 const INVESTOR_ID_AQL = `((receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id)`
 const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name)`
 const PAN_AQL = `((receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan)`
-const STATUS_AQL = `(receipt.status != null && receipt.status != "" ? receipt.status : "Pending")`
+const CLIENT_PHONE_AQL = `((receipt.investor != null && receipt.investor.mobile != null && TO_STRING(receipt.investor.mobile) != "") ? receipt.investor.mobile : receipt.phone)`
+const CLIENT_EMAIL_AQL = `((receipt.investor != null && receipt.investor.email != null && TO_STRING(receipt.investor.email) != "") ? receipt.investor.email : receipt.email)`
+const STATUS_AQL = RECEIPT_STATUS_BUCKET_AQL
 const BRANCH_CODE_AQL = `(
   LET raw_branch = receipt.branch
   LET branch_doc = FIRST(
@@ -144,6 +151,8 @@ export async function runProductDetailReport(user, query) {
       client_id: ${INVESTOR_ID_AQL},
       client_name: ${INVESTOR_NAME_AQL},
       pan: ${PAN_AQL},
+      client_phone: ${CLIENT_PHONE_AQL},
+      client_email: ${CLIENT_EMAIL_AQL},
       product_category: ${CATEGORY_AQL},
       issuer: ${ISSUER_NAME_AQL},
       scheme_name: ${SCHEME_NAME_AQL},
@@ -353,14 +362,18 @@ export async function runSipReport(user, query) {
     usesComputedDate ? Promise.resolve([]) : q(totalsQ, bindVars)
   ])
   const asOf = new Date().toISOString().slice(0, 10)
-  const enriched = rows.map((r) => ({
+  const enriched = rows.map((r) => {
+    const endDate = resolveSipDisplayEndDate(r)
+    return {
     ...r,
-    months: computeMisMonthsFromRow(r),
+    end_date: endDate || r.end_date,
+    months: computeMisMonthsFromRow({ ...r, end_date: endDate || r.end_date }),
     next_due_date: dateBasis === 'sip_due'
       ? computeNextSipDueDateInWindow(r.start_date, r.frequency, query.from, query.to, asOf, r.end_date)
-      : computeNextSipDueDate(r.start_date, r.frequency, asOf, r.end_date),
+      : computeNextSipDueDate(r.start_date, r.frequency, asOf, endDate || r.end_date),
     incentive_amount: canViewServiceIncome(user) ? r.incentive_amount : null
-  }))
+  }
+  })
   if (usesComputedDate) {
     const filtered = enriched.filter((r) => {
       const targetDate = dateBasis === 'sip_end' ? r.end_date : r.next_due_date
@@ -472,13 +485,14 @@ export async function runPendingReceiptsReport(user, query) {
     LIMIT @offset, @limit
     RETURN {
       receipt_id: receipt._key,
+      receipt_number: receipt.receipt_no,
       client_name: ((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name),
       product_type: ${CATEGORY_AQL},
       amount: ${INV_AMOUNT_AQL},
       current_stage: receipt.status,
       assigned_to: receipt.emp_code,
       created_at: receipt.created_at,
-      status: receipt.status
+      status: ${STATUS_AQL}
     }
   `
   const totalsQ = `

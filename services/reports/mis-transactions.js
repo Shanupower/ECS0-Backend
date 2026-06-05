@@ -12,6 +12,7 @@ import {
 } from '../../utils/report-aql-fragments.js'
 import { MATURITY_DATE_AQL } from './operational-reports.js'
 import { buildReceiptReportFilters, parsePagination, canViewServiceIncome } from './report-query-builders.js'
+import { RECEIPT_STATUS_BUCKET_AQL } from './receipt-scope-filter.js'
 import { computeMisMonthsFromRow } from './report-date-helpers.js'
 import { maskServiceIncomeTotals, sumNumericFields } from './report-totals.js'
 
@@ -145,6 +146,7 @@ export async function runMisTransactions(user, query) {
       receipt_id: receipt._key,
       investor_name: ${INVESTOR_NAME_AQL},
       scheme_name: ${SCHEME_AQL},
+      issuer: ${ISSUER_NAME_AQL},
       period: ${MIS_PERIOD_AQL},
       sip_start_date: ${SIP_START_DATE_AQL},
       sip_end_date: ${SIP_END_DATE_AQL},
@@ -158,7 +160,8 @@ export async function runMisTransactions(user, query) {
       incentive_paid: ${SI_AQL},
       application_number: ${APP_NO_AQL},
       emp_code: receipt.emp_code,
-      product_category: ${CATEGORY_AQL}
+      product_category: ${CATEGORY_AQL},
+      status: ${RECEIPT_STATUS_BUCKET_AQL}
     }
   `
   const totalsQuery = `
@@ -190,6 +193,7 @@ export function misTransactionExportHeaders() {
     'Receipt Number',
     'Investor Name',
     'Scheme Name',
+    'Issuer',
     'Period',
     'Months',
     'SIP Start Date',
@@ -202,7 +206,8 @@ export function misTransactionExportHeaders() {
     'Incentive Paid',
     'Application Number',
     'RM Code',
-    'Product Category'
+    'Product Category',
+    'Status'
   ]
 }
 
@@ -213,6 +218,7 @@ export function misTransactionRowToArray(r) {
     r.receipt_number ?? '',
     r.investor_name ?? '',
     r.scheme_name ?? '',
+    r.issuer ?? '',
     r.period ?? '',
     r.months ?? '',
     r.sip_start_date ?? '',
@@ -225,6 +231,7 @@ export function misTransactionRowToArray(r) {
     r.incentive_paid ?? '',
     r.application_number ?? '',
     r.emp_code ?? '',
-    r.product_category ?? ''
+    r.product_category ?? '',
+    r.status ?? ''
   ]
 }

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 
 import {
   computeMisMonthsFromRow,
-  computeMonthsBetweenDates
+  computeMonthsBetweenDates,
+  computePerpetualSipEndDate,
+  resolveSipDisplayEndDate
 } from '../../services/reports/report-date-helpers.js'
 
 assert.equal(computeMonthsBetweenDates('2024-01-01', '2024-12-31'), 11)
@@ -26,6 +28,15 @@ assert.equal(
     sip_is_perpetual: true
   }),
   480
+)
+
+assert.equal(computePerpetualSipEndDate('2020-01-01'), '2060-01-01')
+assert.equal(
+  resolveSipDisplayEndDate({
+    start_date: '2020-06-15',
+    sip_is_perpetual: true
+  }),
+  '2060-06-15'
 )
 
 assert.equal(
