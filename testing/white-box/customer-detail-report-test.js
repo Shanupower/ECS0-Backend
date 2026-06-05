@@ -48,4 +48,12 @@ assert.deepEqual(parseCustomerListSort({ customer_sort: 'total_investment:asc' }
 })
 assert.deepEqual(parseCustomerListSort({}), { field: 'name', dir: 'ASC' })
 
+function receiptMatchFilterClause(requireReceiptMatch) {
+  if (!requireReceiptMatch) return ''
+  return 'FILTER @totals_lookup[TO_STRING(customer.investor_id)] != null\n'
+}
+
+assert.equal(receiptMatchFilterClause(false), '')
+assert.match(receiptMatchFilterClause(true), /@totals_lookup/)
+
 console.log('[White Box] customer-detail-report tests passed')

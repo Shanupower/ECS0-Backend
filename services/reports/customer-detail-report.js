@@ -275,14 +275,17 @@ export async function runCustomerDetailCustomerList(user, query) {
   const pageSize = Math.min(200, Math.max(1, Number.isFinite(rawSize) ? rawSize : CUSTOMER_LIST_DEFAULT_PAGE_SIZE))
   const offset = (page - 1) * pageSize
 
-  const bind = {
+  const countBind = requireReceiptMatch
+    ? { ...bindVars, totals_lookup: totalsLookup }
+    : bindVars
+  const dataBind = {
     ...bindVars,
     totals_lookup: totalsLookup,
     offset,
     limit: pageSize,
     pin_empty_sentinel: ''
   }
-  const sortClause = buildCustomerListSortClause(sort, bind)
+  const sortClause = buildCustomerListSortClause(sort, dataBind)
 
   const countQ = `
     FOR customer IN customers
@@ -307,10 +310,10 @@ export async function runCustomerDetailCustomerList(user, query) {
   const skipCount =
     query.skip_count === '1' || query.skip_count === true || parseInt(String(query.skip_count), 10) === 1
 
-  const rows = await q(dataQ, bind)
+  const rows = await q(dataQ, dataBind)
   let total = null
   if (!skipCount) {
-    const countArr = await q(countQ, bind)
+    const countArr = await q(countQ, countBind)
     total = typeof countArr[0] === 'number' ? countArr[0] : 0
   }
 
@@ -329,6 +332,9 @@ export async function runCustomerDetailCustomerListIds(user, query) {
   const { filterClause, bindVars, requireReceiptMatch } = await buildCustomerListFilterParts(user, query)
   const totalsLookup = await loadInvestorTotalsLookup(user, query)
   const receiptMatch = receiptMatchFilterClause(requireReceiptMatch)
+  const idsBind = requireReceiptMatch
+    ? { ...bindVars, totals_lookup: totalsLookup, limit: MAX_CUSTOMER_DETAIL_INVESTOR_IDS + 1 }
+    : { ...bindVars, limit: MAX_CUSTOMER_DETAIL_INVESTOR_IDS + 1 }
   const rows = await q(
     `
     FOR customer IN customers
@@ -338,7 +344,7 @@ export async function runCustomerDetailCustomerListIds(user, query) {
     LIMIT @limit
     RETURN TO_STRING(customer.investor_id)
   `,
-    { ...bindVars, totals_lookup: totalsLookup, limit: MAX_CUSTOMER_DETAIL_INVESTOR_IDS + 1 }
+    idsBind
   )
   const ids = rows.filter(Boolean)
   const truncated = ids.length > MAX_CUSTOMER_DETAIL_INVESTOR_IDS
