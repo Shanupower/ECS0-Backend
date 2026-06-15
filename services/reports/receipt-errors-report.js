@@ -24,6 +24,7 @@ export const RECEIPT_ERROR_TYPES = [
 const OTHER_INVESTOR_ID_AQL = `((other.investor != null && other.investor.id != null) ? other.investor.id : other.investor_id)`
 const OTHER_CATEGORY_AQL = CATEGORY_AQL.replace(/receipt/g, 'other')
 const OTHER_INV_AMOUNT_AQL = INV_AMOUNT_AQL.replace(/receipt/g, 'other')
+const STATUS_AQL = RECEIPT_STATUS_BUCKET_AQL
 
 const DATE_EXPR_AQL = `((receipt.date != null && TO_STRING(receipt.date) != "") ? receipt.date : "")`
 
@@ -269,10 +270,9 @@ export async function runReceiptErrorsReport(user, query) {
     ...bindVars,
     ...errorTypeBind,
     dup_txn_keys: dupTxnKeys,
-    dup_receipt_nos: dupReceiptNos,
-    offset,
-    limit: pageSize
+    dup_receipt_nos: dupReceiptNos
   }
+  const dataBind = { ...baseBind, offset, limit: pageSize }
 
   const classifyBlock = `
     LET inv = ${INVESTOR_ID_AQL}
@@ -345,7 +345,7 @@ export async function runReceiptErrorsReport(user, query) {
 
   const [countArr, rows, allErrorTypes] = await Promise.all([
     q(`RETURN LENGTH((${countQ}))`, baseBind),
-    q(dataQ, baseBind),
+    q(dataQ, dataBind),
     q(summaryQ, baseBind)
   ])
 
