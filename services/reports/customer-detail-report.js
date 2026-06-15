@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs'
-import { q } from '../../config/database.js'
+import { q, getUserBranch } from '../../config/database.js'
 import {
   appendXlsxHeaderBlock
 } from './report-export.js'
@@ -80,6 +80,42 @@ async function branchIdentifiersBindVars(branchCodes) {
   return { branchIdentifiers: identifiers }
 }
 
+function queryViewMode(query = {}) {
+  return String(query.viewMode || query.view_mode || '').trim()
+}
+
+function isPersonalReceiptScope(user, query = {}) {
+  const role = String(user?.role || '').trim()
+  const viewMode = queryViewMode(query)
+  if (role === 'employee') return viewMode !== 'branch'
+  if ((role === 'manager' || role === 'branch') && viewMode === 'personal') return true
+  return false
+}
+
+/**
+ * Branch codes for customer-collection filters.
+ * Managers/branch users get their own branch when view_mode is branch (no explicit branch_codes in query).
+ */
+export async function resolveEffectiveBranchCodesForCustomerScope(user, query = {}) {
+  const explicit = parseBranchCodes(query)
+  if (explicit.length > 0) return explicit
+
+  const role = String(user?.role || '').trim()
+  const viewMode = queryViewMode(query)
+  if (role !== 'manager' && role !== 'branch') return []
+  if (viewMode === 'personal') return []
+
+  let userBranch = null
+  if (role === 'manager' || role === 'branch') {
+    userBranch = user.branch_code || user.branch || null
+  }
+  if (!userBranch && user.sub) {
+    userBranch = await getUserBranch(user.sub)
+  }
+  if (!userBranch) return []
+  return [String(userBranch).trim()].filter(Boolean)
+}
+
 async function loadInvestorIdsForBranches(branchCodes) {
   const bind = await branchIdentifiersBindVars(branchCodes)
   if (!bind) return []
@@ -114,7 +150,7 @@ async function loadInvestorIdsFromReceipts(user, query) {
  */
 export async function resolveReportInvestorIds(user, query = {}) {
   const manual = parseInvestorIds(query)
-  const branchCodes = parseBranchCodes(query)
+  const branchCodes = await resolveEffectiveBranchCodesForCustomerScope(user, query)
   const productCategories = parseProductCategories(query)
 
   let resolved = []
@@ -171,7 +207,7 @@ export function parseCustomerDetailInvestorIds(query = {}) {
 async function buildCustomerListFilterParts(user, query) {
   const conditions = ['customer.investor_id != null']
   const bindVars = {}
-  const branchCodes = parseBranchCodes(query)
+  const branchCodes = await resolveEffectiveBranchCodesForCustomerScope(user, query)
   const productCategories = parseProductCategories(query)
 
   if (branchCodes.length > 0) {
@@ -197,7 +233,7 @@ async function buildCustomerListFilterParts(user, query) {
 
   const filterClause =
     conditions.length > 0 ? `FILTER ${conditions.join(' AND ')}\n` : ''
-  const requireReceiptMatch = productCategories.length > 0
+  const requireReceiptMatch = productCategories.length > 0 || isPersonalReceiptScope(user, query)
   return { filterClause, bindVars, requireReceiptMatch }
 }
 

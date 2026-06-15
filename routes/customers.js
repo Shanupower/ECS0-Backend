@@ -43,7 +43,7 @@ async function getBranchFilterForCustomer(userId) {
     ${branchScopeCondition}
   )`
   const branchCondition = branchScopeCondition
-  const bindVars = { canonicalKey: canonicalKey || '', userBranch: normalizedUserBranch || '', branchIdentifiers }
+  const bindVars = { branchIdentifiers }
   return { filterClause, branchCondition, bindVars, isAdmin: false, canonicalKey, normalizedUserBranch }
 }
 

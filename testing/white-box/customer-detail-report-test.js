@@ -5,7 +5,8 @@ import {
   MAX_CUSTOMER_DETAIL_INVESTOR_IDS,
   buildCustomerDetailCsvRows,
   parseCustomerDetailInvestorIds,
-  parseCustomerListSort
+  parseCustomerListSort,
+  resolveEffectiveBranchCodesForCustomerScope
 } from '../../services/reports/customer-detail-report.js'
 
 assert.throws(() => parseCustomerDetailInvestorIds({}), CustomerDetailReportError)
@@ -55,5 +56,26 @@ function receiptMatchFilterClause(requireReceiptMatch) {
 
 assert.equal(receiptMatchFilterClause(false), '')
 assert.match(receiptMatchFilterClause(true), /@totals_lookup/)
+
+const adminExplicit = await resolveEffectiveBranchCodesForCustomerScope(
+  { role: 'admin' },
+  { branch_codes: 'HO,BR2' }
+)
+assert.deepEqual(adminExplicit, ['HO', 'BR2'])
+
+const adminOpen = await resolveEffectiveBranchCodesForCustomerScope({ role: 'admin' }, {})
+assert.deepEqual(adminOpen, [])
+
+const branchScoped = await resolveEffectiveBranchCodesForCustomerScope(
+  { role: 'branch', branch_code: 'BR001', sub: 'user1' },
+  { view_mode: 'branch' }
+)
+assert.deepEqual(branchScoped, ['BR001'])
+
+const managerBranch = await resolveEffectiveBranchCodesForCustomerScope(
+  { role: 'manager', branch_code: 'MGR01', sub: 'user2' },
+  { view_mode: 'branch' }
+)
+assert.deepEqual(managerBranch, ['MGR01'])
 
 console.log('[White Box] customer-detail-report tests passed')
