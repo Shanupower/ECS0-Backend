@@ -19,10 +19,6 @@ async function ensureReady() {
   return __setupPromise
 }
 
-function todayStr() {
-  return new Date().toISOString().slice(0, 10)
-}
-
 function daysAgoStr(n) {
   const d = new Date()
   d.setDate(d.getDate() - n)
@@ -87,7 +83,6 @@ function extractReceiptSummary(receipt) {
 async function fetchApprovalTasks(req) {
   await ensureReady()
   const scope = await buildTaskScope(req)
-  const today = todayStr()
   const rows = await q(`
     FOR task IN tasks
       ${scope.filterAql}
@@ -97,7 +92,7 @@ async function fetchApprovalTasks(req) {
       SORT task.created_at DESC
       LIMIT 500
       RETURN task
-  `, { ...scope.bindVars, today })
+  `, { ...scope.bindVars })
   return rows
 }
 
@@ -151,7 +146,6 @@ router.get('/summary', requireAuth, async (req, res) => {
       loadBranchNameMap()
     ])
     const enriched = await enrichTasksWithReceipts(tasks, branchMap)
-    const today = todayStr()
     const weekAgo = daysAgoStr(7)
     const nowMs = Date.now()
 
