@@ -11,6 +11,7 @@ import {
   applyMfTxnTypeOrModeFilter
 } from '../utils/receipt-filters.js'
 import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { PENDING_RECEIPT_FILTER_AQL } from '../services/reports/receipt-scope-filter.js'
 import { publishEvent } from '../services/task-events.js'
 import {
   submit as engineSubmit,
@@ -953,8 +954,9 @@ function withNormalizedDetails(receipt) {
     if (normalized.product_category == null) normalized.product_category = prod.category ?? null
   }
   const txn = normalized.transaction
-  if (txn && typeof txn === 'object' && normalized.investment_amount == null && txn.amount != null) {
-    normalized.investment_amount = txn.amount
+  if (txn && typeof txn === 'object') {
+    if (normalized.txn_type == null && txn.type != null) normalized.txn_type = txn.type
+    if (normalized.investment_amount == null && txn.amount != null) normalized.investment_amount = txn.amount
   }
   if (normalized.product_details?.fd?.deposit?.amount != null && normalized.fd_deposit_amount == null) {
     normalized.fd_deposit_amount = normalized.product_details.fd.deposit.amount
@@ -1164,8 +1166,12 @@ router.get('/summary', requireAuth, async (req, res) => {
 
     // Status filter
     if (status) {
-      filterConditions.push('receipt.status == @status')
-      bindVars.status = status
+      if (status === 'Pending') {
+        filterConditions.push(PENDING_RECEIPT_FILTER_AQL)
+      } else {
+        filterConditions.push('receipt.status == @status')
+        bindVars.status = status
+      }
     }
 
     applyMfTxnTypeOrModeFilter(filterConditions, bindVars, txn_type, mode)
@@ -1366,13 +1372,12 @@ router.get('/', requireAuth, async (req, res) => {
 
     applyReceiptCategoryFilter(filterConditions, bindVars, category)
     if (status) {
-      // Handle status filtering - treat null/undefined as 'Pending'
       if (status === 'Pending') {
-        filterConditions.push('(receipt.status == null || receipt.status == @status)')
+        filterConditions.push(PENDING_RECEIPT_FILTER_AQL)
       } else {
         filterConditions.push('receipt.status == @status')
+        bindVars.status = status
       }
-      bindVars.status = status
     } else if (req.query.includePending === '0') {
       // Global "Include pending" toggle is OFF → exclude pending / null-status receipts
       // so listings stay consistent with KPIs/charts that also exclude them.
@@ -1547,13 +1552,12 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
 
     // Status filter
     if (status) {
-      // Handle status filtering - treat null/undefined as 'Pending'
       if (status === 'Pending') {
-        filterConditions.push('(receipt.status == null || receipt.status == @status)')
+        filterConditions.push(PENDING_RECEIPT_FILTER_AQL)
       } else {
         filterConditions.push('receipt.status == @status')
+        bindVars.status = status
       }
-      bindVars.status = status
     }
 
     applyMfTxnTypeOrModeFilter(filterConditions, bindVars, txn_type, mode)
@@ -2283,6 +2287,18 @@ router.put('/:id/bonus', requireAuth, requireRole('admin'), async (req, res) => 
     }
 
     const receipt = rows[0]
+    const existingCC = Number(receipt.additional_cc) || 0
+    const existingSI = Number(receipt.additional_si) || 0
+
+    const addCC = Number(additional_cc) || 0
+    const addSI = Number(additional_si) || 0
+
+    if ((existingCC > 0 && addCC < existingCC) || (existingSI > 0 && addSI < existingSI)) {
+      return res.status(409).json({
+        error: 'bonus_immutable',
+        detail: 'Bonus points cannot be removed or reduced once added.'
+      })
+    }
 
     // Derive base CC/SI amounts (excluding any existing additional bonus)
     const baseCC =
@@ -2306,9 +2322,6 @@ router.put('/:id/bonus', requireAuth, requireRole('admin'), async (req, res) => 
             : (receipt.calculations && (receipt.calculations.service_income != null || receipt.calculations.si != null))
               ? Number(receipt.calculations.service_income || receipt.calculations.si || 0)
               : 0
-
-    const addCC = Number(additional_cc) || 0
-    const addSI = Number(additional_si) || 0
 
     const updates = {
       additional_cc: addCC,
@@ -2341,9 +2354,15 @@ router.delete('/:id', requireAuth, async (req, res) => {
     FOR receipt IN receipts
     FILTER receipt._key == @id
     LIMIT 1
-    RETURN { id: receipt._key, user_id: receipt.user_id }
+    RETURN { id: receipt._key, user_id: receipt.user_id, status: receipt.status }
   `, { id })
   if (!rows.length) return res.status(404).json({ error: 'not_found' })
+  if (rows[0].status === 'Completed') {
+    return res.status(409).json({
+      error: 'cannot_delete_completed',
+      detail: 'Completed receipts cannot be deleted.'
+    })
+  }
 
   await q(`
     FOR receipt IN receipts

@@ -5,7 +5,7 @@ import { uploadCsv } from '../middleware/upload.js'
 import { normalizeReceiptCategory } from '../utils/receipt-category.js'
 import { appendExportCategoryQuery, appendMfTxnTypeToExportQuery } from '../utils/receipt-filters.js'
 import { effectiveDateExprAql } from '../utils/date-basis.js'
-import { buildExportMeta, sendCsvReport, sendXlsxReport } from '../services/reports/report-export.js'
+import { buildExportMeta, sendCsvReport, sendXlsxReport, fixUtf8Mojibake } from '../services/reports/report-export.js'
 
 const router = express.Router()
 
@@ -331,17 +331,17 @@ router.get('/transactions', requireAuth, async (req, res) => {
     const buildRowArray = (r) => {
       const payment = r.payment || {}
       const legacy = r.transaction_details || {}
-      const entryMode = payment.entry_mode ?? legacy.entry_mode ?? ''
-      const channel = payment.channel ?? legacy.channel ?? ''
-      const referenceNo = payment.reference_no ?? legacy.reference_no ?? ''
+      const entryMode = fixUtf8Mojibake(payment.entry_mode ?? legacy.entry_mode ?? '')
+      const channel = fixUtf8Mojibake(payment.channel ?? legacy.channel ?? '')
+      const referenceNo = fixUtf8Mojibake(payment.reference_no ?? legacy.reference_no ?? '')
       const txnDate = payment.transaction_date ?? legacy.txn_date ?? ''
-      const instrumentType = payment.instrument?.type ?? ''
-      const instrumentNo = payment.instrument?.number ?? ''
+      const instrumentType = fixUtf8Mojibake(payment.instrument?.type ?? '')
+      const instrumentNo = fixUtf8Mojibake(payment.instrument?.number ?? '')
       const instrumentDate = payment.instrument?.date ?? ''
-      const bankName = payment.instrument?.bank?.name ?? legacy.bank_name ?? ''
-      const bankBranch = payment.instrument?.bank?.branch ?? legacy.bank_branch ?? ''
+      const bankName = fixUtf8Mojibake(payment.instrument?.bank?.name ?? legacy.bank_name ?? '')
+      const bankBranch = fixUtf8Mojibake(payment.instrument?.bank?.branch ?? legacy.bank_branch ?? '')
       const accountLast4 = payment.account_last4 ?? legacy.account_last4 ?? ''
-      const notes = payment.notes ?? legacy.notes ?? ''
+      const notes = fixUtf8Mojibake(payment.notes ?? legacy.notes ?? '')
       const siVal = req.user.role === 'admin' ? (r.si || 0) : ''
 
       const rawMode = String(r.mode || '').trim()
@@ -349,20 +349,20 @@ router.get('/transactions', requireAuth, async (req, res) => {
         rawMode === 'Lumpsum' || rawMode === 'LumpSum' || rawMode === 'Lump Sum' ? 'Lump Sum' :
         (rawMode === 'Switch Over' || rawMode === 'SwitchOver' || rawMode === 'SWITCH_OVER' || rawMode === 'switch_over' ? 'Switch Over' : rawMode)
 
-      const txnTypeOut = r.transaction_type_canonical || r.transaction_type || r.txn_type || ''
+      const txnTypeOut = fixUtf8Mojibake(r.transaction_type_canonical || r.transaction_type || r.txn_type || '')
 
       return [
-        r.receipt_no || '',
+        fixUtf8Mojibake(r.receipt_no || ''),
         r.date || '',
-        resolveBranchName(r.branch || ''),
-        r.emp_code || '',
-        r.investor_id || '',
-        r.investor_name || '',
-        r.pan || '',
-        r.product_category || '',
-        resolveExportIssuer(r),
-        r.scheme_name || '',
-        resolveExportFolioApp(r),
+        fixUtf8Mojibake(resolveBranchName(r.branch || '')),
+        fixUtf8Mojibake(r.emp_code || ''),
+        fixUtf8Mojibake(r.investor_id || ''),
+        fixUtf8Mojibake(r.investor_name || ''),
+        fixUtf8Mojibake(r.pan || ''),
+        fixUtf8Mojibake(r.product_category || ''),
+        fixUtf8Mojibake(resolveExportIssuer(r)),
+        fixUtf8Mojibake(r.scheme_name || ''),
+        fixUtf8Mojibake(resolveExportFolioApp(r)),
         r.investment_amount || 0,
         r.cc || 0,
         siVal,

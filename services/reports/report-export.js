@@ -9,9 +9,21 @@ const HEADER_FILL = 'FFE8E8E8'
  * @typedef {{ reportTitle?: string, from?: string, to?: string, exportedAt?: Date }} ExportMeta
  */
 
+/** Repair common UTF-8-as-Latin-1 mojibake (e.g. en-dash shown as â€“). */
+export function fixUtf8Mojibake(value) {
+  const s = String(value ?? '')
+  if (!s) return s
+  return s
+    .replace(/\u00e2\u20ac\u201c/g, '\u2013')
+    .replace(/\u00e2\u20ac\u201d/g, '\u2014')
+    .replace(/\u00e2\u20ac\u2122/g, '\u2019')
+    .replace(/\u00e2\u20ac\u0153/g, '\u201c')
+    .replace(/\u00e2\u20ac\u009d/g, '\u201d')
+}
+
 export function escapeCsvField(v) {
   if (v == null || v === '') return ''
-  const s = String(v)
+  const s = fixUtf8Mojibake(String(v))
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
   return s
 }

@@ -2,7 +2,9 @@ import { q } from '../../config/database.js'
 import { effectiveDateExprAql } from '../../utils/date-basis.js'
 import { CC_AQL, INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
 import {
+  BRANCH_CODE_AQL,
   CATEGORY_AQL,
+  CLIENT_ADDRESS_AQL,
   FD_DEPOSIT_DATE_AQL,
   MF_SCHEME_CATEGORY_AQL,
   ISSUER_NAME_AQL,
@@ -85,20 +87,6 @@ const PAN_AQL = `((receipt.investor != null && receipt.investor.pan != null) ? r
 const CLIENT_PHONE_AQL = `((receipt.investor != null && receipt.investor.mobile != null && TO_STRING(receipt.investor.mobile) != "") ? receipt.investor.mobile : receipt.phone)`
 const CLIENT_EMAIL_AQL = `((receipt.investor != null && receipt.investor.email != null && TO_STRING(receipt.investor.email) != "") ? receipt.investor.email : receipt.email)`
 const STATUS_AQL = RECEIPT_STATUS_BUCKET_AQL
-const BRANCH_CODE_AQL = `(
-  LET raw_branch = receipt.branch
-  LET branch_doc = FIRST(
-    FOR branch IN branches
-      FILTER branch._key == raw_branch
-        OR (branch.branch_code != null && LOWER(TRIM(TO_STRING(branch.branch_code))) == LOWER(TRIM(TO_STRING(raw_branch))))
-        OR (branch.branch_name != null && LOWER(TRIM(TO_STRING(branch.branch_name))) == LOWER(TRIM(TO_STRING(raw_branch))))
-      LIMIT 1
-      RETURN branch
-  )
-  RETURN branch_doc != null && branch_doc.branch_code != null && TO_STRING(branch_doc.branch_code) != ""
-    ? TO_STRING(branch_doc.branch_code)
-    : TO_STRING(raw_branch)
-)[0]`
 export const MATURITY_DATE_AQL = `(
   (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.maturity != null && receipt.product_details.fd.maturity.date != null)
     ? receipt.product_details.fd.maturity.date
@@ -108,11 +96,17 @@ export const MATURITY_DATE_AQL = `(
         ? receipt.product_details.bond.instrument.maturity_date
         : (receipt.bond_maturity_date != null && TO_STRING(receipt.bond_maturity_date) != "")
           ? receipt.bond_maturity_date
-          : (receipt.renewal_due_date != null && TO_STRING(receipt.renewal_due_date) != "")
-            ? receipt.renewal_due_date
-            : (receipt.product_details != null && receipt.product_details.insurance != null && receipt.product_details.insurance.coverage != null && receipt.product_details.insurance.coverage.maturity_date != null)
-              ? receipt.product_details.insurance.coverage.maturity_date
-              : receipt.insurance_maturity_date
+          : (receipt.product_details != null && receipt.product_details.insurance != null && receipt.product_details.insurance.coverage != null && receipt.product_details.insurance.coverage.maturity_date != null && TO_STRING(receipt.product_details.insurance.coverage.maturity_date) != "")
+            ? receipt.product_details.insurance.coverage.maturity_date
+            : (receipt.insurance_maturity_date != null && TO_STRING(receipt.insurance_maturity_date) != "")
+              ? receipt.insurance_maturity_date
+              : (receipt.insurance_renewal_date != null && TO_STRING(receipt.insurance_renewal_date) != "")
+                ? receipt.insurance_renewal_date
+                : (receipt.product_details != null && receipt.product_details.insurance != null && receipt.product_details.insurance.policy != null && receipt.product_details.insurance.policy.renewal_date != null && TO_STRING(receipt.product_details.insurance.policy.renewal_date) != "")
+                  ? receipt.product_details.insurance.policy.renewal_date
+                  : (receipt.renewal_due_date != null && TO_STRING(receipt.renewal_due_date) != "")
+                    ? receipt.renewal_due_date
+                    : null
 )`
 export const MATURITY_AMOUNT_AQL = `(
   (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.maturity != null && receipt.product_details.fd.maturity.amount != null)
@@ -258,6 +252,7 @@ export async function runFdMaturityReport(user, query) {
       fd_payout_frequency: ${FD_PAYOUT_AQL},
       client_id: ${INVESTOR_ID_AQL},
       client_name: ${INVESTOR_NAME_AQL},
+      client_address: ${CLIENT_ADDRESS_AQL},
       amount: ${INV_AMOUNT_AQL},
       maturity_amount: ${MATURITY_AMOUNT_AQL},
       collection_credit: ${CC_AQL},

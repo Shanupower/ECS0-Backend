@@ -1,4 +1,5 @@
 import { q } from '../../config/database.js'
+import { buildReceiptScopeFilter } from './receipt-scope-filter.js'
 import { applyReceiptCategoryFilters } from '../../utils/receipt-filters.js'
 import {
   parseProductCategories,
@@ -11,11 +12,11 @@ import { ISSUER_NAME_AQL, MF_SCHEME_CATEGORY_AQL, SCHEME_NAME_AQL } from '../../
 /**
  * Receipt scope for filter-option dropdowns.
  * @param {object} query
- * @param {{ narrowSchemesByIssuer?: boolean, narrowIssuersByScheme?: boolean }} scope
+ * @param {{ narrowSchemesByIssuer?: boolean, narrowIssuersByScheme?: boolean, scopeConditions?: string[], scopeBindVars?: Record<string, unknown> }} scope
  */
-function buildReceiptOptionsFilter(query = {}, { narrowSchemesByIssuer = false, narrowIssuersByScheme = false } = {}) {
-  const filterConditions = ['receipt.is_deleted == false']
-  const bindVars = {}
+function buildReceiptOptionsFilter(query = {}, { narrowSchemesByIssuer = false, narrowIssuersByScheme = false, scopeConditions = [], scopeBindVars = {} } = {}) {
+  const filterConditions = ['receipt.is_deleted == false', ...scopeConditions]
+  const bindVars = { ...scopeBindVars }
 
   const productCategories = parseProductCategories(query)
   if (productCategories.length > 0) {
@@ -52,11 +53,22 @@ function buildReceiptOptionsFilter(query = {}, { narrowSchemesByIssuer = false, 
  * - product_categories: limit issuers/schemes to selected products
  * - issuer_names: when set, scheme_names only includes schemes for those issuers
  * - scheme_names: when set, issuer_names only includes issuers for those schemes
+ * @param {object} [user] - JWT user for role-based receipt scoping
+ * @param {object} [query]
  */
-export async function runReportFilterOptions(query = {}) {
-  const issuerScope = buildReceiptOptionsFilter(query, { narrowIssuersByScheme: true })
-  const schemeScope = buildReceiptOptionsFilter(query, { narrowSchemesByIssuer: true })
-  const categoryScope = buildReceiptOptionsFilter(query)
+export async function runReportFilterOptions(user = null, query = {}) {
+  let scopeConditions = []
+  let scopeBindVars = {}
+  if (user) {
+    const scoped = await buildReceiptScopeFilter(user, query)
+    scopeConditions = scoped.filterConditions
+    scopeBindVars = scoped.bindVars
+  }
+
+  const scopeOpts = { scopeConditions, scopeBindVars }
+  const issuerScope = buildReceiptOptionsFilter(query, { narrowIssuersByScheme: true, ...scopeOpts })
+  const schemeScope = buildReceiptOptionsFilter(query, { narrowSchemesByIssuer: true, ...scopeOpts })
+  const categoryScope = buildReceiptOptionsFilter(query, scopeOpts)
 
   const fromSchemes = await q(`
     FOR scheme IN mf_schemes

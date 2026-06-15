@@ -1,5 +1,10 @@
 import express from 'express'
-import { requireAuth, requireRole } from '../middleware/auth.js'
+import { requireAuth } from '../middleware/auth.js'
+import {
+  canAccessAnalytics,
+  buildRegistryScope,
+  sanitizeReportQuery
+} from '../constants/report-access.js'
 import { runMisSummary } from '../services/reports/mis-summary.js'
 import {
   runMisTransactions,
@@ -33,6 +38,7 @@ import {
   sendCustomerDetailXlsx,
   CustomerDetailReportError
 } from '../services/reports/customer-detail-report.js'
+import { runReceiptErrorsReport } from '../services/reports/receipt-errors-report.js'
 
 const router = express.Router()
 
@@ -92,6 +98,14 @@ const REPORT_REGISTRY = [
     description: 'Non-completed receipts with days pending.',
     path: '/api/reports/pending-receipts',
     icon: 'Clock'
+  },
+  {
+    id: 'receipt-errors',
+    title: 'Duplicate / Error Report',
+    description: 'Duplicate transactions, receipt numbers, and data-quality issues (missing PAN, mobile, reference, invalid amount).',
+    path: '/api/reports/receipt-errors',
+    icon: 'AlertTriangle',
+    group: 'Data Quality'
   },
   {
     id: 'customer-detail',
@@ -176,22 +190,56 @@ const categorySummaryRow = (r) => [r.product_category ?? '', r.issuer_name ?? ''
 const sipHeaders = ['Date', 'Product', 'Issuer', 'Client ID', 'Client Name', 'Folio', 'Scheme', 'SIP Amount', 'CC', 'SI', 'Frequency', 'Period', 'Month', 'Start Date', 'End Date', 'Last Installment Date', 'Branch Code', 'RM Code', 'Receipt Number', 'Status']
 const sipRow = (r) => [r.date ?? '', r.product_category ?? '', r.issuer ?? '', r.client_id ?? '', r.client_name ?? '', r.folio ?? '', r.scheme ?? '', r.sip_amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '', r.frequency ?? '', r.period ?? '', r.months ?? '', r.start_date ?? '', r.end_date ?? '', r.last_installment_date ?? '', r.branch_code ?? '', r.emp_code ?? '', r.receipt_number ?? '', r.status ?? '']
 
-const fdMaturityHeaders = ['Receipt Date', 'Maturity Date', 'Product Category', 'Issuer', 'Scheme', 'Tenure/Period', 'Month', 'Type', 'FD Payout Frequency', 'Client ID', 'Client Name', 'Amount', 'Maturity Amount', 'CC', 'SI', 'Branch Code', 'RM Code', 'Receipt Number', 'Status']
-const fdMaturityRow = (r) => [r.receipt_date ?? '', r.maturity_date ?? '', r.product_category ?? '', r.issuer ?? '', r.scheme_name ?? '', r.period ?? '', r.months ?? '', r.type ?? '', r.fd_payout_frequency ?? '', r.client_id ?? '', r.client_name ?? '', r.amount ?? 0, r.maturity_amount ?? '', r.collection_credit ?? 0, r.incentive_amount ?? '', r.branch_code ?? '', r.emp_code ?? '', r.receipt_number ?? '', r.status ?? '']
+const fdMaturityHeaders = ['Receipt Date', 'Maturity Date', 'Product Category', 'Issuer', 'Scheme', 'Tenure/Period', 'Month', 'Type', 'FD Payout Frequency', 'Client ID', 'Client Name', 'Address', 'Amount', 'Maturity Amount', 'CC', 'SI', 'Branch Code', 'RM Code', 'Receipt Number', 'Status']
+const fdMaturityRow = (r) => [r.receipt_date ?? '', r.maturity_date ?? '', r.product_category ?? '', r.issuer ?? '', r.scheme_name ?? '', r.period ?? '', r.months ?? '', r.type ?? '', r.fd_payout_frequency ?? '', r.client_id ?? '', r.client_name ?? '', r.client_address ?? '', r.amount ?? 0, r.maturity_amount ?? '', r.collection_credit ?? 0, r.incentive_amount ?? '', r.branch_code ?? '', r.emp_code ?? '', r.receipt_number ?? '', r.status ?? '']
 
 const pendingHeaders = ['Receipt Number', 'Client', 'Product', 'Amount', 'Stage', 'Assigned', 'Created At', 'Days Pending', 'As Of']
 const pendingRow = (r) => [r.receipt_number ?? '', r.client_name ?? '', r.product_type ?? '', r.amount ?? 0, r.current_stage ?? '', r.assigned_to ?? '', r.created_at ?? '', r.days_pending ?? '', r.as_of ?? '']
 
-// All report endpoints are admin-only (MIS / operational analytics).
-router.use(requireAuth, requireRole('admin'))
+const receiptErrorsHeaders = ['Date', 'Receipt Number', 'Client ID', 'Client Name', 'PAN', 'Phone', 'Product', 'Amount', 'Reference', 'Branch', 'RM', 'Status', 'Error Types', 'Related Receipts']
+const receiptErrorsRow = (r) => [
+  r.date ?? '',
+  r.receipt_number ?? '',
+  r.client_id ?? '',
+  r.client_name ?? '',
+  r.pan ?? '',
+  r.client_phone ?? '',
+  r.product_category ?? '',
+  r.amount ?? 0,
+  r.reference_no ?? '',
+  r.branch_code ?? '',
+  r.emp_code ?? '',
+  r.status ?? '',
+  Array.isArray(r.error_types) ? r.error_types.join('; ') : '',
+  Array.isArray(r.related_receipt_numbers) ? r.related_receipt_numbers.join('; ') : ''
+]
+
+function requireAnalyticsAccess(req, res, next) {
+  if (!canAccessAnalytics(req.user?.role)) {
+    return res.status(403).json({ error: 'forbidden' })
+  }
+  next()
+}
+
+function prepareReportRequest(req, res, next) {
+  req.reportQuery = sanitizeReportQuery(req.user.role, req.query)
+  next()
+}
+
+router.use(requireAuth, requireAnalyticsAccess)
 
 router.get('/registry', (req, res) => {
-  res.json({ reports: REPORT_REGISTRY })
+  res.json({
+    reports: REPORT_REGISTRY,
+    scope: buildRegistryScope(req.user.role)
+  })
 })
+
+router.use(prepareReportRequest)
 
 router.get('/filter-options', async (req, res) => {
   try {
-    const data = await runReportFilterOptions(req.query)
+    const data = await runReportFilterOptions(req.user, req.reportQuery)
     res.json(data)
   } catch (e) {
     console.error('[reports] filter-options', e)
@@ -201,10 +249,10 @@ router.get('/filter-options', async (req, res) => {
 
 router.get('/mis-summary', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
-    const data = await runMisSummary(req.user, req.query)
+    const fmt = exportFormat(req.reportQuery)
+    const data = await runMisSummary(req.user, req.reportQuery)
     if (fmt) {
-      const meta = exportMetaFromQuery('mis-summary', req.query)
+      const meta = exportMetaFromQuery('mis-summary', req.reportQuery)
       if (fmt === 'xlsx') await sendMisSummaryXlsxReport(res, 'mis_summary', data, meta)
       else if (fmt === 'pdf') await sendMisSummaryPdfReport(res, 'mis_summary', data, meta)
       else sendMisSummaryCsvReport(res, 'mis_summary', data, meta)
@@ -219,9 +267,9 @@ router.get('/mis-summary', async (req, res) => {
 
 router.get('/mis-transactions', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
+    const fmt = exportFormat(req.reportQuery)
     if (fmt) {
-      const query = { ...req.query, page: '1', page_size: '50000' }
+      const query = { ...req.reportQuery, page: '1', page_size: '50000' }
       const { rows, group_by } = await runMisTransactions(req.user, query)
       if (group_by) {
         const headers = group_by === 'rm'
@@ -230,15 +278,15 @@ router.get('/mis-transactions', async (req, res) => {
         const arr = rows.map((r) => group_by === 'rm'
           ? [r.group_key ?? '', r.employee_name ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '']
           : [r.group_key ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? ''])
-        await sendReportRows(res, 'mis_transactions_grouped', headers, arr, fmt, req.query, 'mis-transactions')
+        await sendReportRows(res, 'mis_transactions_grouped', headers, arr, fmt, req.reportQuery, 'mis-transactions')
         return
       }
       const headers = misTransactionExportHeaders()
       const arr = rows.map(misTransactionRowToArray)
-      await sendReportRows(res, 'mis_transactions', headers, arr, fmt, req.query, 'mis-transactions')
+      await sendReportRows(res, 'mis_transactions', headers, arr, fmt, req.reportQuery, 'mis-transactions')
       return
     }
-    const data = await runMisTransactions(req.user, req.query)
+    const data = await runMisTransactions(req.user, req.reportQuery)
     res.json(data)
   } catch (e) {
     console.error('[reports] mis-transactions', e)
@@ -248,11 +296,11 @@ router.get('/mis-transactions', async (req, res) => {
 
 router.get('/product-detail', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
-    const query = fmt ? exportQuery(req.query) : req.query
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
     const data = await runProductDetailReport(req.user, query)
     if (fmt) {
-      await sendReportRows(res, 'product_detail', productDetailHeaders, data.rows.map(productDetailRow), fmt, req.query, 'product-detail')
+      await sendReportRows(res, 'product_detail', productDetailHeaders, data.rows.map(productDetailRow), fmt, req.reportQuery, 'product-detail')
       return
     }
     res.json(data)
@@ -264,10 +312,10 @@ router.get('/product-detail', async (req, res) => {
 
 router.get('/category-summary', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
-    const rows = await runCategoryWiseAllProducts(req.user, req.query)
+    const fmt = exportFormat(req.reportQuery)
+    const rows = await runCategoryWiseAllProducts(req.user, req.reportQuery)
     if (fmt) {
-      await sendReportRows(res, 'category_summary', categorySummaryHeaders, rows.map(categorySummaryRow), fmt, req.query, 'category-summary')
+      await sendReportRows(res, 'category_summary', categorySummaryHeaders, rows.map(categorySummaryRow), fmt, req.reportQuery, 'category-summary')
       return
     }
     res.json({ rows })
@@ -279,10 +327,10 @@ router.get('/category-summary', async (req, res) => {
 
 router.get('/mf-fund', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
-    const rows = await runFundWiseMf(req.user, req.query)
+    const fmt = exportFormat(req.reportQuery)
+    const rows = await runFundWiseMf(req.user, req.reportQuery)
     if (fmt) {
-      await sendReportRows(res, 'mf_fund', aggregateHeaders, rows.map(aggregateRow('fund_name')), fmt, req.query, 'mf-fund')
+      await sendReportRows(res, 'mf_fund', aggregateHeaders, rows.map(aggregateRow('fund_name')), fmt, req.reportQuery, 'mf-fund')
       return
     }
     res.json({ rows })
@@ -294,11 +342,11 @@ router.get('/mf-fund', async (req, res) => {
 
 router.get('/sip-report', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
-    const query = fmt ? exportQuery(req.query) : req.query
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
     const data = await runSipReport(req.user, query)
     if (fmt) {
-      await sendReportRows(res, 'sip_due_end', sipHeaders, data.rows.map(sipRow), fmt, req.query, 'sip-report')
+      await sendReportRows(res, 'sip_due_end', sipHeaders, data.rows.map(sipRow), fmt, req.reportQuery, 'sip-report')
       return
     }
     res.json(data)
@@ -310,11 +358,11 @@ router.get('/sip-report', async (req, res) => {
 
 router.get('/fd-maturity', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
-    const query = fmt ? exportQuery(req.query) : req.query
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
     const data = await runFdMaturityReport(req.user, query)
     if (fmt) {
-      await sendReportRows(res, 'fd_maturity', fdMaturityHeaders, data.rows.map(fdMaturityRow), fmt, req.query, 'fd-maturity')
+      await sendReportRows(res, 'fd_maturity', fdMaturityHeaders, data.rows.map(fdMaturityRow), fmt, req.reportQuery, 'fd-maturity')
       return
     }
     res.json(data)
@@ -326,11 +374,11 @@ router.get('/fd-maturity', async (req, res) => {
 
 router.get('/pending-receipts', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
-    const query = fmt ? exportQuery(req.query) : req.query
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
     const data = await runPendingReceiptsReport(req.user, query)
     if (fmt) {
-      await sendReportRows(res, 'pending_receipts', pendingHeaders, data.rows.map(pendingRow), fmt, req.query, 'pending-receipts')
+      await sendReportRows(res, 'pending_receipts', pendingHeaders, data.rows.map(pendingRow), fmt, req.reportQuery, 'pending-receipts')
       return
     }
     res.json(data)
@@ -340,14 +388,30 @@ router.get('/pending-receipts', async (req, res) => {
   }
 })
 
+router.get('/receipt-errors', async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runReceiptErrorsReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'receipt_errors', receiptErrorsHeaders, data.rows.map(receiptErrorsRow), fmt, req.reportQuery, 'receipt-errors')
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] receipt-errors', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
 router.get('/customer-detail/customers', async (req, res) => {
   try {
-    if (queryFlag(req.query, 'ids_only')) {
-      const data = await runCustomerDetailCustomerListIds(req.user, req.query)
+    if (queryFlag(req.reportQuery, 'ids_only')) {
+      const data = await runCustomerDetailCustomerListIds(req.user, req.reportQuery)
       res.json(data)
       return
     }
-    const data = await runCustomerDetailCustomerList(req.user, req.query)
+    const data = await runCustomerDetailCustomerList(req.user, req.reportQuery)
     res.json(data)
   } catch (e) {
     if (e instanceof CustomerDetailReportError) {
@@ -361,19 +425,19 @@ router.get('/customer-detail/customers', async (req, res) => {
 
 router.get('/customer-detail', async (req, res) => {
   try {
-    const fmt = exportFormat(req.query)
+    const fmt = exportFormat(req.reportQuery)
     const query =
       fmt != null
-        ? { ...req.query, page: '1', page_size: '50000' }
-        : req.query
+        ? { ...req.reportQuery, page: '1', page_size: '50000' }
+        : req.reportQuery
     const data = await runCustomerDetailReport(req.user, query)
     if (fmt === 'csv') {
-      const meta = exportMetaFromQuery('customer-detail', req.query)
+      const meta = exportMetaFromQuery('customer-detail', req.reportQuery)
       sendCsvReport(res, 'customer_detail', customerDetailCsvHeaders, buildCustomerDetailCsvRows(data), meta)
       return
     }
     if (fmt === 'xlsx') {
-      await sendCustomerDetailXlsx(res, 'customer_detail', data, exportMetaFromQuery('customer-detail', req.query))
+      await sendCustomerDetailXlsx(res, 'customer_detail', data, exportMetaFromQuery('customer-detail', req.reportQuery))
       return
     }
     res.json(data)

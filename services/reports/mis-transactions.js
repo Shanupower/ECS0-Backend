@@ -1,6 +1,7 @@
 import { q } from '../../config/database.js'
 import { CC_AQL, INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
 import {
+  BRANCH_NAME_AQL,
   CATEGORY_AQL,
   FD_DEPOSIT_DATE_AQL,
   FD_TENURE_DISPLAY_AQL,
@@ -50,21 +51,6 @@ function groupCollectKey(groupBy) {
   }
 }
 
-const BRANCH_CODE_AQL = `(
-  LET raw_branch = receipt.branch
-  LET branch_doc = FIRST(
-    FOR branch IN branches
-      FILTER branch._key == raw_branch
-        OR (branch.branch_code != null && LOWER(TRIM(TO_STRING(branch.branch_code))) == LOWER(TRIM(TO_STRING(raw_branch))))
-        OR (branch.branch_name != null && LOWER(TRIM(TO_STRING(branch.branch_name))) == LOWER(TRIM(TO_STRING(raw_branch))))
-      LIMIT 1
-      RETURN branch
-  )
-  RETURN branch_doc != null && branch_doc.branch_code != null && TO_STRING(branch_doc.branch_code) != ""
-    ? TO_STRING(branch_doc.branch_code)
-    : TO_STRING(raw_branch)
-)[0]`
-
 /**
  * Detailed Transaction MIS — paginated rows and optional grouping.
  * Column set aligns with export transaction shape (routes/export.js) and
@@ -108,7 +94,7 @@ export async function runMisTransactions(user, query) {
         : `
           FOR receipt IN receipts
           ${filterClause}
-          COLLECT group_key = ${groupBy === 'branch' ? BRANCH_CODE_AQL : gKey}
+          COLLECT group_key = ${groupBy === 'branch' ? BRANCH_NAME_AQL : gKey}
           AGGREGATE applications = LENGTH(1), amount = SUM(${INV_AMOUNT_AQL}), collection_credit = SUM(${CC_AQL}), incentive_amount = SUM(${SI_AQL})
           SORT amount DESC
           RETURN { group_key, applications, amount, collection_credit, incentive_amount }
@@ -141,7 +127,7 @@ export async function runMisTransactions(user, query) {
     LIMIT @offset, @limit
     RETURN {
       date: ${dateExpr},
-      branch: receipt.branch,
+      branch: ${BRANCH_NAME_AQL},
       receipt_number: receipt.receipt_no,
       receipt_id: receipt._key,
       investor_name: ${INVESTOR_NAME_AQL},

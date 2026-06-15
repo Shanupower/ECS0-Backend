@@ -25,6 +25,7 @@ import taskTemplateRoutes, { runDueTemplates } from './routes/task-templates.js'
 import taskAiRoutes from './routes/task-ai.js'
 import teamRoutes from './routes/teams.js'
 import receiptApprovalsRoutes from './routes/receipt-approvals.js'
+import approvalsRoutes from './routes/approvals.js'
 import notificationRoutes from './routes/notifications.js'
 import handoffRoutes from './routes/handoff.js'
 import { runRecurrenceSweep } from './services/task-recurrence.js'
@@ -85,6 +86,7 @@ app.use('/api/task-templates', taskTemplateRoutes)
 app.use('/api/task-ai', taskAiRoutes)
 app.use('/api/teams', teamRoutes)
 app.use('/api/receipt-approvals', receiptApprovalsRoutes)
+app.use('/api/approvals', approvalsRoutes)
 app.use('/api/notifications', notificationRoutes)
 app.use('/api/handoffs', handoffRoutes)
 app.use('/api/leads', leadRoutes)

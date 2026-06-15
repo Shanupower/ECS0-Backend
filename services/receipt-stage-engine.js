@@ -171,6 +171,8 @@ async function createApprovalTask(receipt, team, cycleId, actor) {
     assigned_by_id: actor?.sub || actor?._key || 'system',
     assigned_by_emp_code: actor?.emp_code || null,
     branch: receipt.branch || null,
+    scheme_name: receipt.product?.name || receipt.scheme_name || receipt.schemeName || null,
+    amount: receipt.transaction?.amount ?? receipt.investment_amount ?? null,
     start_date: null,
     due_date: null,
     scheduled_date: null,

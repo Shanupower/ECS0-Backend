@@ -24,4 +24,11 @@ applyReceiptCategoryFilters(filterConditions, bindVars, ['MF', 'FD'])
 assert.equal(filterConditions.length, 1)
 assert.match(filterConditions[0], / OR /)
 
+const insConditions = []
+const insBind = {}
+applyReceiptCategoryFilters(insConditions, insBind, ['INS'])
+assert.equal(insConditions.length, 1)
+assert.match(insConditions[0], /ins_category_aliases/)
+assert.match(insConditions[0], /product_details\.insurance/)
+
 console.log('[White Box] query-list tests passed')

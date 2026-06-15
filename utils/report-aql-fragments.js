@@ -86,6 +86,67 @@ export const FD_DEPOSIT_DATE_AQL = `(
 )`
 
 /** Human-readable FD tenure from nested deposit or flat legacy fields. */
+/** Resolve branch document from receipt.branch (code, name, or _key). */
+export const BRANCH_DOC_AQL = `FIRST(
+  FOR branch IN branches
+    FILTER branch._key == raw_branch
+      OR (branch.branch_code != null && LOWER(TRIM(TO_STRING(branch.branch_code))) == LOWER(TRIM(TO_STRING(raw_branch))))
+      OR (branch.branch_name != null && LOWER(TRIM(TO_STRING(branch.branch_name))) == LOWER(TRIM(TO_STRING(raw_branch))))
+    LIMIT 1
+    RETURN branch
+)`
+
+export const BRANCH_CODE_AQL = `(
+  LET raw_branch = receipt.branch
+  LET branch_doc = ${BRANCH_DOC_AQL}
+  RETURN branch_doc != null && branch_doc.branch_code != null && TO_STRING(branch_doc.branch_code) != ""
+    ? TO_STRING(branch_doc.branch_code)
+    : TO_STRING(raw_branch)
+)[0]`
+
+export const BRANCH_NAME_AQL = `(
+  LET raw_branch = receipt.branch
+  LET branch_doc = ${BRANCH_DOC_AQL}
+  RETURN branch_doc != null && branch_doc.branch_name != null && TO_STRING(branch_doc.branch_name) != ""
+    ? TO_STRING(branch_doc.branch_name)
+    : TO_STRING(raw_branch)
+)[0]`
+
+/** Investor address from nested investor.address or legacy flat fields. */
+export const CLIENT_ADDRESS_AQL = `(
+  LET addr = (receipt.investor != null ? receipt.investor.address : null)
+  LET nested = addr != null
+    ? TRIM(CONCAT_SEPARATOR(", ",
+        FOR part IN [addr.line1, addr.line2, addr.line3, addr.city, addr.state]
+          FILTER part != null && TO_STRING(part) != ""
+          RETURN TRIM(TO_STRING(part))
+      ))
+    : ""
+  RETURN nested != ""
+    ? nested
+    : (receipt.investor_address != null && TO_STRING(receipt.investor_address) != ""
+      ? TO_STRING(receipt.investor_address)
+      : (receipt.investorAddress != null && TO_STRING(receipt.investorAddress) != ""
+        ? TO_STRING(receipt.investorAddress)
+        : ""))
+)[0]`
+
+/** Payment / transaction reference number (nested payment + legacy flat fields). */
+export const REFERENCE_NO_AQL = `(
+  (receipt.payment != null && receipt.payment.reference_no != null && TO_STRING(receipt.payment.reference_no) != "")
+    ? receipt.payment.reference_no
+    : ((receipt.reference_no != null && TO_STRING(receipt.reference_no) != "") ? receipt.reference_no
+    : ((receipt.transaction_reference_no != null && TO_STRING(receipt.transaction_reference_no) != "") ? receipt.transaction_reference_no
+    : ((receipt.transaction_details != null && receipt.transaction_details.reference_no != null && TO_STRING(receipt.transaction_details.reference_no) != "")
+      ? receipt.transaction_details.reference_no
+      : null)))
+)`
+
+export const INVESTOR_ID_AQL = `((receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id)`
+export const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name)`
+export const PAN_AQL = `((receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan)`
+export const CLIENT_PHONE_AQL = `((receipt.investor != null && receipt.investor.mobile != null && TO_STRING(receipt.investor.mobile) != "") ? receipt.investor.mobile : receipt.phone)`
+
 export const FD_TENURE_DISPLAY_AQL = `(
   LET tenure_unit = (
     (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.tenure_unit != null && TO_STRING(receipt.product_details.fd.deposit.tenure_unit) != "")
