@@ -55,7 +55,7 @@ function groupCollectKey(groupBy) {
  * Detailed Transaction MIS — paginated rows and optional grouping.
  * Column set aligns with export transaction shape (routes/export.js) and
  * typical MIS detail PDFs: Date, Branch, Receipt #, Investor, Scheme, Period,
- * Months, SIP dates, FD maturity/tenure, Transaction type, amounts, Application #, RM, Product.
+ * Months, SIP dates, maturity date/tenure, Transaction type, amounts, Application #, RM, Product.
  * @returns {Promise<{ rows: object[], total: number, page: number, page_size: number, group_by?: string }>}
  */
 export async function runMisTransactions(user, query) {
@@ -138,7 +138,7 @@ export async function runMisTransactions(user, query) {
       sip_end_date: ${SIP_END_DATE_AQL},
       sip_is_perpetual: ${SIP_IS_PERPETUAL_AQL},
       fd_deposit_date: ${FD_DEPOSIT_DATE_AQL},
-      fd_maturity_date: ${MATURITY_DATE_AQL},
+      maturity_date: ${MATURITY_DATE_AQL},
       fd_tenure: ${FD_TENURE_DISPLAY_AQL},
       transaction_type: ${TXN_TYPE_AQL},
       investment_amount: ${INV_AMOUNT_AQL},
@@ -184,7 +184,7 @@ export function misTransactionExportHeaders() {
     'Months',
     'SIP Start Date',
     'SIP End Date',
-    'FD Maturity Date',
+    'Maturity Date',
     'FD Tenure',
     'Transaction Type',
     'Investment Amount',
@@ -209,7 +209,7 @@ export function misTransactionRowToArray(r) {
     r.months ?? '',
     r.sip_start_date ?? '',
     r.sip_end_date ?? '',
-    r.fd_maturity_date ?? '',
+    r.maturity_date ?? r.fd_maturity_date ?? '',
     r.fd_tenure ?? '',
     r.transaction_type ?? '',
     r.investment_amount ?? 0,

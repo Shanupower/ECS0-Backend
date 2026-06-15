@@ -1178,7 +1178,7 @@ router.get('/summary', requireAuth, async (req, res) => {
 
     // Employee code filter
     if (emp_code) {
-      filterConditions.push('receipt.emp_code == @emp_code')
+      filterConditions.push('(receipt.emp_code == @emp_code OR (receipt.employee != null && receipt.employee.code == @emp_code))')
       bindVars.emp_code = emp_code
     }
 
@@ -1431,14 +1431,16 @@ router.get('/', requireAuth, async (req, res) => {
         filterConditions.push('receipt.branch == @branch')
         bindVars.branch = normalizeBranchName(userBranch) || userBranch
       }
-    } else if (emp_code) {
-      // Admin viewing personal / emp filter: match list to dashboard (user_id OR emp_code)
+    }
+
+    // Optional emp filter stacks on role scoping (e.g. manager branch view + employee code).
+    if (emp_code && req.user.role !== 'employee') {
       if (req.user.role === 'admin' && req.user.emp_code === emp_code) {
-        filterConditions.push('(receipt.user_id == @user_id OR receipt.emp_code == @emp_code)')
+        filterConditions.push('(receipt.user_id == @user_id OR receipt.emp_code == @emp_code OR (receipt.employee != null && receipt.employee.code == @emp_code))')
         bindVars.user_id = String(req.user.sub)
         bindVars.emp_code = emp_code
       } else {
-        filterConditions.push('receipt.emp_code == @emp_code')
+        filterConditions.push('(receipt.emp_code == @emp_code OR (receipt.employee != null && receipt.employee.code == @emp_code))')
         bindVars.emp_code = emp_code
       }
     }

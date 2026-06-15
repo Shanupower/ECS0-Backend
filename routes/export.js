@@ -224,7 +224,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
       }
     }
     if (emp_code) {
-      query += ` AND receipt.emp_code == @emp_code`
+      query += ` AND (receipt.emp_code == @emp_code OR (receipt.employee != null && receipt.employee.code == @emp_code))`
       bindVars.emp_code = emp_code
     }
     if (status) {
