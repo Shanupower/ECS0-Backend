@@ -535,7 +535,7 @@ export function generateReceiptPDF(receipt) {
         const premFreq = val(ins?.policy?.premium_frequency, receipt.insurance_premium_frequency)
         const startDate = val(ins?.coverage?.policy_start_date, receipt.insurance_date_of_issue)
         const matDate = val(ins?.coverage?.maturity_date, receipt.insurance_maturity_date)
-        const insTxnType = val(receipt.fd_transaction_type, receipt.txn_type, ins?.policy?.type) || 'Fresh'
+        const insTxnType = val(txn.type, receipt.txn_type, receipt.txnType, receipt.fd_transaction_type, ins?.policy?.type) || 'Fresh'
 
         y = drawKeyValueRows([
           { label: 'Issuer', value: issuer },

@@ -1,10 +1,11 @@
 import express from 'express'
-import ExcelJS from 'exceljs'
-import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName, getUserBranch } from '../config/database.js'
+import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName, getUserBranch, getCanonicalBranchKey } from '../config/database.js'
 import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.js'
 import { uploadCsv } from '../middleware/upload.js'
 import { normalizeReceiptCategory } from '../utils/receipt-category.js'
 import { appendExportCategoryQuery, appendMfTxnTypeToExportQuery } from '../utils/receipt-filters.js'
+import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { buildExportMeta, sendCsvReport, sendXlsxReport, fixUtf8Mojibake } from '../services/reports/report-export.js'
 
 const router = express.Router()
 
@@ -40,10 +41,107 @@ async function buildBranchNameResolver() {
   }
 }
 
+export const CUSTOMER_CSV_HEADERS = [
+  'Investor ID', 'Name', 'PAN', 'Email', 'Mobile', 'Date of Birth',
+  'Address1', 'Address2', 'Address3', 'City', 'State', 'Pin',
+  'Branch(es)', 'Created At'
+]
+
+const CUSTOMER_CSV_TEMPLATE_ROW = [
+  '',
+  'Sample Customer',
+  'AAAPA1234A',
+  'sample@example.com',
+  '9876543210',
+  '1990-01-15',
+  '123 Main Street',
+  '',
+  '',
+  'Chennai',
+  'Tamil Nadu',
+  '600001',
+  'Chennai RO',
+  ''
+]
+
+function formatCustomerDob(value) {
+  if (value == null || value === '') return ''
+  const raw = String(value).trim()
+  if (!raw) return ''
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10)
+  const d = new Date(raw.includes('T') ? raw : `${raw}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return raw
+  return d.toISOString().slice(0, 10)
+}
+
+function formatCustomerBranchDisplay(customer, resolveBranchName) {
+  if (customer.relationship_manager_display != null) {
+    return Array.isArray(customer.relationship_manager_display)
+      ? customer.relationship_manager_display.join('; ')
+      : String(customer.relationship_manager_display)
+  }
+  const keys = []
+  if (Array.isArray(customer.branches) && customer.branches.length > 0) {
+    keys.push(...customer.branches.map(String))
+  } else if (customer.relationship_manager) {
+    if (Array.isArray(customer.relationship_manager)) {
+      keys.push(...customer.relationship_manager.map(String))
+    } else {
+      keys.push(String(customer.relationship_manager))
+    }
+  }
+  if (!keys.length) return ''
+  const names = [...new Set(keys.map((k) => resolveBranchName(k) || k).filter(Boolean))]
+  return names.join('; ')
+}
+
+function customerToCsvRow(customer, resolveBranchName) {
+  return [
+    customer.investor_id,
+    customer.name || '',
+    customer.pan || '',
+    customer.email || '',
+    customer.mobile || '',
+    formatCustomerDob(customer.date_of_birth),
+    customer.address1 || '',
+    customer.address2 || '',
+    customer.address3 || '',
+    customer.city || '',
+    customer.state || '',
+    customer.pin || '',
+    formatCustomerBranchDisplay(customer, resolveBranchName),
+    customer.created_at || ''
+  ]
+}
+
+async function resolveBranchesFromImportTokens(branchParts, resolveBranchName) {
+  if (!branchParts.length) {
+    return { branches: [], relationship_manager: 'UNASSIGNED', relationship_manager_display: null }
+  }
+  const canonicalKeys = []
+  const displayNames = []
+  for (const token of branchParts) {
+    const canonicalKey = (await getCanonicalBranchKey(token)) || normalizeBranchName(token)
+    if (canonicalKey) {
+      canonicalKeys.push(canonicalKey)
+      displayNames.push(resolveBranchName(canonicalKey) || token)
+    }
+  }
+  if (!canonicalKeys.length) {
+    return { branches: [], relationship_manager: 'UNASSIGNED', relationship_manager_display: null }
+  }
+  return {
+    branches: canonicalKeys,
+    relationship_manager: canonicalKeys.length === 1 ? canonicalKeys[0] : canonicalKeys,
+    relationship_manager_display: displayNames.length === 1 ? displayNames[0] : displayNames
+  }
+}
+
 // Export receipts to CSV
 router.get('/receipts', requireAuth, async (req, res) => {
   try {
-    const { from, to, branch_code } = req.query
+    const { from, to, branch_code, date_basis } = req.query
+    const dateExpr = effectiveDateExprAql(date_basis)
     let query = `
       FOR receipt IN receipts
       FILTER receipt.is_deleted == false
@@ -51,11 +149,11 @@ router.get('/receipts', requireAuth, async (req, res) => {
     let bindVars = {}
     
     if (from) {
-      query += ` AND receipt.created_at >= @from`
+      query += ` AND ${dateExpr} >= @from`
       bindVars.from = from
     }
     if (to) {
-      query += ` AND receipt.created_at <= @to`
+      query += ` AND ${dateExpr} <= @to`
       bindVars.to = to
     }
     if (branch_code) {
@@ -64,9 +162,10 @@ router.get('/receipts', requireAuth, async (req, res) => {
     }
     
     query += `
-      SORT receipt.created_at DESC
+      SORT ${dateExpr} DESC
       RETURN {
         receipt_id: receipt._key,
+        receipt_date: ${dateExpr},
         investor_id: (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id,
         investor_name: (receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name,
         investor_pan: (receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan,
@@ -100,14 +199,11 @@ router.get('/receipts', requireAuth, async (req, res) => {
     })
     const resolveBranchName = await buildBranchNameResolver()
     
-    // Convert to CSV
     const headers = [
-      'Receipt ID', 'Investor ID', 'Investor Name', 'PAN', 'Phone', 'Email',
+      'Receipt ID', 'Receipt Date', 'Investor ID', 'Investor Name', 'PAN', 'Phone', 'Email',
       'Amount', 'Category', 'Payment Method', 'Branch Code', 'Branch Name',
       'Created By', 'Created At', 'Status', 'Notes', 'CC', 'SI'
     ]
-    
-    const csvRows = [headers.join(',')]
 
     const normalizeTxnTypeToModeDisplay = (raw) => {
       const v = String(raw || '').trim()
@@ -115,52 +211,42 @@ router.get('/receipts', requireAuth, async (req, res) => {
       const upper = v.toUpperCase()
       if (v === 'Lump Sum' || v === 'Lumpsum' || v === 'LumpSum' || upper === 'LUMPSUM') return 'Lump Sum'
       if (v === 'Switch Over' || upper === 'SWITCH_OVER' || v === 'SwitchOver' || upper === 'SWITCHOVER') return 'Switch Over'
-      return v // SIP / SWP / STP or anything else
+      return v
     }
-    
-    receipts.forEach(receipt => {
-      const row = [
-        receipt.receipt_id,
-        receipt.investor_id,
-        `"${receipt.investor_name}"`,
-        receipt.investor_pan,
-        receipt.investor_phone,
-        receipt.investor_email,
-        receipt.amount,
-        receipt.category,
-        normalizeTxnTypeToModeDisplay(receipt.payment_method),
-        receipt.branch_code,
-        `"${resolveBranchName(receipt.branch_name || receipt.branch_code).replace(/"/g, '""')}"`,
-        receipt.created_by,
-        receipt.created_at,
-        receipt.status,
-        `"${receipt.notes || ''}"`,
-        receipt.cc || 0,
-        // Hide SI from non-admins
-        req.user.role === 'admin' ? (receipt.si || 0) : ''
-      ]
-      csvRows.push(row.join(','))
+
+    const rows = receipts.map((receipt) => [
+      receipt.receipt_id,
+      receipt.receipt_date || '',
+      receipt.investor_id,
+      receipt.investor_name,
+      receipt.investor_pan,
+      receipt.investor_phone,
+      receipt.investor_email,
+      receipt.amount,
+      receipt.category,
+      normalizeTxnTypeToModeDisplay(receipt.payment_method),
+      receipt.branch_code,
+      resolveBranchName(receipt.branch_name || receipt.branch_code),
+      receipt.created_by,
+      receipt.created_at,
+      receipt.status,
+      receipt.notes || '',
+      receipt.cc || 0,
+      req.user.role === 'admin' ? (receipt.si || 0) : ''
+    ])
+
+    const meta = buildExportMeta({
+      reportTitle: 'Receipts Export',
+      from,
+      to
     })
-    
-    const csv = csvRows.join('\n')
-    
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="receipts_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+    sendCsvReport(res, 'receipts', headers, rows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export receipts' })
   }
 })
 
-function escapeCsvField(v) {
-  if (v == null || v === '') return ''
-  const s = String(v)
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
-  return s
-}
-
-// Export detailed transaction history (CSV or XLSX)
 router.get('/transactions', requireAuth, async (req, res) => {
   try {
     const {
@@ -173,8 +259,10 @@ router.get('/transactions', requireAuth, async (req, res) => {
       mode,
       txn_type,
       search,
+      date_basis,
       format = 'csv'
     } = req.query
+    const dateExpr = effectiveDateExprAql(date_basis)
 
     let query = `
       FOR receipt IN receipts
@@ -214,11 +302,11 @@ router.get('/transactions', requireAuth, async (req, res) => {
     }
 
     if (from) {
-      query += ` AND receipt.date >= @from`
+      query += ` AND ${dateExpr} >= @from`
       bindVars.from = from
     }
     if (to) {
-      query += ` AND receipt.date <= @to`
+      query += ` AND ${dateExpr} <= @to`
       bindVars.to = to
     }
     if (branch_code) {
@@ -232,7 +320,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
       }
     }
     if (emp_code) {
-      query += ` AND receipt.emp_code == @emp_code`
+      query += ` AND (receipt.emp_code == @emp_code OR (receipt.employee != null && receipt.employee.code == @emp_code))`
       bindVars.emp_code = emp_code
     }
     if (status) {
@@ -264,11 +352,11 @@ router.get('/transactions', requireAuth, async (req, res) => {
     }
 
     query += `
-      SORT receipt.date DESC
+      SORT ${dateExpr} DESC
       RETURN {
         receipt_id: receipt._key,
         receipt_no: receipt.receipt_no,
-        date: receipt.date,
+        date: ${dateExpr},
         branch: receipt.branch,
         emp_code: receipt.emp_code,
         investor_id: (receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id,
@@ -339,17 +427,17 @@ router.get('/transactions', requireAuth, async (req, res) => {
     const buildRowArray = (r) => {
       const payment = r.payment || {}
       const legacy = r.transaction_details || {}
-      const entryMode = payment.entry_mode ?? legacy.entry_mode ?? ''
-      const channel = payment.channel ?? legacy.channel ?? ''
-      const referenceNo = payment.reference_no ?? legacy.reference_no ?? ''
+      const entryMode = fixUtf8Mojibake(payment.entry_mode ?? legacy.entry_mode ?? '')
+      const channel = fixUtf8Mojibake(payment.channel ?? legacy.channel ?? '')
+      const referenceNo = fixUtf8Mojibake(payment.reference_no ?? legacy.reference_no ?? '')
       const txnDate = payment.transaction_date ?? legacy.txn_date ?? ''
-      const instrumentType = payment.instrument?.type ?? ''
-      const instrumentNo = payment.instrument?.number ?? ''
+      const instrumentType = fixUtf8Mojibake(payment.instrument?.type ?? '')
+      const instrumentNo = fixUtf8Mojibake(payment.instrument?.number ?? '')
       const instrumentDate = payment.instrument?.date ?? ''
-      const bankName = payment.instrument?.bank?.name ?? legacy.bank_name ?? ''
-      const bankBranch = payment.instrument?.bank?.branch ?? legacy.bank_branch ?? ''
+      const bankName = fixUtf8Mojibake(payment.instrument?.bank?.name ?? legacy.bank_name ?? '')
+      const bankBranch = fixUtf8Mojibake(payment.instrument?.bank?.branch ?? legacy.bank_branch ?? '')
       const accountLast4 = payment.account_last4 ?? legacy.account_last4 ?? ''
-      const notes = payment.notes ?? legacy.notes ?? ''
+      const notes = fixUtf8Mojibake(payment.notes ?? legacy.notes ?? '')
       const siVal = req.user.role === 'admin' ? (r.si || 0) : ''
 
       const rawMode = String(r.mode || '').trim()
@@ -357,20 +445,20 @@ router.get('/transactions', requireAuth, async (req, res) => {
         rawMode === 'Lumpsum' || rawMode === 'LumpSum' || rawMode === 'Lump Sum' ? 'Lump Sum' :
         (rawMode === 'Switch Over' || rawMode === 'SwitchOver' || rawMode === 'SWITCH_OVER' || rawMode === 'switch_over' ? 'Switch Over' : rawMode)
 
-      const txnTypeOut = r.transaction_type_canonical || r.transaction_type || r.txn_type || ''
+      const txnTypeOut = fixUtf8Mojibake(r.transaction_type_canonical || r.transaction_type || r.txn_type || '')
 
       return [
-        r.receipt_no || '',
+        fixUtf8Mojibake(r.receipt_no || ''),
         r.date || '',
-        resolveBranchName(r.branch || ''),
-        r.emp_code || '',
-        r.investor_id || '',
-        r.investor_name || '',
-        r.pan || '',
-        r.product_category || '',
-        resolveExportIssuer(r),
-        r.scheme_name || '',
-        resolveExportFolioApp(r),
+        fixUtf8Mojibake(resolveBranchName(r.branch || '')),
+        fixUtf8Mojibake(r.emp_code || ''),
+        fixUtf8Mojibake(r.investor_id || ''),
+        fixUtf8Mojibake(r.investor_name || ''),
+        fixUtf8Mojibake(r.pan || ''),
+        fixUtf8Mojibake(r.product_category || ''),
+        fixUtf8Mojibake(resolveExportIssuer(r)),
+        fixUtf8Mojibake(r.scheme_name || ''),
+        fixUtf8Mojibake(resolveExportFolioApp(r)),
         r.investment_amount || 0,
         r.cc || 0,
         siVal,
@@ -395,7 +483,6 @@ router.get('/transactions', requireAuth, async (req, res) => {
 
     const fmt = String(format || '').toLowerCase()
     const outFmt = fmt === 'xlsx' ? 'xlsx' : (fmt === 'json' ? 'json' : 'csv')
-    const stamp = new Date().toISOString().split('T')[0]
 
     if (outFmt === 'json') {
       const data = rows.map(r => {
@@ -446,25 +533,20 @@ router.get('/transactions', requireAuth, async (req, res) => {
       return
     }
 
+    const meta = buildExportMeta({
+      reportTitle: 'Transaction History',
+      from,
+      to
+    })
+
     if (outFmt === 'xlsx') {
-      const workbook = new ExcelJS.Workbook()
-      const sheet = workbook.addWorksheet('Transactions')
-      sheet.addRow(headers)
-      rows.forEach(r => sheet.addRow(buildRowArray(r)))
-      const buf = await workbook.xlsx.writeBuffer()
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-      res.setHeader('Content-Disposition', `attachment; filename="transactions_${stamp}.xlsx"`)
-      res.send(Buffer.from(buf))
+      const dataRows = rows.map((r) => buildRowArray(r))
+      await sendXlsxReport(res, 'transactions', headers, dataRows, meta)
       return
     }
 
-    const csvLines = [headers.map(escapeCsvField).join(',')]
-    rows.forEach(r => {
-      csvLines.push(buildRowArray(r).map(escapeCsvField).join(','))
-    })
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-    res.setHeader('Content-Disposition', `attachment; filename="transactions_${stamp}.csv"`)
-    res.send('\uFEFF' + csvLines.join('\n'))
+    const dataRows = rows.map((r) => buildRowArray(r))
+    sendCsvReport(res, 'transactions', headers, dataRows, meta)
   } catch (error) {
     console.error('CSV transaction export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export transactions' })
@@ -483,59 +565,39 @@ router.get('/customers', requireAuth, requireRole('admin'), requireMasterKey, as
         pan: customer.pan,
         email: customer.email,
         mobile: customer.mobile,
+        date_of_birth: customer.date_of_birth,
         address1: customer.address1,
         address2: customer.address2,
         address3: customer.address3,
         city: customer.city,
         state: customer.state,
         pin: customer.pin,
+        branches: customer.branches,
         relationship_manager: customer.relationship_manager,
         relationship_manager_display: customer.relationship_manager_display,
         created_at: customer.created_at
       }
     `)
-    
-    const headers = [
-      'Investor ID', 'Name', 'PAN', 'Email', 'Mobile', 'Address1', 'Address2', 'Address3',
-      'City', 'State', 'Pin', 'Branch(es)', 'Created At'
-    ]
-    
-    const csvRows = [headers.join(',')]
-    
-    customers.forEach(customer => {
-      const branchVal = customer.relationship_manager_display != null
-        ? (Array.isArray(customer.relationship_manager_display)
-            ? customer.relationship_manager_display.join('; ')
-            : customer.relationship_manager_display)
-        : (Array.isArray(customer.relationship_manager)
-            ? customer.relationship_manager.join('; ')
-            : customer.relationship_manager || '')
-      const row = [
-        customer.investor_id,
-        `"${(customer.name || '').replace(/"/g, '""')}"`,
-        customer.pan || '',
-        customer.email || '',
-        customer.mobile || '',
-        `"${(customer.address1 || '').replace(/"/g, '""')}"`,
-        `"${(customer.address2 || '').replace(/"/g, '""')}"`,
-        `"${(customer.address3 || '').replace(/"/g, '""')}"`,
-        `"${(customer.city || '').replace(/"/g, '""')}"`,
-        `"${(customer.state || '').replace(/"/g, '""')}"`,
-        customer.pin || '',
-        `"${String(branchVal).replace(/"/g, '""')}"`,
-        customer.created_at || ''
-      ]
-      csvRows.push(row.join(','))
-    })
-    
-    const csv = csvRows.join('\n')
-    
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="customers_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+
+    const resolveBranchName = await buildBranchNameResolver()
+    const dataRows = customers.map((customer) => customerToCsvRow(customer, resolveBranchName))
+
+    const meta = buildExportMeta({ reportTitle: 'Customer Master' })
+    sendCsvReport(res, 'customers', CUSTOMER_CSV_HEADERS, dataRows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export customers' })
+  }
+})
+
+// Sample CSV template for customer import (same columns as export)
+router.get('/customers/template', requireAuth, requireRole('admin'), requireMasterKey, async (req, res) => {
+  try {
+    const meta = buildExportMeta({ reportTitle: 'Customer Import Template' })
+    sendCsvReport(res, 'customers_import_template', CUSTOMER_CSV_HEADERS, [CUSTOMER_CSV_TEMPLATE_ROW], meta)
+  } catch (error) {
+    console.error('CSV template error:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to generate customer template' })
   }
 })
 
@@ -556,7 +618,10 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
     const investorIdIdx = header.findIndex(h => /investor\s*id/i.test(h))
     const emailIdx = header.findIndex(h => /email/i.test(h))
     const mobileIdx = header.findIndex(h => /mobile/i.test(h))
+    const dobIdx = header.findIndex(h => /dob|date\s*of\s*birth/i.test(h))
     const addr1Idx = header.findIndex(h => /address1|address\s*1/i.test(h))
+    const addr2Idx = header.findIndex(h => /address2|address\s*2/i.test(h))
+    const addr3Idx = header.findIndex(h => /address3|address\s*3/i.test(h))
     const cityIdx = header.findIndex(h => /city/i.test(h))
     const stateIdx = header.findIndex(h => /state/i.test(h))
     const pinIdx = header.findIndex(h => /pin/i.test(h))
@@ -578,6 +643,7 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
     `)
     let nextId = (maxIdResult[0] || 0) + 1
     const col = getCollection('customers')
+    const resolveBranchName = await buildBranchNameResolver()
     let imported = 0
     let updated = 0
     const errors = []
@@ -607,23 +673,26 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
       const investorId = investorIdIdx >= 0 && parts[investorIdIdx] ? parseInt(parts[investorIdIdx], 10) : null
       const branchRaw = branchIdx >= 0 ? parseCsvField(parts[branchIdx]) : ''
       const branchParts = branchRaw ? branchRaw.split(/[;,]/).map(b => b.trim()).filter(Boolean) : []
-      const relationshipManager = branchParts.length === 0 ? 'UNASSIGNED' : branchParts.length === 1 ? normalizeBranchName(branchParts[0]) : branchParts.map(b => normalizeBranchName(b))
-      const relationshipManagerDisplay = branchParts.length === 0 ? null : branchParts.length === 1 ? branchParts[0] : branchParts
+      const branchFields = await resolveBranchesFromImportTokens(branchParts, resolveBranchName)
+      const dobRaw = dobIdx >= 0 ? parseCsvField(parts[dobIdx]) : ''
+      const dateOfBirth = dobRaw ? formatCustomerDob(dobRaw) : null
       const doc = {
         investor_id: investorId != null && !isNaN(investorId) ? investorId : nextId++,
         name,
         pan: pan.toUpperCase(),
         email: emailIdx >= 0 ? parseCsvField(parts[emailIdx]) || null : null,
         mobile: mobileIdx >= 0 ? parseCsvField(parts[mobileIdx]) || null : null,
+        date_of_birth: dateOfBirth || null,
         address1: addr1Idx >= 0 ? parseCsvField(parts[addr1Idx]) || null : null,
-        address2: null,
-        address3: null,
+        address2: addr2Idx >= 0 ? parseCsvField(parts[addr2Idx]) || null : null,
+        address3: addr3Idx >= 0 ? parseCsvField(parts[addr3Idx]) || null : null,
         city: cityIdx >= 0 ? parseCsvField(parts[cityIdx]) || null : null,
         state: stateIdx >= 0 ? parseCsvField(parts[stateIdx]) || null : null,
         pin: pinIdx >= 0 ? parseCsvField(parts[pinIdx]) || null : null,
         country: 'India',
-        relationship_manager: Array.isArray(relationshipManager) ? relationshipManager : relationshipManager,
-        relationship_manager_display: relationshipManagerDisplay,
+        branches: branchFields.branches,
+        relationship_manager: branchFields.relationship_manager,
+        relationship_manager_display: branchFields.relationship_manager_display,
         minors: [],
         created_at: new Date().toISOString(),
         is_active: true,
@@ -645,6 +714,7 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
             pan: doc.pan,
             email: doc.email,
             mobile: doc.mobile,
+            date_of_birth: doc.date_of_birth,
             address1: doc.address1,
             address2: doc.address2,
             address3: doc.address3,
@@ -652,6 +722,7 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
             state: doc.state,
             pin: doc.pin,
             country: doc.country,
+            branches: doc.branches,
             relationship_manager: doc.relationship_manager,
             relationship_manager_display: doc.relationship_manager_display,
             is_active: doc.is_active,
@@ -698,28 +769,20 @@ router.get('/users', requireAuth, requireRole('admin'), async (req, res) => {
     const headers = [
       'Employee Code', 'Name', 'Email', 'Role', 'Branch', 'Active', 'Created At', 'Last Login'
     ]
-    
-    const csvRows = [headers.join(',')]
-    
-    users.forEach(user => {
-      const row = [
-        user.emp_code,
-        `"${user.name}"`,
-        user.email,
-        user.role,
-        `"${user.branch || ''}"`,
-        user.is_active,
-        user.created_at,
-        user.last_login_at || ''
-      ]
-      csvRows.push(row.join(','))
-    })
-    
-    const csv = csvRows.join('\n')
-    
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="users_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+
+    const dataRows = users.map((user) => [
+      user.emp_code,
+      user.name,
+      user.email,
+      user.role,
+      user.branch || '',
+      user.is_active,
+      user.created_at,
+      user.last_login_at || ''
+    ])
+
+    const meta = buildExportMeta({ reportTitle: 'Users Export' })
+    sendCsvReport(res, 'users', headers, dataRows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export users' })
@@ -745,27 +808,19 @@ router.get('/branches', requireAuth, requireRole('admin'), async (req, res) => {
     const headers = [
       'Branch Code', 'Branch Name', 'Type', 'Address', 'Phone', 'Email', 'Created At'
     ]
-    
-    const csvRows = [headers.join(',')]
-    
-    branches.forEach(branch => {
-      const row = [
-        branch.branch_code,
-        `"${branch.branch_name}"`,
-        branch.branch_type,
-        `"${branch.address || ''}"`,
-        branch.phone,
-        branch.email,
-        branch.created_at
-      ]
-      csvRows.push(row.join(','))
-    })
-    
-    const csv = csvRows.join('\n')
-    
-    res.setHeader('Content-Type', 'text/csv')
-    res.setHeader('Content-Disposition', `attachment; filename="branches_${new Date().toISOString().split('T')[0]}.csv"`)
-    res.send(csv)
+
+    const dataRows = branches.map((branch) => [
+      branch.branch_code,
+      branch.branch_name,
+      branch.branch_type,
+      branch.address || '',
+      branch.phone,
+      branch.email,
+      branch.created_at
+    ])
+
+    const meta = buildExportMeta({ reportTitle: 'Branches Export' })
+    sendCsvReport(res, 'branches', headers, dataRows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export branches' })

@@ -171,6 +171,8 @@ async function createApprovalTask(receipt, team, cycleId, actor) {
     assigned_by_id: actor?.sub || actor?._key || 'system',
     assigned_by_emp_code: actor?.emp_code || null,
     branch: receipt.branch || null,
+    scheme_name: receipt.product?.name || receipt.scheme_name || receipt.schemeName || null,
+    amount: receipt.transaction?.amount ?? receipt.investment_amount ?? null,
     start_date: null,
     due_date: null,
     scheduled_date: null,
@@ -310,6 +312,7 @@ function openHistoryEntry({ cycleId, team, actor, taskKey, attachmentIds = [] })
     next_team_name: null,
     actor_id: actor?.sub || actor?._key || null,
     actor_name: actor?.name || null,
+    actor_emp_code: actor?.emp_code || null,
     comment: null,
     task_key: taskKey || null,
     attachment_ids: sanitizeAttachmentIds(attachmentIds)
@@ -328,8 +331,9 @@ function closeHistoryEntry(entry, { resolution, nextTeam, comment, actor, forced
     next_team_id: nextTeam?._key || null,
     next_team_name: nextTeam?.name || null,
     comment: comment || entry.comment || null,
-    actor_id: actor?.sub || actor?._key || entry.actor_id || null,
-    actor_name: actor?.name || entry.actor_name || null,
+    closed_by_id: actor?.sub || actor?._key || null,
+    closed_by_name: actor?.name || null,
+    closed_by_emp_code: actor?.emp_code || null,
     forced: forced ? true : undefined,
     attachment_ids: merged
   }
@@ -800,10 +804,33 @@ export async function getReceiptHistory(receiptKey) {
       url: `/api/receipts/${receipt._key}/media/${f.id}`
     }
   })
-  const stage_history = rawHistory.map((ev) => ({
-    ...ev,
-    attachments: hydrateIds(ev.attachment_ids)
-  }))
+
+  const actorIds = [...new Set(
+    rawHistory.flatMap((ev) => [ev.actor_id, ev.closed_by_id].filter(Boolean).map(String))
+  )]
+  let actorById = {}
+  if (actorIds.length) {
+    try {
+      const actorRows = await q(
+        'FOR u IN users FILTER u._key IN @ids RETURN { id: u._key, name: u.name, emp_code: u.emp_code }',
+        { ids: actorIds }
+      )
+      actorById = Object.fromEntries(actorRows.map((u) => [String(u.id), u]))
+    } catch { /* best effort */ }
+  }
+
+  const stage_history = rawHistory.map((ev) => {
+    const entryActor = actorById[String(ev.actor_id)]
+    const closedActor = actorById[String(ev.closed_by_id)]
+    return {
+      ...ev,
+      actor_name: ev.actor_name || entryActor?.name || null,
+      actor_emp_code: ev.actor_emp_code || entryActor?.emp_code || null,
+      closed_by_name: ev.closed_by_name || closedActor?.name || null,
+      closed_by_emp_code: ev.closed_by_emp_code || closedActor?.emp_code || null,
+      attachments: hydrateIds(ev.attachment_ids)
+    }
+  })
 
   return {
     receipt_id: receipt._key,

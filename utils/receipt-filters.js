@@ -114,10 +114,50 @@ export function applyReceiptCategoryFilter(filterConditions, bindVars, category)
     )`)
     bindVars.category = 'BOND'
     bindVars.bond_issuer_ncd = 'NCD'
+  } else if (catUpper === 'INS') {
+    const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
+    filterConditions.push(`(
+      (${categoryExpr} IN @ins_category_aliases)
+      OR (receipt.product_details != null && receipt.product_details.insurance != null && (
+        receipt.product_details.insurance.issuer != null
+        OR receipt.product_details.insurance.product != null
+        OR receipt.product_details.insurance.policy != null
+      ))
+    )`)
+    bindVars.ins_category_aliases = ['INS', 'INSURANCE']
   } else {
     filterConditions.push('((receipt.product != null && receipt.product.category == @category) OR receipt.product_category == @category)')
     bindVars.category = category
   }
+}
+
+/**
+ * OR together multiple product category filters (GOVT_FD / NCD / BOND rules per category).
+ */
+export function applyReceiptCategoryFilters(filterConditions, bindVars, categories) {
+  const list = (Array.isArray(categories) ? categories : [])
+    .map((c) => String(c).trim())
+    .filter(Boolean)
+  if (!list.length) return
+  if (list.length === 1) {
+    applyReceiptCategoryFilter(filterConditions, bindVars, list[0])
+    return
+  }
+  const orParts = []
+  list.forEach((cat, i) => {
+    const subConditions = []
+    const subVars = {}
+    applyReceiptCategoryFilter(subConditions, subVars, cat)
+    if (!subConditions.length) return
+    let clause = subConditions[0]
+    for (const [key, val] of Object.entries(subVars)) {
+      const suffixed = `${key}_mc${i}`
+      bindVars[suffixed] = val
+      clause = clause.replace(new RegExp(`@${key}\\b`, 'g'), `@${suffixed}`)
+    }
+    orParts.push(`(${clause})`)
+  })
+  if (orParts.length) filterConditions.push(`(${orParts.join(' OR ')})`)
 }
 
 /**
@@ -156,6 +196,18 @@ export function appendCategoryToFilterString(filterClause, bindVars, category) {
           ? receipt.product_details.bond.issuer.type
           : ""
       )) != @bond_issuer_ncd
+    )`
+  }
+  if (catUpper === 'INS') {
+    const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
+    bindVars.ins_category_aliases = ['INS', 'INSURANCE']
+    return `${filterClause} AND (
+      (${categoryExpr} IN @ins_category_aliases)
+      OR (receipt.product_details != null && receipt.product_details.insurance != null && (
+        receipt.product_details.insurance.issuer != null
+        OR receipt.product_details.insurance.product != null
+        OR receipt.product_details.insurance.policy != null
+      ))
     )`
   }
   bindVars.category = category
@@ -258,6 +310,18 @@ export function appendExportCategoryQuery(query, bindVars, category) {
           ? receipt.product_details.bond.issuer.type
           : ""
       )) != @bond_issuer_ncd
+    )`
+  }
+  if (catUpper === 'INS') {
+    const categoryExpr = `UPPER(TO_STRING((receipt.product != null && receipt.product.category != null && receipt.product.category != "") ? receipt.product.category : receipt.product_category))`
+    bindVars.ins_category_aliases = ['INS', 'INSURANCE']
+    return `${query} AND (
+      (${categoryExpr} IN @ins_category_aliases)
+      OR (receipt.product_details != null && receipt.product_details.insurance != null && (
+        receipt.product_details.insurance.issuer != null
+        OR receipt.product_details.insurance.product != null
+        OR receipt.product_details.insurance.policy != null
+      ))
     )`
   }
   bindVars.category = category

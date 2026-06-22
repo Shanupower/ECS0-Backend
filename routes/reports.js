@@ -1,5 +1,13 @@
 import express from 'express'
-import { requireAuth, requireRole } from '../middleware/auth.js'
+import { requireAuth } from '../middleware/auth.js'
+import {
+  canAccessAnalytics,
+  buildRegistryScope,
+  sanitizeReportQuery,
+  sanitizeAdminReportQuery,
+  filterReportsForRole,
+  canAccessReport
+} from '../constants/report-access.js'
 import { runMisSummary } from '../services/reports/mis-summary.js'
 import {
   runMisTransactions,
@@ -7,14 +15,36 @@ import {
   misTransactionRowToArray
 } from '../services/reports/mis-transactions.js'
 import {
-  runProductWiseSales,
-  runCategoryWiseMf,
   runFundWiseMf,
+  runProductDetailReport,
+  runCategoryWiseAllProducts,
   runSipReport,
-  runCashFlowReport,
+  runFdMaturityReport,
   runPendingReceiptsReport
 } from '../services/reports/operational-reports.js'
-import { sendCsvReport, sendXlsxReport } from '../services/reports/report-export.js'
+import {
+  buildExportMeta,
+  sendCsvReport,
+  sendXlsxReport,
+  sendPdfReport,
+  sendMisSummaryCsvReport,
+  sendMisSummaryXlsxReport,
+  sendMisSummaryPdfReport
+} from '../services/reports/report-export.js'
+import { runReportFilterOptions } from '../services/reports/filter-options.js'
+import {
+  runCustomerDetailReport,
+  runCustomerDetailCustomerList,
+  runCustomerDetailCustomerListIds,
+  buildCustomerDetailCsvRows,
+  customerDetailCsvHeaders,
+  sendCustomerDetailXlsx,
+  CustomerDetailReportError
+} from '../services/reports/customer-detail-report.js'
+import { runReceiptErrorsReport } from '../services/reports/receipt-errors-report.js'
+import { runPaymentModeReport } from '../services/reports/payment-mode-report.js'
+import { runUserLoginReport } from '../services/reports/user-login-report.js'
+import { runUserRoleAccessReport } from '../services/reports/user-role-access-report.js'
 
 const router = express.Router()
 
@@ -34,18 +64,18 @@ const REPORT_REGISTRY = [
     icon: 'Table'
   },
   {
-    id: 'product-sales',
-    title: 'Product-wise Sales',
-    description: 'Applications and amounts by product category.',
-    path: '/api/reports/product-sales',
-    icon: 'PieChart'
+    id: 'product-detail',
+    title: 'Product-wise Detail',
+    description: 'Product, scheme, client, date, branch, RM, CC, and amount detail.',
+    path: '/api/reports/product-detail',
+    icon: 'ListFilter'
   },
   {
-    id: 'mf-category',
-    title: 'Category-wise Mutual Fund',
-    description: 'MF totals grouped by scheme category.',
-    path: '/api/reports/mf-category',
-    icon: 'Layers'
+    id: 'category-summary',
+    title: 'Category-wise Summary',
+    description: 'All product categories grouped by scheme and type, including FD cumulative type.',
+    path: '/api/reports/category-summary',
+    icon: 'Boxes'
   },
   {
     id: 'mf-fund',
@@ -62,11 +92,11 @@ const REPORT_REGISTRY = [
     icon: 'Calendar'
   },
   {
-    id: 'cashflow',
-    title: 'Cash Flow',
-    description: 'Inflows and outflows by product with net flow.',
-    path: '/api/reports/cashflow',
-    icon: 'ArrowLeftRight'
+    id: 'fd-maturity',
+    title: 'Maturity Report',
+    description: 'All product maturity report with product category, scheme, client, and due dates.',
+    path: '/api/reports/fd-maturity',
+    icon: 'CalendarClock'
   },
   {
     id: 'pending-receipts',
@@ -74,19 +104,262 @@ const REPORT_REGISTRY = [
     description: 'Non-completed receipts with days pending.',
     path: '/api/reports/pending-receipts',
     icon: 'Clock'
+  },
+  {
+    id: 'receipt-errors',
+    title: 'Duplicate / Error Report',
+    description: 'Duplicate transactions, receipt numbers, and data-quality issues (missing PAN, mobile, reference, invalid amount).',
+    path: '/api/reports/receipt-errors',
+    icon: 'AlertTriangle',
+    group: 'Data Quality'
+  },
+  {
+    id: 'customer-detail',
+    title: 'Customer Detail Report',
+    description: 'Selected customers with product, category, fund, and transaction breakdowns.',
+    path: '/api/reports/customer-detail',
+    icon: 'Users',
+    group: 'Customers Report'
+  },
+  {
+    id: 'payment-mode',
+    title: 'Payment Mode for Receipts',
+    description: 'Receipt totals and detail grouped by payment mode (Online, Offline, Others).',
+    path: '/api/reports/payment-mode',
+    icon: 'CreditCard',
+    group: 'Operational Reports'
+  },
+  {
+    id: 'user-login',
+    title: 'User Login Report',
+    description: 'Login history with employee, branch, role, IP, and session type.',
+    path: '/api/reports/user-login',
+    icon: 'LogIn',
+    group: 'Administration',
+    roles: ['admin']
+  },
+  {
+    id: 'user-role-access',
+    title: 'User Role & Access Report',
+    description: 'Users with role, branch, analytics scope, and access capabilities.',
+    path: '/api/reports/user-role-access',
+    icon: 'Shield',
+    group: 'Administration',
+    roles: ['admin']
   }
 ]
 
-// All report endpoints are admin-only (MIS / operational analytics).
-router.use(requireAuth, requireRole('admin'))
+function exportFormat(query) {
+  const fmt = String(query.format || '').toLowerCase()
+  return fmt === 'csv' || fmt === 'xlsx' || fmt === 'pdf' ? fmt : ''
+}
+
+function queryFlag(query, key) {
+  const value = query?.[key]
+  return value === true || value === '1' || value === 'true'
+}
+
+export function filterReportExportColumns(headers, rows, query = {}) {
+  const hideCc = queryFlag(query, 'hide_cc') || queryFlag(query, 'hideCc')
+  const hideSi = queryFlag(query, 'hide_si') || queryFlag(query, 'hideSi')
+  if (!hideCc && !hideSi) return { headers, rows }
+
+  const shouldKeep = (header) => {
+    const h = String(header || '').trim().toLowerCase()
+    if (hideCc && h === 'cc') return false
+    if (hideSi && (h === 'si' || h === 'incentive' || h === 'incentive paid')) return false
+    return true
+  }
+  const indexes = headers.map((header, index) => (shouldKeep(header) ? index : -1)).filter((index) => index >= 0)
+  return {
+    headers: indexes.map((index) => headers[index]),
+    rows: (rows || []).map((row) => indexes.map((index) => row[index]))
+  }
+}
+
+const EXPORT_PAGE_SIZE = '50000'
+
+function exportQuery(query) {
+  return { ...query, page: '1', page_size: EXPORT_PAGE_SIZE }
+}
+
+function reportExportTitle(reportId) {
+  const entry = REPORT_REGISTRY.find((r) => r.id === reportId)
+  return entry?.title || reportId
+}
+
+function exportMetaFromQuery(reportId, query = {}) {
+  return buildExportMeta({
+    reportTitle: reportExportTitle(reportId),
+    from: query.from,
+    to: query.to
+  })
+}
+
+async function sendReportRows(res, filenameBase, headers, rows, fmt, query = {}, reportId = filenameBase) {
+  const filtered = filterReportExportColumns(headers, rows, query)
+  const meta = exportMetaFromQuery(reportId, query)
+  if (fmt === 'xlsx') await sendXlsxReport(res, filenameBase, filtered.headers, filtered.rows, meta)
+  else if (fmt === 'pdf') await sendPdfReport(res, filenameBase, filtered.headers, filtered.rows, meta)
+  else sendCsvReport(res, filenameBase, filtered.headers, filtered.rows, meta)
+}
+
+const aggregateHeaders = ['Name', 'Applications', 'Amount', 'CC', 'Incentive']
+const aggregateRow = (nameKey) => (r) => [
+  r[nameKey] ?? '',
+  r.applications ?? 0,
+  r.amount ?? 0,
+  r.collection_credit ?? 0,
+  r.incentive_amount ?? ''
+]
+
+const productDetailHeaders = ['Date', 'Receipt Number', 'Client ID', 'Client Name', 'PAN', 'Phone Number', 'Email Address', 'Product Category', 'Issuer', 'Scheme', 'Period', 'Month', 'Amount', 'CC', 'SI', 'Branch Code', 'RM Code', 'Status']
+const productDetailRow = (r) => [r.date ?? '', r.receipt_number ?? '', r.client_id ?? '', r.client_name ?? '', r.pan ?? '', r.client_phone ?? '', r.client_email ?? '', r.product_category ?? '', r.issuer ?? '', r.scheme_name ?? '', r.period ?? '', r.months ?? '', r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '', r.branch_code ?? '', r.emp_code ?? '', r.status ?? '']
+
+const categorySummaryHeaders = ['Product Category', 'Issuer', 'Scheme', 'FD Payout Frequency', 'Applications', 'Amount', 'CC', 'SI']
+const categorySummaryRow = (r) => [r.product_category ?? '', r.issuer_name ?? '', r.scheme_name ?? '', r.fd_payout_frequency ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '']
+
+const sipHeaders = ['Date', 'Product', 'Issuer', 'Client ID', 'Client Name', 'Folio', 'Scheme', 'SIP Amount', 'CC', 'SI', 'Frequency', 'Period', 'Month', 'Start Date', 'End Date', 'Last Installment Date', 'Branch Code', 'RM Code', 'Receipt Number', 'Status']
+const sipRow = (r) => [r.date ?? '', r.product_category ?? '', r.issuer ?? '', r.client_id ?? '', r.client_name ?? '', r.folio ?? '', r.scheme ?? '', r.sip_amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '', r.frequency ?? '', r.period ?? '', r.months ?? '', r.start_date ?? '', r.end_date ?? '', r.last_installment_date ?? '', r.branch_code ?? '', r.emp_code ?? '', r.receipt_number ?? '', r.status ?? '']
+
+const fdMaturityHeaders = ['Receipt Date', 'Maturity Date', 'Product Category', 'Issuer', 'Scheme', 'Tenure/Period', 'Month', 'Type', 'FD Payout Frequency', 'Client ID', 'Client Name', 'Address', 'Amount', 'Maturity Amount', 'CC', 'SI', 'Branch Code', 'RM Code', 'Receipt Number', 'Status']
+const fdMaturityRow = (r) => [r.receipt_date ?? '', r.maturity_date ?? '', r.product_category ?? '', r.issuer ?? '', r.scheme_name ?? '', r.period ?? '', r.months ?? '', r.type ?? '', r.fd_payout_frequency ?? '', r.client_id ?? '', r.client_name ?? '', r.client_address ?? '', r.amount ?? 0, r.maturity_amount ?? '', r.collection_credit ?? 0, r.incentive_amount ?? '', r.branch_code ?? '', r.emp_code ?? '', r.receipt_number ?? '', r.status ?? '']
+
+const pendingHeaders = ['Receipt Number', 'Client', 'Product', 'Amount', 'Stage', 'Assigned', 'Created At', 'Days Pending', 'As Of']
+const pendingRow = (r) => [r.receipt_number ?? '', r.client_name ?? '', r.product_type ?? '', r.amount ?? 0, r.current_stage ?? '', r.assigned_to ?? '', r.created_at ?? '', r.days_pending ?? '', r.as_of ?? '']
+
+const receiptErrorsHeaders = ['Date', 'Receipt Number', 'Client ID', 'Client Name', 'PAN', 'Phone', 'Product', 'Amount', 'Reference', 'Branch', 'RM', 'Status', 'Error Types', 'Related Receipts']
+const receiptErrorsRow = (r) => [
+  r.date ?? '',
+  r.receipt_number ?? '',
+  r.client_id ?? '',
+  r.client_name ?? '',
+  r.pan ?? '',
+  r.client_phone ?? '',
+  r.product_category ?? '',
+  r.amount ?? 0,
+  r.reference_no ?? '',
+  r.branch_code ?? '',
+  r.emp_code ?? '',
+  r.status ?? '',
+  Array.isArray(r.error_types) ? r.error_types.join('; ') : '',
+  Array.isArray(r.related_receipt_numbers) ? r.related_receipt_numbers.join('; ') : ''
+]
+
+const paymentModeDetailHeaders = ['Date', 'Receipt Number', 'Client ID', 'Client Name', 'Product', 'Issuer', 'Scheme', 'Amount', 'Payment Mode', 'Channel', 'Instrument Type', 'Instrument No', 'Reference', 'CC', 'SI', 'Branch', 'RM', 'Status']
+const paymentModeDetailRow = (r) => [
+  r.date ?? '',
+  r.receipt_number ?? '',
+  r.client_id ?? '',
+  r.client_name ?? '',
+  r.product_category ?? '',
+  r.issuer ?? '',
+  r.scheme_name ?? '',
+  r.amount ?? 0,
+  r.payment_mode ?? '',
+  r.channel ?? '',
+  r.instrument_type ?? '',
+  r.instrument_no ?? '',
+  r.reference_no ?? '',
+  r.collection_credit ?? 0,
+  r.incentive_amount ?? '',
+  r.branch_code ?? '',
+  r.emp_code ?? '',
+  r.status ?? ''
+]
+
+const userLoginHeaders = ['Login At', 'Employee Code', 'Name', 'Role', 'Branch', 'Branch Code', 'Login Type', 'IP Address', 'User Agent']
+const userLoginRow = (r) => [
+  r.login_at ?? '',
+  r.emp_code ?? '',
+  r.user_name ?? '',
+  r.role ?? '',
+  r.branch ?? '',
+  r.branch_code ?? '',
+  r.login_type ?? '',
+  r.ip_address ?? '',
+  r.user_agent ?? ''
+]
+
+const userRoleAccessHeaders = ['Employee Code', 'Name', 'Email', 'Mobile', 'Role', 'Branch', 'Active', 'Created At', 'Last Login', 'Analytics Access', 'Report Scope', 'Allowed Filters', 'SI Visible', 'User Management', 'Task Reports', 'Export Users']
+const userRoleAccessRow = (r) => [
+  r.emp_code ?? '',
+  r.name ?? '',
+  r.email ?? '',
+  r.mobile ?? '',
+  r.role ?? '',
+  r.branch ?? '',
+  r.is_active ? 'Yes' : 'No',
+  r.created_at ?? '',
+  r.last_login_at ?? '',
+  r.analytics_access ? 'Yes' : 'No',
+  r.default_report_scope ?? '',
+  r.allowed_report_filters ?? '',
+  r.service_income_visible ? 'Yes' : 'No',
+  r.user_management ?? '',
+  r.task_reports ? 'Yes' : 'No',
+  r.export_users ? 'Yes' : 'No'
+]
+
+function requireAnalyticsAccess(req, res, next) {
+  if (!canAccessAnalytics(req.user?.role)) {
+    return res.status(403).json({ error: 'forbidden' })
+  }
+  next()
+}
+
+function prepareReportRequest(req, res, next) {
+  req.reportQuery = sanitizeReportQuery(req.user.role, req.query)
+  next()
+}
+
+function prepareAdminReportRequest(req, res, next) {
+  req.reportQuery = sanitizeAdminReportQuery(req.query)
+  next()
+}
+
+function requireReportAccess(reportId) {
+  return (req, res, next) => {
+    const entry = REPORT_REGISTRY.find((r) => r.id === reportId)
+    if (!entry || !canAccessReport(req.user?.role, entry)) {
+      return res.status(403).json({ error: 'forbidden' })
+    }
+    next()
+  }
+}
+
+router.use(requireAuth, requireAnalyticsAccess)
 
 router.get('/registry', (req, res) => {
-  res.json({ reports: REPORT_REGISTRY })
+  res.json({
+    reports: filterReportsForRole(REPORT_REGISTRY, req.user.role),
+    scope: buildRegistryScope(req.user.role)
+  })
+})
+
+router.use(prepareReportRequest)
+
+router.get('/filter-options', async (req, res) => {
+  try {
+    const data = await runReportFilterOptions(req.user, req.reportQuery)
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] filter-options', e)
+    res.status(500).json({ error: 'Failed to load filter options' })
+  }
 })
 
 router.get('/mis-summary', async (req, res) => {
   try {
-    const data = await runMisSummary(req.user, req.query)
+    const fmt = exportFormat(req.reportQuery)
+    const data = await runMisSummary(req.user, req.reportQuery)
+    if (fmt) {
+      const meta = exportMetaFromQuery('mis-summary', req.reportQuery)
+      if (fmt === 'xlsx') await sendMisSummaryXlsxReport(res, 'mis_summary', data, meta)
+      else if (fmt === 'pdf') await sendMisSummaryPdfReport(res, 'mis_summary', data, meta)
+      else sendMisSummaryCsvReport(res, 'mis_summary', data, meta)
+      return
+    }
     res.json(data)
   } catch (e) {
     console.error('[reports] mis-summary', e)
@@ -96,29 +369,26 @@ router.get('/mis-summary', async (req, res) => {
 
 router.get('/mis-transactions', async (req, res) => {
   try {
-    const fmt = String(req.query.format || '').toLowerCase()
-    if (fmt === 'csv' || fmt === 'xlsx') {
-      const query = { ...req.query, page: '1', page_size: '50000' }
+    const fmt = exportFormat(req.reportQuery)
+    if (fmt) {
+      const query = { ...req.reportQuery, page: '1', page_size: '50000' }
       const { rows, group_by } = await runMisTransactions(req.user, query)
       if (group_by) {
-        const headers = ['Group', 'Applications', 'Amount', 'Incentive']
-        const arr = rows.map((r) => [
-          r.group_key ?? '',
-          r.applications ?? 0,
-          r.amount ?? 0,
-          r.incentive_amount ?? ''
-        ])
-        if (fmt === 'xlsx') await sendXlsxReport(res, 'mis_transactions_grouped', headers, arr)
-        else sendCsvReport(res, 'mis_transactions_grouped', headers, arr)
+        const headers = group_by === 'rm'
+          ? ['RM Code', 'Employee Name', 'Applications', 'Amount', 'CC', 'Incentive']
+          : [group_by === 'branch' ? 'Branch Code' : 'Group', 'Applications', 'Amount', 'CC', 'Incentive']
+        const arr = rows.map((r) => group_by === 'rm'
+          ? [r.group_key ?? '', r.employee_name ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? '']
+          : [r.group_key ?? '', r.applications ?? 0, r.amount ?? 0, r.collection_credit ?? 0, r.incentive_amount ?? ''])
+        await sendReportRows(res, 'mis_transactions_grouped', headers, arr, fmt, req.reportQuery, 'mis-transactions')
         return
       }
       const headers = misTransactionExportHeaders()
       const arr = rows.map(misTransactionRowToArray)
-      if (fmt === 'xlsx') await sendXlsxReport(res, 'mis_transactions', headers, arr)
-      else sendCsvReport(res, 'mis_transactions', headers, arr)
+      await sendReportRows(res, 'mis_transactions', headers, arr, fmt, req.reportQuery, 'mis-transactions')
       return
     }
-    const data = await runMisTransactions(req.user, req.query)
+    const data = await runMisTransactions(req.user, req.reportQuery)
     res.json(data)
   } catch (e) {
     console.error('[reports] mis-transactions', e)
@@ -126,29 +396,45 @@ router.get('/mis-transactions', async (req, res) => {
   }
 })
 
-router.get('/product-sales', async (req, res) => {
+router.get('/product-detail', async (req, res) => {
   try {
-    const rows = await runProductWiseSales(req.user, req.query)
-    res.json({ rows })
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runProductDetailReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'product_detail', productDetailHeaders, data.rows.map(productDetailRow), fmt, req.reportQuery, 'product-detail')
+      return
+    }
+    res.json(data)
   } catch (e) {
-    console.error('[reports] product-sales', e)
+    console.error('[reports] product-detail', e)
     res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
   }
 })
 
-router.get('/mf-category', async (req, res) => {
+router.get('/category-summary', async (req, res) => {
   try {
-    const rows = await runCategoryWiseMf(req.user, req.query)
+    const fmt = exportFormat(req.reportQuery)
+    const rows = await runCategoryWiseAllProducts(req.user, req.reportQuery)
+    if (fmt) {
+      await sendReportRows(res, 'category_summary', categorySummaryHeaders, rows.map(categorySummaryRow), fmt, req.reportQuery, 'category-summary')
+      return
+    }
     res.json({ rows })
   } catch (e) {
-    console.error('[reports] mf-category', e)
+    console.error('[reports] category-summary', e)
     res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
   }
 })
 
 router.get('/mf-fund', async (req, res) => {
   try {
-    const rows = await runFundWiseMf(req.user, req.query)
+    const fmt = exportFormat(req.reportQuery)
+    const rows = await runFundWiseMf(req.user, req.reportQuery)
+    if (fmt) {
+      await sendReportRows(res, 'mf_fund', aggregateHeaders, rows.map(aggregateRow('fund_name')), fmt, req.reportQuery, 'mf-fund')
+      return
+    }
     res.json({ rows })
   } catch (e) {
     console.error('[reports] mf-fund', e)
@@ -158,7 +444,13 @@ router.get('/mf-fund', async (req, res) => {
 
 router.get('/sip-report', async (req, res) => {
   try {
-    const data = await runSipReport(req.user, req.query)
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runSipReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'sip_due_end', sipHeaders, data.rows.map(sipRow), fmt, req.reportQuery, 'sip-report')
+      return
+    }
     res.json(data)
   } catch (e) {
     console.error('[reports] sip-report', e)
@@ -166,22 +458,145 @@ router.get('/sip-report', async (req, res) => {
   }
 })
 
-router.get('/cashflow', async (req, res) => {
+router.get('/fd-maturity', async (req, res) => {
   try {
-    const rows = await runCashFlowReport(req.user, req.query)
-    res.json({ rows })
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runFdMaturityReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'fd_maturity', fdMaturityHeaders, data.rows.map(fdMaturityRow), fmt, req.reportQuery, 'fd-maturity')
+      return
+    }
+    res.json(data)
   } catch (e) {
-    console.error('[reports] cashflow', e)
+    console.error('[reports] fd-maturity', e)
     res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
   }
 })
 
 router.get('/pending-receipts', async (req, res) => {
   try {
-    const data = await runPendingReceiptsReport(req.user, req.query)
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runPendingReceiptsReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'pending_receipts', pendingHeaders, data.rows.map(pendingRow), fmt, req.reportQuery, 'pending-receipts')
+      return
+    }
     res.json(data)
   } catch (e) {
     console.error('[reports] pending-receipts', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/receipt-errors', async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runReceiptErrorsReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'receipt_errors', receiptErrorsHeaders, data.rows.map(receiptErrorsRow), fmt, req.reportQuery, 'receipt-errors')
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] receipt-errors', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/customer-detail/customers', async (req, res) => {
+  try {
+    if (queryFlag(req.reportQuery, 'ids_only')) {
+      const data = await runCustomerDetailCustomerListIds(req.user, req.reportQuery)
+      res.json(data)
+      return
+    }
+    const data = await runCustomerDetailCustomerList(req.user, req.reportQuery)
+    res.json(data)
+  } catch (e) {
+    if (e instanceof CustomerDetailReportError) {
+      res.status(e.status || 400).json({ error: e.message })
+      return
+    }
+    console.error('[reports] customer-detail/customers', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/customer-detail', async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query =
+      fmt != null
+        ? { ...req.reportQuery, page: '1', page_size: '50000' }
+        : req.reportQuery
+    const data = await runCustomerDetailReport(req.user, query)
+    if (fmt === 'csv') {
+      const meta = exportMetaFromQuery('customer-detail', req.reportQuery)
+      sendCsvReport(res, 'customer_detail', customerDetailCsvHeaders, buildCustomerDetailCsvRows(data), meta)
+      return
+    }
+    if (fmt === 'xlsx') {
+      await sendCustomerDetailXlsx(res, 'customer_detail', data, exportMetaFromQuery('customer-detail', req.reportQuery))
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    if (e instanceof CustomerDetailReportError) {
+      res.status(e.status || 400).json({ error: e.message })
+      return
+    }
+    console.error('[reports] customer-detail', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/payment-mode', async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runPaymentModeReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'payment_mode', paymentModeDetailHeaders, (data.rows || []).map(paymentModeDetailRow), fmt, req.reportQuery, 'payment-mode')
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] payment-mode', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/user-login', requireReportAccess('user-login'), prepareAdminReportRequest, async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runUserLoginReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'user_login', userLoginHeaders, data.rows.map(userLoginRow), fmt, req.reportQuery, 'user-login')
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] user-login', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/user-role-access', requireReportAccess('user-role-access'), prepareAdminReportRequest, async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runUserRoleAccessReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'user_role_access', userRoleAccessHeaders, data.rows.map(userRoleAccessRow), fmt, req.reportQuery, 'user-role-access')
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] user-role-access', e)
     res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
   }
 })

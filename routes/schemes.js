@@ -5,6 +5,11 @@ import { uploadExcel, uploadsDir } from '../middleware/upload.js'
 import ExcelJS from 'exceljs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import {
+  buildExportMeta,
+  insertExportHeaderRows,
+  styleWorksheetTableHeaderRow
+} from '../services/reports/report-export.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -1109,14 +1114,8 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       { header: 'NFO Validity', key: 'nfo_validity', width: 15, protection: { locked: false } }
     ]
     
-    // Style header row
-    worksheet.getRow(1).font = { bold: true, size: 12 }
-    worksheet.getRow(1).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFE0E0E0' }
-    }
-    worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' }
+    // Style table header row (shifted after export metadata rows are inserted below)
+    styleWorksheetTableHeaderRow(worksheet, 1)
     
     // Add data rows
     schemes.forEach((scheme, index) => {
@@ -1176,6 +1175,12 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       }
     })
     
+    const exportMeta = buildExportMeta({ reportTitle: 'MF Schemes Export' })
+    const inserted = insertExportHeaderRows(worksheet, exportMeta)
+    if (inserted) {
+      styleWorksheetTableHeaderRow(worksheet, inserted + 1)
+    }
+
     // Protect worksheet but allow editing unlocked cells
     worksheet.protect('', {
       selectLockedCells: true,
@@ -1193,9 +1198,9 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       pivotTables: false
     })
     
-    // Freeze header row
+    // Freeze table header row
     worksheet.views = [
-      { state: 'frozen', ySplit: 1 }
+      { state: 'frozen', ySplit: (inserted || 0) + 1 }
     ]
     
     // Set response headers

@@ -17,10 +17,10 @@ export function receiptDateExprAql() {
 }
 
 export function transactionDateExprAql() {
-  // Prefer nested payment transaction_date, then legacy flattened fields, then instrument/cheque date,
-  // then receipt date, then created_at date.
+  // Prefer nested transaction/payment dates, then legacy flattened fields, then receipt date.
   return `(
-    (receipt.payment != null && receipt.payment.transaction_date != null && receipt.payment.transaction_date != "") ? receipt.payment.transaction_date
+    (receipt.transaction != null && receipt.transaction.date != null && receipt.transaction.date != "") ? receipt.transaction.date
+    : (receipt.payment != null && receipt.payment.transaction_date != null && receipt.payment.transaction_date != "") ? receipt.payment.transaction_date
     : (receipt.txn_date != null && receipt.txn_date != "") ? receipt.txn_date
     : (receipt.transaction_date != null && receipt.transaction_date != "") ? receipt.transaction_date
     : (receipt.instrument_date != null && receipt.instrument_date != "") ? receipt.instrument_date
@@ -28,6 +28,16 @@ export function transactionDateExprAql() {
     : (receipt.date != null && receipt.date != "") ? receipt.date
     : SUBSTRING(receipt.created_at, 0, 10)
   )`
+}
+
+/** Compare/filter on YYYY-MM-DD regardless of ISO datetime storage. */
+export function normalizeDateForCompareAql(dateExpr) {
+  return `SUBSTRING(TO_STRING(${dateExpr}), 0, 10)`
+}
+
+export function normalizeQueryDate(value) {
+  const s = String(value ?? '').trim().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : ''
 }
 
 export function effectiveDateExprAql(dateBasis) {

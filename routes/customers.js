@@ -1,7 +1,7 @@
 import express from 'express'
 import fs from 'fs'
 import path from 'path'
-import { q, getCollection, getUserBranch, normalizeBranchName, getCanonicalBranchKey, canAccessCustomer } from '../config/database.js'
+import { q, getCollection, getUserBranch, normalizeBranchName, getCanonicalBranchKey, getBranchIdentifiersForFilter, canAccessCustomer } from '../config/database.js'
 import { requireAuth } from '../middleware/auth.js'
 import { uploadMultiple, uploadsDir } from '../middleware/upload.js'
 import { validatePAN, validateEmail, validateMobile, validateAadhar, validatePIN, validateRequired, validateMinorsArray } from '../utils/validators.js'
@@ -20,28 +20,42 @@ async function getBranchFilterForCustomer(userId) {
   const userBranch = await getUserBranch(userId)
   const canonicalKey = await getCanonicalBranchKey(userBranch)
   const normalizedUserBranch = normalizeBranchName(userBranch)
+  const resolvedBranchIdentifiers = await getBranchIdentifiersForFilter(userBranch)
   if (!canonicalKey && !normalizedUserBranch) {
     return { filterClause: '', branchCondition: '', bindVars: {}, isAdmin: false, canonicalKey: null, normalizedUserBranch: null }
   }
 
+  const branchIdentifiers = Array.from(
+    new Set([canonicalKey, normalizedUserBranch, userBranch, ...resolvedBranchIdentifiers].filter(Boolean).map((x) => String(x)))
+  )
+  const branchScopeCondition = `(
+    (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && LENGTH(INTERSECTION(customer.branches, @branchIdentifiers)) > 0)
+    OR (!IS_ARRAY(customer.branches) && customer.branches != null && TO_STRING(customer.branches) != "" && TO_STRING(customer.branches) IN @branchIdentifiers)
+    OR (
+      (customer.branches == null OR (IS_ARRAY(customer.branches) && LENGTH(customer.branches) == 0) OR (!IS_ARRAY(customer.branches) && (customer.branches == null OR TO_STRING(customer.branches) == "")))
+      AND (
+        (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @branchIdentifiers)) > 0) ||
+        (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager IN @branchIdentifiers)
+      )
+    )
+  )`
   const filterClause = `FILTER (
-    (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && @canonicalKey IN customer.branches)
-    OR
-    ( (customer.branches == null OR !IS_ARRAY(customer.branches) OR LENGTH(customer.branches) == 0) AND (
-      (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-      (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-    ))
+    ${branchScopeCondition}
   )`
-  const branchCondition = `(
-    (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && @canonicalKey IN customer.branches)
-    OR
-    ( (customer.branches == null OR !IS_ARRAY(customer.branches) OR LENGTH(customer.branches) == 0) AND (
-      (IS_ARRAY(customer.relationship_manager) && @userBranch IN customer.relationship_manager) ||
-      (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager == @userBranch)
-    ))
-  )`
-  const bindVars = { canonicalKey: canonicalKey || '', userBranch: normalizedUserBranch || '' }
+  const branchCondition = branchScopeCondition
+  const bindVars = { branchIdentifiers }
   return { filterClause, branchCondition, bindVars, isAdmin: false, canonicalKey, normalizedUserBranch }
+}
+
+function customerBranchAccessValue(customer) {
+  const branches = customer?.branches
+  if (Array.isArray(branches)) {
+    return branches.length > 0 ? branches : customer?.relationship_manager
+  }
+  if (branches != null && String(branches).trim()) {
+    return branches
+  }
+  return customer?.relationship_manager
 }
 
 // Customer search endpoint for receipt creation (branch-filtered)
@@ -87,20 +101,25 @@ router.get('/search', requireAuth, async (req, res) => {
     }
 
     // Enhanced search filter with more fields and better performance
-    const searchFilter = `
-      FILTER (
-        LOWER(customer.name) LIKE LOWER(@searchQuery) 
-        OR customer.investor_id == @exactId
-        OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
-        OR LOWER(customer.email) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.city) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.state) LIKE LOWER(@searchQuery)
-      )
-    `
+    const customerSearchCondition = `(
+      (customer.name != null && LOWER(TO_STRING(customer.name)) LIKE LOWER(@searchQuery))
+      OR customer.investor_id == @exactId
+      OR (customer.investor_id != null && LOWER(TO_STRING(customer.investor_id)) LIKE LOWER(@searchQuery))
+      OR (customer.pan != null && LOWER(TO_STRING(customer.pan)) LIKE LOWER(@searchQuery))
+      OR (customer.email != null && LOWER(TO_STRING(customer.email)) LIKE LOWER(@searchQuery))
+      OR (customer.mobile != null && LOWER(TO_STRING(customer.mobile)) LIKE LOWER(@searchQuery))
+      OR (customer.address1 != null && LOWER(TO_STRING(customer.address1)) LIKE LOWER(@searchQuery))
+      OR (customer.address2 != null && LOWER(TO_STRING(customer.address2)) LIKE LOWER(@searchQuery))
+      OR (customer.address3 != null && LOWER(TO_STRING(customer.address3)) LIKE LOWER(@searchQuery))
+      OR (customer.city != null && LOWER(TO_STRING(customer.city)) LIKE LOWER(@searchQuery))
+      OR (customer.state != null && LOWER(TO_STRING(customer.state)) LIKE LOWER(@searchQuery))
+    )`
+    const minorSearchCondition = `(
+      (minor.name != null && LOWER(TO_STRING(minor.name)) LIKE LOWER(@searchQuery))
+      OR minor.investor_id == @exactId
+      OR (minor.investor_id != null && LOWER(TO_STRING(minor.investor_id)) LIKE LOWER(@searchQuery))
+      OR (minor.pan != null && LOWER(TO_STRING(minor.pan)) LIKE LOWER(@searchQuery))
+    )`
     
     // Add exact ID search for better performance when searching by ID
     const exactId = parseInt(searchQuery.trim())
@@ -111,20 +130,9 @@ router.get('/search', requireAuth, async (req, res) => {
     }
     
     if (filterClause) {
-      filterClause += ` AND (
-        LOWER(customer.name) LIKE LOWER(@searchQuery) 
-        OR customer.investor_id == @exactId
-        OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
-        OR LOWER(customer.email) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.city) LIKE LOWER(@searchQuery)
-        OR LOWER(customer.state) LIKE LOWER(@searchQuery)
-      )`
+      filterClause += ` AND ${customerSearchCondition}`
     } else {
-      filterClause = searchFilter
+      filterClause = `FILTER ${customerSearchCondition}`
     }
 
     // Search query for major customers (with minors included in response)
@@ -132,8 +140,8 @@ router.get('/search', requireAuth, async (req, res) => {
       FOR customer IN customers
       ${filterClause}
       LET qLower = LOWER(@rawSearch)
-      LET nameLower = LOWER(customer.name)
-      LET panLower = customer.pan != null ? LOWER(customer.pan) : null
+      LET nameLower = customer.name != null ? LOWER(TO_STRING(customer.name)) : ""
+      LET panLower = customer.pan != null ? LOWER(TO_STRING(customer.pan)) : null
       LET exactPanMatch = panLower != null && panLower == qLower ? 1 : 0
       LET exactNameMatch = nameLower == qLower ? 1 : 0
       LET prefixPanMatch = panLower != null && LIKE(panLower, CONCAT(@rawSearch, '%'), true) ? 1 : 0
@@ -171,11 +179,7 @@ router.get('/search', requireAuth, async (req, res) => {
         customer.minors != null && LENGTH(customer.minors) > 0
       ) AND (
         FOR minor IN (customer.minors != null ? customer.minors : [])
-        FILTER (
-          LOWER(minor.name) LIKE LOWER(@searchQuery)
-          OR minor.investor_id == @exactId
-          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-        )
+        FILTER ${minorSearchCondition}
         RETURN true
       )[0] == true
     ` : `
@@ -183,11 +187,7 @@ router.get('/search', requireAuth, async (req, res) => {
         customer.minors != null && LENGTH(customer.minors) > 0
       ) AND (
         FOR minor IN (customer.minors != null ? customer.minors : [])
-        FILTER (
-          LOWER(minor.name) LIKE LOWER(@searchQuery)
-          OR minor.investor_id == @exactId
-          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-        )
+        FILTER ${minorSearchCondition}
         RETURN true
       )[0] == true
     `
@@ -196,11 +196,7 @@ router.get('/search', requireAuth, async (req, res) => {
       FOR customer IN customers
       ${minorSearchFilter}
       FOR minor IN (customer.minors != null ? customer.minors : [])
-      FILTER (
-        LOWER(minor.name) LIKE LOWER(@searchQuery)
-        OR minor.investor_id == @exactId
-        OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-      )
+      FILTER ${minorSearchCondition}
       LIMIT ${searchOffset}, ${searchLimit}
       RETURN {
         investor_id: minor.investor_id,
@@ -235,11 +231,7 @@ router.get('/search', requireAuth, async (req, res) => {
         FOR customer IN customers
         ${minorSearchFilter}
         FOR minor IN (customer.minors != null ? customer.minors : [])
-        FILTER (
-          LOWER(minor.name) LIKE LOWER(@searchQuery)
-          OR minor.investor_id == @exactId
-          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-        )
+        FILTER ${minorSearchCondition}
         COLLECT WITH COUNT INTO total
         RETURN total
       )[0] || 0
@@ -311,6 +303,25 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
     const branchFilter = await getBranchFilterForCustomer(req.user.sub)
     const isAdmin = branchFilter.isAdmin
     const normalizedUserBranch = branchFilter.normalizedUserBranch
+    const customerSearchCondition = `(
+      (customer.name != null && LOWER(TO_STRING(customer.name)) LIKE LOWER(@searchQuery))
+      OR customer.investor_id == @exactId
+      OR (customer.investor_id != null && LOWER(TO_STRING(customer.investor_id)) LIKE LOWER(@searchQuery))
+      OR (customer.pan != null && LOWER(TO_STRING(customer.pan)) LIKE LOWER(@searchQuery))
+      OR (customer.email != null && LOWER(TO_STRING(customer.email)) LIKE LOWER(@searchQuery))
+      OR (customer.mobile != null && LOWER(TO_STRING(customer.mobile)) LIKE LOWER(@searchQuery))
+      OR (customer.address1 != null && LOWER(TO_STRING(customer.address1)) LIKE LOWER(@searchQuery))
+      OR (customer.address2 != null && LOWER(TO_STRING(customer.address2)) LIKE LOWER(@searchQuery))
+      OR (customer.address3 != null && LOWER(TO_STRING(customer.address3)) LIKE LOWER(@searchQuery))
+      OR (customer.city != null && LOWER(TO_STRING(customer.city)) LIKE LOWER(@searchQuery))
+      OR (customer.state != null && LOWER(TO_STRING(customer.state)) LIKE LOWER(@searchQuery))
+    )`
+    const minorSearchCondition = `(
+      (minor.name != null && LOWER(TO_STRING(minor.name)) LIKE LOWER(@searchQuery))
+      OR minor.investor_id == @exactId
+      OR (minor.investor_id != null && LOWER(TO_STRING(minor.investor_id)) LIKE LOWER(@searchQuery))
+      OR (minor.pan != null && LOWER(TO_STRING(minor.pan)) LIKE LOWER(@searchQuery))
+    )`
     
     // Enhanced pagination with larger limits for search
     const searchLimit = Math.min(100, Math.max(4, parseInt(limit, 10) || 20))
@@ -366,22 +377,6 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
         filterClause = branchFilter.filterClause
       }
 
-      // Enhanced search filter
-      const searchFilter = `
-        FILTER (
-          LOWER(customer.name) LIKE LOWER(@searchQuery) 
-          OR customer.investor_id == @exactId
-          OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
-          OR LOWER(customer.email) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.city) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.state) LIKE LOWER(@searchQuery)
-        )
-      `
-      
       // Add exact ID search for better performance when searching by ID
       const exactId = parseInt(searchQuery.trim())
       if (!isNaN(exactId)) {
@@ -391,20 +386,9 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       }
       
       if (filterClause) {
-        filterClause += ` AND (
-          LOWER(customer.name) LIKE LOWER(@searchQuery) 
-          OR customer.investor_id == @exactId
-          OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
-          OR LOWER(customer.email) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.city) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.state) LIKE LOWER(@searchQuery)
-        )`
+        filterClause += ` AND ${customerSearchCondition}`
       } else {
-        filterClause = searchFilter
+        filterClause = `FILTER ${customerSearchCondition}`
       }
 
       query = `
@@ -435,11 +419,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
         customer.minors != null && LENGTH(customer.minors) > 0
       ) AND (
         FOR minor IN customer.minors
-        FILTER (
-          LOWER(minor.name) LIKE LOWER(@searchQuery)
-          OR minor.investor_id == @exactId
-          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-        )
+        FILTER ${minorSearchCondition}
         RETURN true
       )[0] == true
     ` : `
@@ -447,11 +427,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
         customer.minors != null && LENGTH(customer.minors) > 0
       ) AND (
         FOR minor IN customer.minors
-        FILTER (
-          LOWER(minor.name) LIKE LOWER(@searchQuery)
-          OR minor.investor_id == @exactId
-          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-        )
+        FILTER ${minorSearchCondition}
         RETURN true
       )[0] == true
     `
@@ -460,11 +436,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       FOR customer IN customers
       ${minorSearchFilter}
       FOR minor IN customer.minors
-      FILTER (
-        LOWER(minor.name) LIKE LOWER(@searchQuery)
-        OR minor.investor_id == @exactId
-        OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-      )
+      FILTER ${minorSearchCondition}
       RETURN {
         investor_id: minor.investor_id,
         name: minor.name,
@@ -509,11 +481,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
         FOR customer IN customers
         ${minorSearchFilter}
         FOR minor IN customer.minors
-        FILTER (
-          LOWER(minor.name) LIKE LOWER(@searchQuery)
-          OR minor.investor_id == @exactId
-          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-        )
+        FILTER ${minorSearchCondition}
         COLLECT WITH COUNT INTO total
         RETURN total
       )[0] || 0
@@ -523,18 +491,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
       LET customerCount = (
         FOR customer IN customers
         ${branchFilter.filterClause}
-        FILTER (
-          LOWER(customer.name) LIKE LOWER(@searchQuery) 
-          OR customer.investor_id == @exactId
-          OR LOWER(customer.pan) LIKE LOWER(@searchQuery) 
-          OR LOWER(customer.email) LIKE LOWER(@searchQuery) 
-          OR LOWER(customer.mobile) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address1) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address2) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.address3) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.city) LIKE LOWER(@searchQuery)
-          OR LOWER(customer.state) LIKE LOWER(@searchQuery)
-        )
+        FILTER ${customerSearchCondition}
         COLLECT WITH COUNT INTO total
         RETURN total
       )[0] || 0
@@ -543,11 +500,7 @@ router.get('/search/advanced', requireAuth, async (req, res) => {
         FOR customer IN customers
         ${minorSearchFilter}
         FOR minor IN customer.minors
-        FILTER (
-          LOWER(minor.name) LIKE LOWER(@searchQuery)
-          OR minor.investor_id == @exactId
-          OR (minor.pan != null && LOWER(minor.pan) LIKE LOWER(@searchQuery))
-        )
+        FILTER ${minorSearchCondition}
         COLLECT WITH COUNT INTO total
         RETURN total
       )[0] || 0
@@ -640,59 +593,63 @@ router.get('/', requireAuth, async (req, res) => {
 
     // Search functionality (case-insensitive)
     if (search) {
-      const searchFilter = `
-        FILTER LOWER(customer.name) LIKE LOWER(@search)
-           OR LOWER(customer.investor_id) LIKE LOWER(@search)
-           OR LOWER(customer.pan) LIKE LOWER(@search)
-           OR LOWER(customer.email) LIKE LOWER(@search)
-           OR LOWER(customer.mobile) LIKE LOWER(@search)
-           OR (
-             FOR minor IN (customer.minors != null ? customer.minors : [])
-             FILTER (
-               LOWER(minor.name) LIKE LOWER(@search)
-               OR LOWER(minor.investor_id) LIKE LOWER(@search)
-               OR LOWER(minor.pan) LIKE LOWER(@search)
-             )
-             RETURN true
-           )[0] == true
-      `
+      const searchCondition = `(
+        (customer.name != null && LOWER(TO_STRING(customer.name)) LIKE LOWER(@search))
+        OR (customer.investor_id != null && LOWER(TO_STRING(customer.investor_id)) LIKE LOWER(@search))
+        OR (customer.pan != null && LOWER(TO_STRING(customer.pan)) LIKE LOWER(@search))
+        OR (customer.email != null && LOWER(TO_STRING(customer.email)) LIKE LOWER(@search))
+        OR (customer.mobile != null && LOWER(TO_STRING(customer.mobile)) LIKE LOWER(@search))
+        OR (
+          FOR minor IN (customer.minors != null ? customer.minors : [])
+          FILTER (
+            (minor.name != null && LOWER(TO_STRING(minor.name)) LIKE LOWER(@search))
+            OR (minor.investor_id != null && LOWER(TO_STRING(minor.investor_id)) LIKE LOWER(@search))
+            OR (minor.pan != null && LOWER(TO_STRING(minor.pan)) LIKE LOWER(@search))
+          )
+          RETURN true
+        )[0] == true
+      )`
       
       if (filterClause) {
-        filterClause += ` AND (LOWER(customer.name) LIKE LOWER(@search)
-           OR LOWER(customer.investor_id) LIKE LOWER(@search)
-           OR LOWER(customer.pan) LIKE LOWER(@search)
-           OR LOWER(customer.email) LIKE LOWER(@search)
-           OR LOWER(customer.mobile) LIKE LOWER(@search)
-           OR (
-             FOR minor IN (customer.minors != null ? customer.minors : [])
-             FILTER (
-               LOWER(minor.name) LIKE LOWER(@search)
-               OR LOWER(minor.investor_id) LIKE LOWER(@search)
-               OR LOWER(minor.pan) LIKE LOWER(@search)
-             )
-             RETURN true
-           )[0] == true
-        )`
+        filterClause += ` AND ${searchCondition}`
       } else {
-        filterClause = searchFilter
+        filterClause = `FILTER ${searchCondition}`
       }
       bindVars.search = `%${String(search).trim().toLowerCase()}%`
     }
 
-    // Admin-only: filter list by branch key (customer.branches or relationship_manager)
+    // Admin-only: filter list by branch key/code/name. Customer rows may store any of
+    // those historical branch identifiers, so resolve the filter to all known aliases.
     if (isAdmin && branch_key && String(branch_key).trim()) {
       const bk = String(branch_key).trim()
+      const adminScope = await resolveAdminBranchKeys(bk)
+      const branchIdentifiers = Array.from(
+        new Set(
+          [
+            bk,
+            ...(adminScope?.keys || []),
+            ...(adminScope?.names || [])
+          ].filter(Boolean).map((x) => String(x))
+        )
+      )
       const branchClause = `(
-        (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && @branch_key IN customer.branches)
-        OR customer.relationship_manager == @branch_key
-        OR (IS_ARRAY(customer.relationship_manager) && @branch_key IN customer.relationship_manager)
+        (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && LENGTH(INTERSECTION(customer.branches, @branchIdentifiers)) > 0)
+        OR (!IS_ARRAY(customer.branches) && customer.branches != null && TO_STRING(customer.branches) != "" && TO_STRING(customer.branches) IN @branchIdentifiers)
+        OR (
+          (customer.branches == null OR (IS_ARRAY(customer.branches) && LENGTH(customer.branches) == 0) OR (!IS_ARRAY(customer.branches) && (customer.branches == null OR TO_STRING(customer.branches) == "")))
+          AND (
+            customer.relationship_manager IN @branchIdentifiers
+            OR (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @branchIdentifiers)) > 0)
+          )
+        )
       )`
       if (filterClause) {
-        filterClause += ` AND ${branchClause}`
+        const existingClause = filterClause.replace(/^FILTER\s+/i, '').trim()
+        filterClause = `FILTER (${existingClause}) AND ${branchClause}`
       } else {
         filterClause = `FILTER ${branchClause}`
       }
-      bindVars.branch_key = bk
+      bindVars.branchIdentifiers = branchIdentifiers
     }
 
     const query = `
@@ -796,15 +753,20 @@ router.get('/portfolio-review', requireAuth, async (req, res) => {
     if (branchFilter.isAdmin) {
       const adminScope = await resolveAdminBranchKeys(branch_code)
       if (adminScope) {
-        bindVars.adminBranchKeys = adminScope.keys
-        bindVars.adminBranchNames = adminScope.names
+        bindVars.adminBranchIdentifiers = Array.from(
+          new Set([
+            ...(adminScope.keys || []),
+            ...(adminScope.names || [])
+          ].filter(Boolean).map((x) => String(x)))
+        )
         baseConditions.push(`(
-          (IS_ARRAY(customer.branches) && LENGTH(customer.branches) > 0 && LENGTH(INTERSECTION(customer.branches, @adminBranchKeys)) > 0)
-          ||
-          ( (customer.branches == null OR !IS_ARRAY(customer.branches) OR LENGTH(customer.branches) == 0) &&
-            (
-              (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @adminBranchNames)) > 0)
-              || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager IN @adminBranchNames)
+          (IS_ARRAY(customer.branches) && LENGTH(INTERSECTION(customer.branches, @adminBranchIdentifiers)) > 0)
+          || (!IS_ARRAY(customer.branches) && customer.branches != null && TO_STRING(customer.branches) != "" && TO_STRING(customer.branches) IN @adminBranchIdentifiers)
+          || (
+            (customer.branches == null OR (IS_ARRAY(customer.branches) && LENGTH(customer.branches) == 0) OR (!IS_ARRAY(customer.branches) && (customer.branches == null OR TO_STRING(customer.branches) == "")))
+            AND (
+              (IS_ARRAY(customer.relationship_manager) && LENGTH(INTERSECTION(customer.relationship_manager, @adminBranchIdentifiers)) > 0)
+              || (!IS_ARRAY(customer.relationship_manager) && customer.relationship_manager IN @adminBranchIdentifiers)
             )
           )
         )`)
@@ -868,6 +830,7 @@ router.get('/portfolio-review', requireAuth, async (req, res) => {
         _key: customer._key,
         investor_id: customer.investor_id,
         name: customer.name,
+        pan: customer.pan || null,
         mobile: customer.mobile,
         email: customer.email,
         relationship_manager: customer.relationship_manager,
@@ -928,7 +891,7 @@ router.get('/:id/review-history', requireAuth, async (req, res) => {
     const customers = await q(`FOR c IN customers FILTER c.investor_id == @id LIMIT 1 RETURN c`, { id })
     if (!customers.length) return res.status(404).json({ error: 'not_found' })
     const customer = customers[0]
-    const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+    const canAccess = await canAccessCustomer(req.user.sub, customerBranchAccessValue(customer))
     if (!canAccess) return res.status(403).json({ error: 'forbidden' })
     const db = (await import('../config/database.js')).default
     const col = db.collection('portfolio_review_events')
@@ -1025,7 +988,7 @@ router.post('/portfolio-review/bulk-update', requireAuth, async (req, res) => {
 
     for (const customer of customers) {
       try {
-        const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+        const canAccess = await canAccessCustomer(req.user.sub, customerBranchAccessValue(customer))
         if (!canAccess) {
           errors.push({ investor_id: customer.investor_id, reason: 'forbidden' })
           continue
@@ -1100,7 +1063,7 @@ router.get('/:id/timeline', requireAuth, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'not_found' })
     const customer = rows[0]
 
-    const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+    const canAccess = await canAccessCustomer(req.user.sub, customerBranchAccessValue(customer))
     if (!canAccess) return res.status(403).json({ error: 'forbidden' })
 
     const limit = Math.min(200, Math.max(10, parseInt(req.query.limit, 10) || 100))
@@ -1166,7 +1129,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     
     // Check if user can access this customer (branch-based filtering)
     try {
-      const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+      const canAccess = await canAccessCustomer(req.user.sub, customerBranchAccessValue(customer))
       
       if (!canAccess) {
         return res.status(403).json({ 
@@ -1585,7 +1548,7 @@ router.patch('/:id', requireAuth, uploadMultiple, async (req, res) => {
     
     // Check if user can access this customer (branch-based filtering)
     try {
-      const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+      const canAccess = await canAccessCustomer(req.user.sub, customerBranchAccessValue(customer))
       
       if (!canAccess) {
         return res.status(403).json({ 
@@ -2018,7 +1981,7 @@ router.post('/:id/media', requireAuth, uploadMultiple, async (req, res) => {
 
     // Branch-based access check
     try {
-      const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+      const canAccess = await canAccessCustomer(req.user.sub, customerBranchAccessValue(customer))
       if (!canAccess) {
         return res.status(403).json({
           error: 'forbidden',
@@ -2104,7 +2067,7 @@ router.delete('/:id/media/:mediaId', requireAuth, async (req, res) => {
     const customer = existing[0]
 
     try {
-      const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+      const canAccess = await canAccessCustomer(req.user.sub, customerBranchAccessValue(customer))
       if (!canAccess) {
         return res.status(403).json({
           error: 'forbidden',
@@ -2176,7 +2139,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
     const customer = existing[0]
     
     // Check if user can access this customer (branch-based filtering)
-    const canAccess = await canAccessCustomer(req.user.sub, customer.branches || customer.relationship_manager)
+    const canAccess = await canAccessCustomer(req.user.sub, customerBranchAccessValue(customer))
     if (!canAccess) {
       return res.status(403).json({ error: 'forbidden', detail: 'Access denied - customer belongs to different branch' })
     }

@@ -572,13 +572,19 @@ router.get('/reports', requireAuth, async (req, res) => {
     const byBranch = await q(`
       FOR t IN tasks
         FILTER t.archived_at == null
-        COLLECT b = t.branch
+        LET branchDoc = FIRST(
+          FOR b IN branches
+            FILTER b.branch_code == t.branch OR b._key == t.branch OR b.branch_name == t.branch
+            LIMIT 1
+            RETURN b
+        )
+        COLLECT b = t.branch, branchName = (branchDoc.branch_name || t.branch)
         AGGREGATE total = LENGTH(1),
                   open_count = SUM(t.status NOT IN ['done', 'cancelled'] ? 1 : 0),
                   completed = SUM(t.status == 'done' ? 1 : 0),
                   sla = SUM(t.sla_breached_at != null ? 1 : 0)
         SORT total DESC
-        RETURN { branch: b, total, open: open_count, completed, sla_breached: sla }
+        RETURN { branch: b, branch_name: branchName, total, open: open_count, completed, sla_breached: sla }
     `)
 
     const slaSummary = await q(`

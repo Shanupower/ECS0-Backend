@@ -3,6 +3,11 @@ import { q, getCollection } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
 import { uploadExcel, uploadsDir } from '../middleware/upload.js'
 import ExcelJS from 'exceljs'
+import {
+  buildExportMeta,
+  insertExportHeaderRows,
+  styleWorksheetTableHeaderRow
+} from '../services/reports/report-export.js'
 
 const router = express.Router()
 
@@ -754,19 +759,18 @@ router.get('/export/excel', requireAuth, requireRole('admin'), async (req, res) 
       { header: 'SI %', key: 'si', width: 12, style: { numFmt: '0.00000' } }
     ]
     
-    // Style header row
-    worksheet.getRow(1).font = { bold: true, size: 12 }
-    worksheet.getRow(1).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFE0E0E0' }
-    }
-    worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' }
+    styleWorksheetTableHeaderRow(worksheet, 1)
     
     // Add data rows
     flattenedProducts.forEach(product => {
       worksheet.addRow(product)
     })
+
+    const exportMeta = buildExportMeta({ reportTitle: 'Insurance Schemes Export' })
+    const inserted = insertExportHeaderRows(worksheet, exportMeta)
+    if (inserted) {
+      styleWorksheetTableHeaderRow(worksheet, inserted + 1)
+    }
     
     // Set response headers
     const filename = `insurance-schemes-export-${issuer_key || 'all'}-${new Date().toISOString().split('T')[0]}.xlsx`

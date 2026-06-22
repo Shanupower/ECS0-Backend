@@ -111,6 +111,12 @@ async function setupDatabase() {
         options: {
           keyOptions: { type: 'traditional' }
         }
+      },
+      {
+        name: 'user_login_events',
+        options: {
+          keyOptions: { type: 'traditional' }
+        }
       }
     ]
     
@@ -234,6 +240,27 @@ async function setupDatabase() {
         collection: 'branch_audit_events',
         type: 'persistent',
         fields: ['created_at']
+      },
+      {
+        collection: 'user_login_events',
+        type: 'persistent',
+        fields: ['login_at']
+      },
+      {
+        collection: 'user_login_events',
+        type: 'persistent',
+        fields: ['user_id']
+      },
+      {
+        collection: 'user_login_events',
+        type: 'persistent',
+        fields: ['emp_code']
+      },
+      {
+        collection: 'user_login_events',
+        type: 'persistent',
+        fields: ['branch_code'],
+        sparse: true
       },
       {
         collection: 'receipts',
