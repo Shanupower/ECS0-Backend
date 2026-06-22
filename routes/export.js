@@ -1,5 +1,5 @@
 import express from 'express'
-import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName, getUserBranch } from '../config/database.js'
+import { q, getCollection, getBranchIdentifiersForFilter, normalizeBranchName, getUserBranch, getCanonicalBranchKey } from '../config/database.js'
 import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.js'
 import { uploadCsv } from '../middleware/upload.js'
 import { normalizeReceiptCategory } from '../utils/receipt-category.js'
@@ -38,6 +38,102 @@ async function buildBranchNameResolver() {
     const mapped = index.get(raw.toLowerCase())
     if (mapped) return mapped
     return normalizeBranchName(raw) || raw
+  }
+}
+
+export const CUSTOMER_CSV_HEADERS = [
+  'Investor ID', 'Name', 'PAN', 'Email', 'Mobile', 'Date of Birth',
+  'Address1', 'Address2', 'Address3', 'City', 'State', 'Pin',
+  'Branch(es)', 'Created At'
+]
+
+const CUSTOMER_CSV_TEMPLATE_ROW = [
+  '',
+  'Sample Customer',
+  'AAAPA1234A',
+  'sample@example.com',
+  '9876543210',
+  '1990-01-15',
+  '123 Main Street',
+  '',
+  '',
+  'Chennai',
+  'Tamil Nadu',
+  '600001',
+  'Chennai RO',
+  ''
+]
+
+function formatCustomerDob(value) {
+  if (value == null || value === '') return ''
+  const raw = String(value).trim()
+  if (!raw) return ''
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10)
+  const d = new Date(raw.includes('T') ? raw : `${raw}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return raw
+  return d.toISOString().slice(0, 10)
+}
+
+function formatCustomerBranchDisplay(customer, resolveBranchName) {
+  if (customer.relationship_manager_display != null) {
+    return Array.isArray(customer.relationship_manager_display)
+      ? customer.relationship_manager_display.join('; ')
+      : String(customer.relationship_manager_display)
+  }
+  const keys = []
+  if (Array.isArray(customer.branches) && customer.branches.length > 0) {
+    keys.push(...customer.branches.map(String))
+  } else if (customer.relationship_manager) {
+    if (Array.isArray(customer.relationship_manager)) {
+      keys.push(...customer.relationship_manager.map(String))
+    } else {
+      keys.push(String(customer.relationship_manager))
+    }
+  }
+  if (!keys.length) return ''
+  const names = [...new Set(keys.map((k) => resolveBranchName(k) || k).filter(Boolean))]
+  return names.join('; ')
+}
+
+function customerToCsvRow(customer, resolveBranchName) {
+  return [
+    customer.investor_id,
+    customer.name || '',
+    customer.pan || '',
+    customer.email || '',
+    customer.mobile || '',
+    formatCustomerDob(customer.date_of_birth),
+    customer.address1 || '',
+    customer.address2 || '',
+    customer.address3 || '',
+    customer.city || '',
+    customer.state || '',
+    customer.pin || '',
+    formatCustomerBranchDisplay(customer, resolveBranchName),
+    customer.created_at || ''
+  ]
+}
+
+async function resolveBranchesFromImportTokens(branchParts, resolveBranchName) {
+  if (!branchParts.length) {
+    return { branches: [], relationship_manager: 'UNASSIGNED', relationship_manager_display: null }
+  }
+  const canonicalKeys = []
+  const displayNames = []
+  for (const token of branchParts) {
+    const canonicalKey = (await getCanonicalBranchKey(token)) || normalizeBranchName(token)
+    if (canonicalKey) {
+      canonicalKeys.push(canonicalKey)
+      displayNames.push(resolveBranchName(canonicalKey) || token)
+    }
+  }
+  if (!canonicalKeys.length) {
+    return { branches: [], relationship_manager: 'UNASSIGNED', relationship_manager_display: null }
+  }
+  return {
+    branches: canonicalKeys,
+    relationship_manager: canonicalKeys.length === 1 ? canonicalKeys[0] : canonicalKeys,
+    relationship_manager_display: displayNames.length === 1 ? displayNames[0] : displayNames
   }
 }
 
@@ -469,53 +565,39 @@ router.get('/customers', requireAuth, requireRole('admin'), requireMasterKey, as
         pan: customer.pan,
         email: customer.email,
         mobile: customer.mobile,
+        date_of_birth: customer.date_of_birth,
         address1: customer.address1,
         address2: customer.address2,
         address3: customer.address3,
         city: customer.city,
         state: customer.state,
         pin: customer.pin,
+        branches: customer.branches,
         relationship_manager: customer.relationship_manager,
         relationship_manager_display: customer.relationship_manager_display,
         created_at: customer.created_at
       }
     `)
-    
-    const headers = [
-      'Investor ID', 'Name', 'PAN', 'Email', 'Mobile', 'Address1', 'Address2', 'Address3',
-      'City', 'State', 'Pin', 'Branch(es)', 'Created At'
-    ]
 
-    const dataRows = customers.map((customer) => {
-      const branchVal = customer.relationship_manager_display != null
-        ? (Array.isArray(customer.relationship_manager_display)
-            ? customer.relationship_manager_display.join('; ')
-            : customer.relationship_manager_display)
-        : (Array.isArray(customer.relationship_manager)
-            ? customer.relationship_manager.join('; ')
-            : customer.relationship_manager || '')
-      return [
-        customer.investor_id,
-        customer.name || '',
-        customer.pan || '',
-        customer.email || '',
-        customer.mobile || '',
-        customer.address1 || '',
-        customer.address2 || '',
-        customer.address3 || '',
-        customer.city || '',
-        customer.state || '',
-        customer.pin || '',
-        String(branchVal),
-        customer.created_at || ''
-      ]
-    })
+    const resolveBranchName = await buildBranchNameResolver()
+    const dataRows = customers.map((customer) => customerToCsvRow(customer, resolveBranchName))
 
     const meta = buildExportMeta({ reportTitle: 'Customer Master' })
-    sendCsvReport(res, 'customers', headers, dataRows, meta)
+    sendCsvReport(res, 'customers', CUSTOMER_CSV_HEADERS, dataRows, meta)
   } catch (error) {
     console.error('CSV export error:', error)
     res.status(500).json({ error: 'server_error', detail: 'Failed to export customers' })
+  }
+})
+
+// Sample CSV template for customer import (same columns as export)
+router.get('/customers/template', requireAuth, requireRole('admin'), requireMasterKey, async (req, res) => {
+  try {
+    const meta = buildExportMeta({ reportTitle: 'Customer Import Template' })
+    sendCsvReport(res, 'customers_import_template', CUSTOMER_CSV_HEADERS, [CUSTOMER_CSV_TEMPLATE_ROW], meta)
+  } catch (error) {
+    console.error('CSV template error:', error)
+    res.status(500).json({ error: 'server_error', detail: 'Failed to generate customer template' })
   }
 })
 
@@ -536,7 +618,10 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
     const investorIdIdx = header.findIndex(h => /investor\s*id/i.test(h))
     const emailIdx = header.findIndex(h => /email/i.test(h))
     const mobileIdx = header.findIndex(h => /mobile/i.test(h))
+    const dobIdx = header.findIndex(h => /dob|date\s*of\s*birth/i.test(h))
     const addr1Idx = header.findIndex(h => /address1|address\s*1/i.test(h))
+    const addr2Idx = header.findIndex(h => /address2|address\s*2/i.test(h))
+    const addr3Idx = header.findIndex(h => /address3|address\s*3/i.test(h))
     const cityIdx = header.findIndex(h => /city/i.test(h))
     const stateIdx = header.findIndex(h => /state/i.test(h))
     const pinIdx = header.findIndex(h => /pin/i.test(h))
@@ -558,6 +643,7 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
     `)
     let nextId = (maxIdResult[0] || 0) + 1
     const col = getCollection('customers')
+    const resolveBranchName = await buildBranchNameResolver()
     let imported = 0
     let updated = 0
     const errors = []
@@ -587,23 +673,26 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
       const investorId = investorIdIdx >= 0 && parts[investorIdIdx] ? parseInt(parts[investorIdIdx], 10) : null
       const branchRaw = branchIdx >= 0 ? parseCsvField(parts[branchIdx]) : ''
       const branchParts = branchRaw ? branchRaw.split(/[;,]/).map(b => b.trim()).filter(Boolean) : []
-      const relationshipManager = branchParts.length === 0 ? 'UNASSIGNED' : branchParts.length === 1 ? normalizeBranchName(branchParts[0]) : branchParts.map(b => normalizeBranchName(b))
-      const relationshipManagerDisplay = branchParts.length === 0 ? null : branchParts.length === 1 ? branchParts[0] : branchParts
+      const branchFields = await resolveBranchesFromImportTokens(branchParts, resolveBranchName)
+      const dobRaw = dobIdx >= 0 ? parseCsvField(parts[dobIdx]) : ''
+      const dateOfBirth = dobRaw ? formatCustomerDob(dobRaw) : null
       const doc = {
         investor_id: investorId != null && !isNaN(investorId) ? investorId : nextId++,
         name,
         pan: pan.toUpperCase(),
         email: emailIdx >= 0 ? parseCsvField(parts[emailIdx]) || null : null,
         mobile: mobileIdx >= 0 ? parseCsvField(parts[mobileIdx]) || null : null,
+        date_of_birth: dateOfBirth || null,
         address1: addr1Idx >= 0 ? parseCsvField(parts[addr1Idx]) || null : null,
-        address2: null,
-        address3: null,
+        address2: addr2Idx >= 0 ? parseCsvField(parts[addr2Idx]) || null : null,
+        address3: addr3Idx >= 0 ? parseCsvField(parts[addr3Idx]) || null : null,
         city: cityIdx >= 0 ? parseCsvField(parts[cityIdx]) || null : null,
         state: stateIdx >= 0 ? parseCsvField(parts[stateIdx]) || null : null,
         pin: pinIdx >= 0 ? parseCsvField(parts[pinIdx]) || null : null,
         country: 'India',
-        relationship_manager: Array.isArray(relationshipManager) ? relationshipManager : relationshipManager,
-        relationship_manager_display: relationshipManagerDisplay,
+        branches: branchFields.branches,
+        relationship_manager: branchFields.relationship_manager,
+        relationship_manager_display: branchFields.relationship_manager_display,
         minors: [],
         created_at: new Date().toISOString(),
         is_active: true,
@@ -625,6 +714,7 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
             pan: doc.pan,
             email: doc.email,
             mobile: doc.mobile,
+            date_of_birth: doc.date_of_birth,
             address1: doc.address1,
             address2: doc.address2,
             address3: doc.address3,
@@ -632,6 +722,7 @@ router.post('/customers/import', requireAuth, requireRole('admin'), requireMaste
             state: doc.state,
             pin: doc.pin,
             country: doc.country,
+            branches: doc.branches,
             relationship_manager: doc.relationship_manager,
             relationship_manager_display: doc.relationship_manager_display,
             is_active: doc.is_active,

@@ -3,7 +3,10 @@ import { requireAuth } from '../middleware/auth.js'
 import {
   canAccessAnalytics,
   buildRegistryScope,
-  sanitizeReportQuery
+  sanitizeReportQuery,
+  sanitizeAdminReportQuery,
+  filterReportsForRole,
+  canAccessReport
 } from '../constants/report-access.js'
 import { runMisSummary } from '../services/reports/mis-summary.js'
 import {
@@ -39,6 +42,9 @@ import {
   CustomerDetailReportError
 } from '../services/reports/customer-detail-report.js'
 import { runReceiptErrorsReport } from '../services/reports/receipt-errors-report.js'
+import { runPaymentModeReport } from '../services/reports/payment-mode-report.js'
+import { runUserLoginReport } from '../services/reports/user-login-report.js'
+import { runUserRoleAccessReport } from '../services/reports/user-role-access-report.js'
 
 const router = express.Router()
 
@@ -114,6 +120,32 @@ const REPORT_REGISTRY = [
     path: '/api/reports/customer-detail',
     icon: 'Users',
     group: 'Customers Report'
+  },
+  {
+    id: 'payment-mode',
+    title: 'Payment Mode for Receipts',
+    description: 'Receipt totals and detail grouped by payment mode (Online, Offline, Others).',
+    path: '/api/reports/payment-mode',
+    icon: 'CreditCard',
+    group: 'Operational Reports'
+  },
+  {
+    id: 'user-login',
+    title: 'User Login Report',
+    description: 'Login history with employee, branch, role, IP, and session type.',
+    path: '/api/reports/user-login',
+    icon: 'LogIn',
+    group: 'Administration',
+    roles: ['admin']
+  },
+  {
+    id: 'user-role-access',
+    title: 'User Role & Access Report',
+    description: 'Users with role, branch, analytics scope, and access capabilities.',
+    path: '/api/reports/user-role-access',
+    icon: 'Shield',
+    group: 'Administration',
+    roles: ['admin']
   }
 ]
 
@@ -214,6 +246,61 @@ const receiptErrorsRow = (r) => [
   Array.isArray(r.related_receipt_numbers) ? r.related_receipt_numbers.join('; ') : ''
 ]
 
+const paymentModeDetailHeaders = ['Date', 'Receipt Number', 'Client ID', 'Client Name', 'Product', 'Issuer', 'Scheme', 'Amount', 'Payment Mode', 'Channel', 'Instrument Type', 'Instrument No', 'Reference', 'CC', 'SI', 'Branch', 'RM', 'Status']
+const paymentModeDetailRow = (r) => [
+  r.date ?? '',
+  r.receipt_number ?? '',
+  r.client_id ?? '',
+  r.client_name ?? '',
+  r.product_category ?? '',
+  r.issuer ?? '',
+  r.scheme_name ?? '',
+  r.amount ?? 0,
+  r.payment_mode ?? '',
+  r.channel ?? '',
+  r.instrument_type ?? '',
+  r.instrument_no ?? '',
+  r.reference_no ?? '',
+  r.collection_credit ?? 0,
+  r.incentive_amount ?? '',
+  r.branch_code ?? '',
+  r.emp_code ?? '',
+  r.status ?? ''
+]
+
+const userLoginHeaders = ['Login At', 'Employee Code', 'Name', 'Role', 'Branch', 'Branch Code', 'Login Type', 'IP Address', 'User Agent']
+const userLoginRow = (r) => [
+  r.login_at ?? '',
+  r.emp_code ?? '',
+  r.user_name ?? '',
+  r.role ?? '',
+  r.branch ?? '',
+  r.branch_code ?? '',
+  r.login_type ?? '',
+  r.ip_address ?? '',
+  r.user_agent ?? ''
+]
+
+const userRoleAccessHeaders = ['Employee Code', 'Name', 'Email', 'Mobile', 'Role', 'Branch', 'Active', 'Created At', 'Last Login', 'Analytics Access', 'Report Scope', 'Allowed Filters', 'SI Visible', 'User Management', 'Task Reports', 'Export Users']
+const userRoleAccessRow = (r) => [
+  r.emp_code ?? '',
+  r.name ?? '',
+  r.email ?? '',
+  r.mobile ?? '',
+  r.role ?? '',
+  r.branch ?? '',
+  r.is_active ? 'Yes' : 'No',
+  r.created_at ?? '',
+  r.last_login_at ?? '',
+  r.analytics_access ? 'Yes' : 'No',
+  r.default_report_scope ?? '',
+  r.allowed_report_filters ?? '',
+  r.service_income_visible ? 'Yes' : 'No',
+  r.user_management ?? '',
+  r.task_reports ? 'Yes' : 'No',
+  r.export_users ? 'Yes' : 'No'
+]
+
 function requireAnalyticsAccess(req, res, next) {
   if (!canAccessAnalytics(req.user?.role)) {
     return res.status(403).json({ error: 'forbidden' })
@@ -226,11 +313,26 @@ function prepareReportRequest(req, res, next) {
   next()
 }
 
+function prepareAdminReportRequest(req, res, next) {
+  req.reportQuery = sanitizeAdminReportQuery(req.query)
+  next()
+}
+
+function requireReportAccess(reportId) {
+  return (req, res, next) => {
+    const entry = REPORT_REGISTRY.find((r) => r.id === reportId)
+    if (!entry || !canAccessReport(req.user?.role, entry)) {
+      return res.status(403).json({ error: 'forbidden' })
+    }
+    next()
+  }
+}
+
 router.use(requireAuth, requireAnalyticsAccess)
 
 router.get('/registry', (req, res) => {
   res.json({
-    reports: REPORT_REGISTRY,
+    reports: filterReportsForRole(REPORT_REGISTRY, req.user.role),
     scope: buildRegistryScope(req.user.role)
   })
 })
@@ -447,6 +549,54 @@ router.get('/customer-detail', async (req, res) => {
       return
     }
     console.error('[reports] customer-detail', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/payment-mode', async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runPaymentModeReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'payment_mode', paymentModeDetailHeaders, (data.rows || []).map(paymentModeDetailRow), fmt, req.reportQuery, 'payment-mode')
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] payment-mode', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/user-login', requireReportAccess('user-login'), prepareAdminReportRequest, async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runUserLoginReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'user_login', userLoginHeaders, data.rows.map(userLoginRow), fmt, req.reportQuery, 'user-login')
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] user-login', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/user-role-access', requireReportAccess('user-role-access'), prepareAdminReportRequest, async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    const data = await runUserRoleAccessReport(req.user, query)
+    if (fmt) {
+      await sendReportRows(res, 'user_role_access', userRoleAccessHeaders, data.rows.map(userRoleAccessRow), fmt, req.reportQuery, 'user-role-access')
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] user-role-access', e)
     res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
   }
 })

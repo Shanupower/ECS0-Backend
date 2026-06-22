@@ -71,3 +71,30 @@ export function sanitizeReportQuery(role, query = {}) {
 
   return out
 }
+
+/** Admin-only report IDs. */
+export const ADMIN_ONLY_REPORT_IDS = ['user-login', 'user-role-access']
+
+/**
+ * Whether the role may see/run a report (registry + route guard).
+ * @param {string} role
+ * @param {{ id?: string, roles?: string[] }} report
+ */
+export function canAccessReport(role, report) {
+  const r = String(role || '').trim()
+  const required = report?.roles
+  if (Array.isArray(required) && required.length > 0) {
+    return required.includes(r)
+  }
+  return canAccessAnalytics(r)
+}
+
+/** Filter registry entries visible to the caller. */
+export function filterReportsForRole(reports, role) {
+  return (reports || []).filter((entry) => canAccessReport(role, entry))
+}
+
+/** Sanitize query for admin user reports (no receipt view_mode forcing). */
+export function sanitizeAdminReportQuery(query = {}) {
+  return { ...query }
+}

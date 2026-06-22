@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken'
 import { q } from '../config/database.js'
 import { JWT_SECRET } from '../config/environment.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
+import { recordLoginEvent } from '../services/login-events.js'
 
 const router = express.Router()
 
@@ -30,7 +31,9 @@ router.post('/login', async (req, res) => {
     await q(`
       UPDATE @id WITH { last_login_at: DATE_NOW() } IN users
     `, { id: user._key })
-    
+
+    await recordLoginEvent({ user, req, loginType: 'password' })
+
     const token = jwt.sign({ 
       sub: user._key, 
       role: user.role, 
@@ -101,6 +104,13 @@ router.post('/impersonate', requireAuth, requireRole('admin'), async (req, res) 
     }
 
     const target = users[0]
+
+    await recordLoginEvent({
+      user: target,
+      req,
+      loginType: 'impersonation',
+      impersonatedBy: req.user.sub
+    })
 
     const token = jwt.sign({
       sub: target._key,

@@ -19,10 +19,24 @@ async function ensureReady() {
   return __setupPromise
 }
 
-function daysAgoStr(n) {
-  const d = new Date()
-  d.setDate(d.getDate() - n)
-  return d.toISOString().slice(0, 10)
+
+function parseDateRangeQuery(query = {}) {
+  const from = String(query.from || '').trim().slice(0, 10)
+  const to = String(query.to || '').trim().slice(0, 10)
+  return { from, to }
+}
+
+function appendDateRangeFilters(bindVars, from, to, field = 'task.created_at') {
+  const parts = []
+  if (from) {
+    bindVars.date_from = from
+    parts.push(`${field} >= @date_from`)
+  }
+  if (to) {
+    bindVars.date_to = `${to}T23:59:59.999Z`
+    parts.push(`${field} <= @date_to`)
+  }
+  return parts
 }
 
 async function getCurrentUserBranch(userId) {
@@ -82,17 +96,21 @@ function extractReceiptSummary(receipt) {
 
 async function fetchApprovalTasks(req) {
   await ensureReady()
+  const { from, to } = parseDateRangeQuery(req.query)
   const scope = await buildTaskScope(req)
+  const bindVars = { ...scope.bindVars }
+  const dateParts = appendDateRangeFilters(bindVars, from, to, 'task.created_at')
+  const dateFilter = dateParts.length ? `FILTER ${dateParts.join(' AND ')}\n` : ''
   const rows = await q(`
     FOR task IN tasks
       ${scope.filterAql}
-      FILTER task.kind == 'receipt_approval'
+      ${dateFilter}FILTER task.kind == 'receipt_approval'
       FILTER task.archived_at == null
       FILTER task.status NOT IN ['done', 'cancelled']
       SORT task.created_at DESC
       LIMIT 500
       RETURN task
-  `, { ...scope.bindVars })
+  `, bindVars)
   return rows
 }
 
@@ -117,7 +135,8 @@ async function enrichTasksWithReceipts(tasks, branchMap) {
       ...task,
       scheme_name: task.scheme_name || summary.scheme_name,
       amount: task.amount != null ? task.amount : summary.amount,
-      branch_name
+      branch_name,
+      receipt_no: receipt?.receipt_no || receipt?.receiptNo || null
     }
   })
 }
@@ -140,31 +159,37 @@ router.get('/queue', requireAuth, async (req, res) => {
 /** GET /api/approvals/summary — status cards + per-team breakdown */
 router.get('/summary', requireAuth, async (req, res) => {
   try {
+    const { from, to } = parseDateRangeQuery(req.query)
     const [tasks, teams, branchMap] = await Promise.all([
       fetchApprovalTasks(req),
       q(`FOR t IN teams RETURN { _key: t._key, name: t.name }`),
       loadBranchNameMap()
     ])
     const enriched = await enrichTasksWithReceipts(tasks, branchMap)
-    const weekAgo = daysAgoStr(7)
     const nowMs = Date.now()
 
     const statusCards = {
       pending_on_my_teams: enriched.length,
       overdue: enriched.filter(t => t.due_date && new Date(t.due_date).getTime() < nowMs).length,
       in_review: enriched.filter(t => t.status === 'in_review').length,
-      completed_last_7_days: 0
+      completed_in_range: 0
     }
 
+    const scope = await buildTaskScope(req)
+    const completedBind = { ...scope.bindVars }
+    const completedDateParts = appendDateRangeFilters(completedBind, from, to, 'task.completed_at')
+    const completedDateFilter = completedDateParts.length
+      ? `FILTER ${completedDateParts.join(' AND ')}\n`
+      : ''
     const completedRecent = await q(`
       FOR task IN tasks
-        FILTER task.kind == 'receipt_approval'
+        ${scope.filterAql}
+        ${completedDateFilter}FILTER task.kind == 'receipt_approval'
         FILTER task.status == 'done'
-        FILTER task.completed_at >= @weekAgo
         COLLECT WITH COUNT INTO c
         RETURN c
-    `, { weekAgo })
-    statusCards.completed_last_7_days = completedRecent[0] || 0
+    `, completedBind)
+    statusCards.completed_in_range = completedRecent[0] || 0
 
     const teamNameById = Object.fromEntries(teams.map(t => [String(t._key), t.name]))
     const byTeamMap = new Map()

@@ -142,6 +142,34 @@ export const REFERENCE_NO_AQL = `(
       : null)))
 )`
 
+/** Payment entry mode: Online, Offline, Others. */
+export const ENTRY_MODE_AQL = `(
+  (receipt.payment != null && receipt.payment.entry_mode != null && TO_STRING(receipt.payment.entry_mode) != "")
+    ? receipt.payment.entry_mode
+    : ((receipt.entry_mode != null && TO_STRING(receipt.entry_mode) != "") ? receipt.entry_mode : "Unknown")
+)`
+
+/** Payment channel (transaction number, Cheque, etc.). */
+export const CHANNEL_AQL = `(
+  (receipt.payment != null && receipt.payment.channel != null && TO_STRING(receipt.payment.channel) != "")
+    ? receipt.payment.channel
+    : ((receipt.channel != null && TO_STRING(receipt.channel) != "") ? receipt.channel : "")
+)`
+
+/** Instrument type (Cheque, etc.). */
+export const INSTRUMENT_TYPE_AQL = `(
+  (receipt.payment != null && receipt.payment.instrument != null && receipt.payment.instrument.type != null && TO_STRING(receipt.payment.instrument.type) != "")
+    ? receipt.payment.instrument.type
+    : ((receipt.instrument_type != null && TO_STRING(receipt.instrument_type) != "") ? receipt.instrument_type : "")
+)`
+
+/** Instrument / cheque number. */
+export const INSTRUMENT_NO_AQL = `(
+  (receipt.payment != null && receipt.payment.instrument != null && receipt.payment.instrument.number != null && TO_STRING(receipt.payment.instrument.number) != "")
+    ? receipt.payment.instrument.number
+    : ((receipt.instrument_no != null && TO_STRING(receipt.instrument_no) != "") ? receipt.instrument_no : "")
+)`
+
 export const INVESTOR_ID_AQL = `((receipt.investor != null && receipt.investor.id != null) ? receipt.investor.id : receipt.investor_id)`
 export const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name)`
 export const PAN_AQL = `((receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan)`
