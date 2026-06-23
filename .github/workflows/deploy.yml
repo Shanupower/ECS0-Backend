@@ -59,7 +59,7 @@ jobs:
           pm2 restart 0
           pm2 save || true
 
-          BACKEND_PORT="$( (grep -E '^PORT=' .env || true) | tail -n 1 | cut -d= -f2 )"
+          BACKEND_PORT="$( (grep -E '^PORT=' .env || true) | tail -n 1 | cut -d= -f2 | tr -d '\r\n\t ' )"
           BACKEND_PORT="${BACKEND_PORT:-8080}"
 
           ok=0

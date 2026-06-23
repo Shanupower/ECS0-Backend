@@ -83,7 +83,7 @@ jobs:
           pm2 save || true
 
           echo "--- Verify backend is serving locally"
-          BACKEND_PORT="$( (grep -E '^PORT=' "/home/ubuntu/ECS0-Backend/.env" || true) | tail -n 1 | cut -d= -f2 )"
+          BACKEND_PORT="$( (grep -E '^PORT=' "/home/ubuntu/ECS0-Backend/.env" || true) | tail -n 1 | cut -d= -f2 | tr -d '\r\n\t ' )"
           BACKEND_PORT="${BACKEND_PORT:-8080}"
 
           ok=0
