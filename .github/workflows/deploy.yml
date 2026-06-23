@@ -41,11 +41,11 @@ jobs:
 
           SSH_OPTS="-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=120 -o TCPKeepAlive=yes"
 
-          ssh $SSH_OPTS "$USERNAME@$HOST" bash -s <<'EOF'
+          ssh $SSH_OPTS "$USERNAME@$HOST" 'sudo -i bash -s' <<'EOF'
           set -euo pipefail
 
           echo "--- Backend: pull + npm i + pm2 restart"
-          cd "/root/ECS0-Project"
+          cd /root/ECS0-Project
           ENV_BAK="/tmp/ecs0_backend_env_$$.bak"
           if [ -f .env ]; then cp .env "$ENV_BAK"; fi
 
