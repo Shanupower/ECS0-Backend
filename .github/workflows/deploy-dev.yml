@@ -38,7 +38,9 @@ jobs:
           # Validate key can be parsed (fails fast with clear error)
           ssh-keygen -y -f ~/.ssh/dev_deploy_key >/dev/null
 
-          ssh -i ~/.ssh/dev_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no "$USERNAME@$HOST" bash -s <<'EOF'
+          SSH_OPTS="-i ~/.ssh/dev_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=120 -o TCPKeepAlive=yes"
+
+          ssh $SSH_OPTS "$USERNAME@$HOST" bash -s <<'EOF'
           set -euo pipefail
 
           echo "--- Backend: pull + npm i"
