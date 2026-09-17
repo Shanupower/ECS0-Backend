@@ -1,7 +1,7 @@
 import express from 'express'
 import { q, getUserBranch, normalizeBranchName, getBranchIdentifiersForFilter, getBranchMonthlyTargetForIdentifiers } from '../config/database.js'
 import { requireAuth, requireRole } from '../middleware/auth.js'
-import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { effectiveDateExprAql, normalizeDateForCompareAql } from '../utils/date-basis.js'
 import { stateFromPincode } from '../utils/pincode-state.js'
 import { INV_AMOUNT_AQL, CC_AQL, SI_AQL } from '../utils/receipt-aggregates.js'
 import {
@@ -40,12 +40,13 @@ router.get('/summary', requireAuth, async (req, res) => {
   let filterConditions = []
   
   const dateExpr = effectiveDateExprAql(date_basis)
+  const dateKey = normalizeDateForCompareAql(dateExpr)
   if (from) { 
-    filterConditions.push(`${dateExpr} >= @from`)
+    filterConditions.push(`${dateKey} >= @from`)
     bindVars.from = from
   }
   if (to) { 
-    filterConditions.push(`${dateExpr} <= @to`)
+    filterConditions.push(`${dateKey} <= @to`)
     bindVars.to = to
   }
   // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
@@ -596,12 +597,13 @@ router.get('/by-category', requireAuth, async (req, res) => {
   let filterConditions = []
   
   const dateExpr = effectiveDateExprAql(date_basis)
+  const dateKey = normalizeDateForCompareAql(dateExpr)
   if (from) { 
-    filterConditions.push(`${dateExpr} >= @from`)
+    filterConditions.push(`${dateKey} >= @from`)
     bindVars.from = from
   }
   if (to) { 
-    filterConditions.push(`${dateExpr} <= @to`)
+    filterConditions.push(`${dateKey} <= @to`)
     bindVars.to = to
   }
   // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
@@ -726,12 +728,13 @@ router.get('/by-day', requireAuth, async (req, res) => {
   let filterConditions = []
   
   const dateExpr = effectiveDateExprAql(date_basis)
+  const dateKey = normalizeDateForCompareAql(dateExpr)
   if (from) { 
-    filterConditions.push(`${dateExpr} >= @from`)
+    filterConditions.push(`${dateKey} >= @from`)
     bindVars.from = from
   }
   if (to) { 
-    filterConditions.push(`${dateExpr} <= @to`)
+    filterConditions.push(`${dateKey} <= @to`)
     bindVars.to = to
   }
   // Filter by user_id for employees (personal), by branch for managers/branch users (branch),
@@ -853,8 +856,9 @@ router.get('/monthly-cc-si', requireAuth, async (req, res) => {
   let filterConditions = []
   const bindVars = {}
   const dateExpr = effectiveDateExprAql(date_basis)
-  if (from) { filterConditions.push(`${dateExpr} >= @from`); bindVars.from = from }
-  if (to) { filterConditions.push(`${dateExpr} <= @to`); bindVars.to = to }
+  const dateKey = normalizeDateForCompareAql(dateExpr)
+  if (from) { filterConditions.push(`${dateKey} >= @from`); bindVars.from = from }
+  if (to) { filterConditions.push(`${dateKey} <= @to`); bindVars.to = to }
   if (req.user.role === 'employee') {
     if (viewMode === 'branch') {
       const userBranch = await getUserBranch(req.user.sub)
@@ -938,8 +942,9 @@ router.get('/branches', requireAuth, async (req, res) => {
     let filterConditions = []
     
     const receiptDateExpr = effectiveDateExprAql(date_basis)
+    const receiptDateKey = normalizeDateForCompareAql(receiptDateExpr)
     if (from && to) {
-      filterConditions.push(`${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`)
+      filterConditions.push(`${receiptDateKey} >= @from AND ${receiptDateKey} <= @to`)
       bindVars.from = from
       bindVars.to = to
     }
@@ -1141,9 +1146,10 @@ router.get('/employees/performance', requireAuth, async (req, res) => {
     let filterConditions = []
     let bindVars = {}
     const receiptDateExpr = effectiveDateExprAql(date_basis)
+    const receiptDateKey = normalizeDateForCompareAql(receiptDateExpr)
     
     if (from && to) {
-      filterConditions.push(`${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`)
+      filterConditions.push(`${receiptDateKey} >= @from AND ${receiptDateKey} <= @to`)
       bindVars.from = from
       bindVars.to = to
     }
@@ -1430,8 +1436,9 @@ router.get('/investor-locations', requireAuth, async (req, res) => {
     let filterConditions = ['receipt.is_deleted == false']
     const bindVars = {}
     const dateExpr = effectiveDateExprAql(date_basis)
-    if (from) { filterConditions.push(`${dateExpr} >= @from`); bindVars.from = from }
-    if (to) { filterConditions.push(`${dateExpr} <= @to`); bindVars.to = to }
+    const dateKey = normalizeDateForCompareAql(dateExpr)
+    if (from) { filterConditions.push(`${dateKey} >= @from`); bindVars.from = from }
+    if (to) { filterConditions.push(`${dateKey} <= @to`); bindVars.to = to }
     appendReceiptStatusFilter(filterConditions, parseIncludePending(req.query))
     if (req.user.role === 'employee') {
       filterConditions.push('(receipt.user_id == @user_id OR (receipt.emp_code != null && receipt.emp_code == @emp_code))')

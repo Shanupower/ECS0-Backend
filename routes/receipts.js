@@ -10,7 +10,7 @@ import {
   applyReceiptCategoryFilter,
   applyMfTxnTypeOrModeFilter
 } from '../utils/receipt-filters.js'
-import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { effectiveDateExprAql, normalizeDateForCompareAql } from '../utils/date-basis.js'
 import { PENDING_RECEIPT_FILTER_AQL } from '../services/reports/receipt-scope-filter.js'
 import { publishEvent } from '../services/task-events.js'
 import {
@@ -25,6 +25,7 @@ import {
   EngineError
 } from '../services/receipt-stage-engine.js'
 import { getAppConfig } from './app-config.js'
+import { evaluateReceiptCCSI } from '../services/cc-si-engine.js'
 
 function normalizeTenureUnit(u) {
   const v = String(u || '').trim().toLowerCase()
@@ -157,24 +158,64 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     const receiptNo = (d.receiptNo || d.receipt_no || '').replace('{{today}}', today)
     const date = d.date === '{{today}}' ? today : d.date || null
 
-    // Calculate CC and SI from scheme percentages at transaction time
-    // This ensures we store the CC/SI amount at the moment of transaction creation
+    // Calculate CC and SI monetary values
     let collectionCredit = 0
     let serviceIncome = 0
+    let ccSiRuleId = null
+    let ccSiRuleLabel = null
+
     // For MISC, use service_price; for others, use investment_amount or fd_deposit_amount
     const investmentAmount = productCategory === 'MISC' 
       ? parseFloat(d.service_price || d.servicePrice || d.investmentAmount || d.investment_amount || d.amount || 0)
       : parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || 0)
     
-    // Check if CC/SI are already provided (from frontend calculation)
-    if (d.collection_credit !== undefined || d.cc !== undefined) {
-      collectionCredit = parseFloat(d.collection_credit || d.cc || 0)
+    const txnTypeRaw = (d.txn_type || d.txnType || d.fd_transaction_type || d.transaction_type || d.transactionType || d.mode || '').toString().trim()
+    const isSipTxn = txnTypeRaw.toUpperCase() === 'SIP' || !!(d.sip_frequency || d.sip_start_date)
+
+    // Check if explicit CC/SI values were provided in the frontend payload
+    const explicitCC = d.collection_credit ?? d.cc_amount ?? d.cc
+    const explicitSI = d.service_income ?? d.si_amount ?? d.si
+    const hasExplicitCC = explicitCC !== undefined && explicitCC !== null && explicitCC !== '' && !isNaN(Number(explicitCC))
+    const hasExplicitSI = explicitSI !== undefined && explicitSI !== null && explicitSI !== '' && !isNaN(Number(explicitSI))
+
+    if (hasExplicitCC) {
+      collectionCredit = parseFloat(explicitCC)
     }
-    if (d.service_income !== undefined || d.si !== undefined) {
-      serviceIncome = parseFloat(d.service_income || d.si || 0)
+    if (hasExplicitSI) {
+      serviceIncome = parseFloat(explicitSI)
     }
-    
-    // If not provided and we have investment amount, calculate from scheme
+
+    // 1. Evaluate via CC & SI Rule Engine (if explicit values were not provided)
+    if (!hasExplicitCC || !hasExplicitSI) {
+      try {
+        const evaluated = await evaluateReceiptCCSI({
+          ...d,
+          product_category: productCategory,
+          investment_amount: investmentAmount,
+          txn_type: isSipTxn ? 'SIP' : (txnTypeRaw || 'LUMPSUM'),
+          date: date
+        })
+        if (evaluated && evaluated.rule_id) {
+          if (!hasExplicitCC) {
+            collectionCredit = evaluated.cc_amount
+          }
+          if (!hasExplicitSI) {
+            serviceIncome = evaluated.si_amount
+          }
+          ccSiRuleId = evaluated.rule_id
+          ccSiRuleLabel = evaluated.rule_label
+        }
+      } catch (ruleErr) {
+        console.warn('CC/SI Rule evaluation error during receipt creation:', ruleErr.message)
+      }
+    }
+
+    if (d.cc_si_rule_label && !ccSiRuleLabel) {
+      ccSiRuleLabel = d.cc_si_rule_label
+    }
+
+
+    // 2. Secondary fallback: calculate from scheme percentages if still 0
     if (investmentAmount > 0 && collectionCredit === 0 && serviceIncome === 0) {
       try {
         if (productCategory === 'MF') {
@@ -347,7 +388,6 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         }
       } catch (error) {
         console.error('Error calculating CC/SI from scheme:', error)
-        // Continue with 0 values if calculation fails - log for debugging
       }
     }
 
@@ -673,7 +713,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
 
     const bankName = td.bank_name ?? d.bankName ?? d.bank_name ?? null
     const bankBranch = td.bank_branch ?? d.bankBranch ?? d.bank_branch ?? null
-    const transactionDate = td.txn_date ?? d.txn_date ?? d.chequeDate ?? d.instrumentDate ?? d.instrument_date ?? null
+    const transactionDate = td.txn_date ?? td.date ?? d.txn_date ?? d.transactionDate ?? d.bond_transaction_date ?? d.chequeDate ?? d.instrumentDate ?? d.instrument_date ?? null
 
     let notes = td.notes ?? d.transaction_notes ?? d.notes ?? null
     if ((notes == null || notes === '') && (entryMode === 'Others' || d.transactionType === 'Others')) {
@@ -706,6 +746,10 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     const calculations = {
       collection_credit: collectionCredit,
       service_income: serviceIncome,
+      cc_amount: collectionCredit,
+      si_amount: serviceIncome,
+      total_cc: collectionCredit,
+      total_si: serviceIncome,
       // Legacy aliases for backward compatibility
       cc: collectionCredit,
       si: serviceIncome
@@ -757,7 +801,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       renewal_additional_amount: d.fd_renewal_additional_amount || null
     } : null
 
-    // Build structured receipt document — nested tree only; stats/list use product.category, transaction.amount, etc.
+    // Build structured receipt document — nested tree + flat CC/SI attributes for reports & dashboards
     const receiptEmpCode = d.empCode || d.emp_code || req.user.emp_code || null
     const appCfgCreate = await getAppConfig()
     const approvalV2Create = !!(appCfgCreate?.feature_flags?.receipts_approval_v2)
@@ -777,6 +821,16 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       updated_at: null,
       is_deleted: false,
       deleted_at: null,
+
+      // Flat CC & SI fields for reports, list queries, and filters
+      collection_credit: collectionCredit,
+      service_income: serviceIncome,
+      cc_amount: collectionCredit,
+      si_amount: serviceIncome,
+      total_cc: collectionCredit,
+      total_si: serviceIncome,
+      cc_si_rule_id: ccSiRuleId || d.cc_si_rule_id || null,
+      cc_si_rule_label: ccSiRuleLabel || d.cc_si_rule_label || null,
 
       // ============================================
       // STRUCTURED SECTIONS (nested tree — single source of truth)
@@ -1153,12 +1207,13 @@ router.get('/summary', requireAuth, async (req, res) => {
 
     // Date filters
     const dateExpr = effectiveDateExprAql(date_basis)
+    const dateKey = normalizeDateForCompareAql(dateExpr)
     if (from) {
-      filterConditions.push(`${dateExpr} >= @from`)
+      filterConditions.push(`${dateKey} >= @from`)
       bindVars.from = from
     }
     if (to) {
-      filterConditions.push(`${dateExpr} <= @to`)
+      filterConditions.push(`${dateKey} <= @to`)
       bindVars.to = to
     }
 
@@ -1359,13 +1414,14 @@ router.get('/', requireAuth, async (req, res) => {
     let filterConditions = []
 
     // safe date filter (only if both provided and valid)
+    const dateKey = normalizeDateForCompareAql(dateExpr)
     if (
       from &&
       to &&
       !isNaN(Date.parse(from)) &&
       !isNaN(Date.parse(to))
     ) {
-      filterConditions.push(`${dateExpr} >= @from AND ${dateExpr} <= @to`)
+      filterConditions.push(`${dateKey} >= @from AND ${dateKey} <= @to`)
       bindVars.from = from
       bindVars.to = to
     }
@@ -1743,7 +1799,8 @@ router.patch('/:id', requireAuth, async (req, res) => {
   }
 
   // Enforce transaction-details immutability once status is not Pending
-  if (currentStatus !== 'Pending') {
+  // Admins can always edit; other users can only edit when status is Pending
+  if (currentStatus !== 'Pending' && req.user?.role !== 'admin') {
     const transactionKeys = [
       'mode','txn_type','from_text','to_text','units_or_amount',
       'instrument_type','instrument_no','instrument_date','bank_name','bank_branch',
@@ -2269,6 +2326,102 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'server_error', detail: error.message })
   }
 })
+
+// Update receipt details (supports PUT and PATCH)
+const updateReceiptHandler = async (req, res) => {
+  try {
+    const id = req.params.id
+    const d = req.body || {}
+
+    const rows = await q(`
+      FOR receipt IN receipts
+      FILTER receipt._key == @id
+      LIMIT 1
+      RETURN receipt
+    `, { id })
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'not_found', detail: 'Receipt not found' })
+    }
+
+    const receipt = rows[0]
+
+    // Check permissions / state: Completed receipts can only be edited by Admin
+    if (receipt.status === 'Completed' && req.user?.role !== 'admin') {
+      return res.status(409).json({
+        error: 'cannot_edit_completed',
+        detail: 'Completed receipts can only be edited by an Administrator.'
+      })
+    }
+
+    const productCategory = d.product_category || d.productCategory || receipt.product_category || receipt.productCategory
+
+    // Calculate CC and SI monetary values if amount or fields changed
+    let collectionCredit = d.collection_credit ?? d.cc_amount ?? d.cc ?? receipt.collection_credit ?? receipt.cc_amount ?? 0
+    let serviceIncome = d.service_income ?? d.si_amount ?? d.si ?? receipt.service_income ?? receipt.si_amount ?? 0
+    let ccSiRuleId = receipt.cc_si_rule_id || null
+    let ccSiRuleLabel = receipt.cc_si_rule_label || null
+
+    const explicitCC = d.collection_credit ?? d.cc_amount ?? d.cc
+    const explicitSI = d.service_income ?? d.si_amount ?? d.si
+    const hasExplicitCC = explicitCC !== undefined && explicitCC !== null && explicitCC !== '' && !isNaN(Number(explicitCC))
+    const hasExplicitSI = explicitSI !== undefined && explicitSI !== null && explicitSI !== '' && !isNaN(Number(explicitSI))
+
+    const mergedForEval = {
+      ...receipt,
+      ...d,
+      product_category: productCategory,
+      investment_amount: parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || d.service_price || d.servicePrice || receipt.investment_amount || receipt.amount || 0),
+      txn_type: d.txn_type || d.txnType || d.transaction_type || d.transactionType || receipt.txn_type || receipt.transaction_type || 'LUMPSUM',
+      date: d.date || receipt.date
+    }
+
+    if (!hasExplicitCC || !hasExplicitSI) {
+      try {
+        const evaluated = await evaluateReceiptCCSI(mergedForEval)
+        if (evaluated && evaluated.rule_id) {
+          if (!hasExplicitCC) collectionCredit = evaluated.cc_amount
+          if (!hasExplicitSI) serviceIncome = evaluated.si_amount
+          ccSiRuleId = evaluated.rule_id
+          ccSiRuleLabel = evaluated.rule_label
+        }
+      } catch (evalErr) {
+        console.warn('Failed to evaluate CC SI rules on edit:', evalErr.message)
+      }
+    }
+
+    const updates = {
+      ...d,
+      updated_at: new Date().toISOString(),
+      updated_by: req.user.sub || req.user.id,
+      collection_credit: collectionCredit,
+      service_income: serviceIncome,
+      cc_amount: collectionCredit,
+      si_amount: serviceIncome,
+      total_cc: Number(collectionCredit) + (Number(receipt.additional_cc) || 0),
+      total_si: Number(serviceIncome) + (Number(receipt.additional_si) || 0),
+      cc_si_rule_id: ccSiRuleId,
+      cc_si_rule_label: ccSiRuleLabel
+    }
+
+    const updateRows = await q(`
+      FOR receipt IN receipts
+      FILTER receipt._key == @id
+      UPDATE receipt WITH @updates IN receipts
+      RETURN NEW
+    `, { id, updates })
+
+    res.status(200).json({
+      message: 'Receipt updated successfully',
+      receipt: updateRows[0]
+    })
+  } catch (error) {
+    console.error('Error updating receipt:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+}
+
+router.put('/:id', requireAuth, updateReceiptHandler)
 
 // Add or update additional CC/SI bonus on a receipt
 router.put('/:id/bonus', requireAuth, requireRole('admin'), async (req, res) => {

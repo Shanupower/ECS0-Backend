@@ -30,6 +30,18 @@ export function getEffectiveCategory(receipt) {
   if (!raw) return ''
 
   const upper = raw.toUpperCase()
+
+  // Handle MF sub-categories (SIF, PMS, AIF, GIFT_CITY_FUNDS)
+  const mfSubCat = toTrimmedString(
+    receipt?.mf_amc_category ?? 
+    receipt?.amc_category ?? 
+    receipt?.product_details?.mf?.amc_category
+  ).toUpperCase()
+  const validMfSubCats = ['SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS']
+  if (validMfSubCats.includes(mfSubCat)) {
+    return mfSubCat
+  }
+
   if (upper === 'FD' && isGovtOrPostOfficeIssuer(getIssuerTypeSignal(receipt))) {
     return 'GOVT_FD'
   }

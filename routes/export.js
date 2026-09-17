@@ -4,7 +4,7 @@ import { requireAuth, requireRole, requireMasterKey } from '../middleware/auth.j
 import { uploadCsv } from '../middleware/upload.js'
 import { normalizeReceiptCategory } from '../utils/receipt-category.js'
 import { appendExportCategoryQuery, appendMfTxnTypeToExportQuery } from '../utils/receipt-filters.js'
-import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { effectiveDateExprAql, normalizeDateForCompareAql } from '../utils/date-basis.js'
 import { buildExportMeta, sendCsvReport, sendXlsxReport, fixUtf8Mojibake } from '../services/reports/report-export.js'
 
 const router = express.Router()
@@ -142,6 +142,7 @@ router.get('/receipts', requireAuth, async (req, res) => {
   try {
     const { from, to, branch_code, date_basis } = req.query
     const dateExpr = effectiveDateExprAql(date_basis)
+    const dateKey = normalizeDateForCompareAql(dateExpr)
     let query = `
       FOR receipt IN receipts
       FILTER receipt.is_deleted == false
@@ -149,11 +150,11 @@ router.get('/receipts', requireAuth, async (req, res) => {
     let bindVars = {}
     
     if (from) {
-      query += ` AND ${dateExpr} >= @from`
+      query += ` AND ${dateKey} >= @from`
       bindVars.from = from
     }
     if (to) {
-      query += ` AND ${dateExpr} <= @to`
+      query += ` AND ${dateKey} <= @to`
       bindVars.to = to
     }
     if (branch_code) {
@@ -263,6 +264,7 @@ router.get('/transactions', requireAuth, async (req, res) => {
       format = 'csv'
     } = req.query
     const dateExpr = effectiveDateExprAql(date_basis)
+    const dateKey = normalizeDateForCompareAql(dateExpr)
 
     let query = `
       FOR receipt IN receipts
@@ -302,11 +304,11 @@ router.get('/transactions', requireAuth, async (req, res) => {
     }
 
     if (from) {
-      query += ` AND ${dateExpr} >= @from`
+      query += ` AND ${dateKey} >= @from`
       bindVars.from = from
     }
     if (to) {
-      query += ` AND ${dateExpr} <= @to`
+      query += ` AND ${dateKey} <= @to`
       bindVars.to = to
     }
     if (branch_code) {

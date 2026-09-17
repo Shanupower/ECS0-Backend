@@ -3,7 +3,7 @@ import { q } from '../config/database.js'
 import { requireAuth, requireRole, requireBranchAccess } from '../middleware/auth.js'
 import { validateBranchCode, validateEmail, validateMobile, validatePIN, validateRequired } from '../utils/validators.js'
 import { appendCategoryToFilterString, appendMfTxnTypeToFilterString } from '../utils/receipt-filters.js'
-import { effectiveDateExprAql } from '../utils/date-basis.js'
+import { effectiveDateExprAql, normalizeDateForCompareAql } from '../utils/date-basis.js'
 import { INV_AMOUNT_AQL, CC_AQL, SI_AQL } from '../utils/receipt-aggregates.js'
 
 const router = express.Router()
@@ -101,9 +101,10 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
     let dateFilter = ''
     let bindVars = {}
     const receiptDateExpr = effectiveDateExprAql(date_basis)
+    const receiptDateKey = normalizeDateForCompareAql(receiptDateExpr)
     
     if (from && to) {
-      dateFilter = `FILTER ${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`
+      dateFilter = `FILTER ${receiptDateKey} >= @from AND ${receiptDateKey} <= @to`
       bindVars.from = from
       bindVars.to = to
     }
@@ -249,8 +250,9 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
     
     // Date filter (fallback to created_at date when receipt.date is missing)
     const receiptDateExpr = effectiveDateExprAql(date_basis)
+    const receiptDateKey = normalizeDateForCompareAql(receiptDateExpr)
     if (from && to && !isNaN(Date.parse(from)) && !isNaN(Date.parse(to))) {
-      filterClause += ` AND ${receiptDateExpr} >= @from AND ${receiptDateExpr} <= @to`
+      filterClause += ` AND ${receiptDateKey} >= @from AND ${receiptDateKey} <= @to`
       bindVars.from = from
       bindVars.to = to
     }

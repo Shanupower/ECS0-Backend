@@ -29,6 +29,21 @@ export const q = async (query, bindVars = {}) => {
 // Helper function to get a collection
 export const getCollection = (name) => db.collection(name)
 
+// Helper function to ensure a collection exists
+export const ensureCollection = async (name) => {
+  const coll = db.collection(name)
+  const exists = await coll.exists()
+  if (!exists) {
+    try {
+      await coll.create()
+      console.log(`Collection '${name}' created automatically`)
+    } catch (err) {
+      if (err.errorNum !== 1207) throw err // ignore 1207 (already exists)
+    }
+  }
+  return coll
+}
+
 // Helper function to get user's branch for filtering
 export const getUserBranch = async (userId) => {
   try {

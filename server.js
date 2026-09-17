@@ -1,4 +1,4 @@
-import 'dotenv/config'
+import 'dotenv/config.js'
 import express from 'express'
 import cors from 'cors'
 
@@ -37,6 +37,7 @@ import ncdBondSchemeRoutes from './routes/ncd-bonds-schemes.js'
 import insuranceSchemeRoutes from './routes/insurance-schemes.js'
 import miscServicesSchemeRoutes from './routes/misc-services-schemes.js'
 import reportsRoutes from './routes/reports.js'
+import ccSiRulesRoutes from './routes/cc-si-rules.js'
 
 const app = express()
 
@@ -98,6 +99,7 @@ app.use('/api/ncd-bonds-schemes', ncdBondSchemeRoutes) // NCD/Bond Schemes route
 app.use('/api/insurance-schemes', insuranceSchemeRoutes) // Insurance Schemes routes
 app.use('/api/misc-services-schemes', miscServicesSchemeRoutes) // Misc Services Schemes routes
 app.use('/api/reports', reportsRoutes)
+app.use('/api/cc-si-rules', ccSiRulesRoutes)
 
 // Health endpoint for database connection
 app.get('/health', async (req, res) => {

@@ -53,6 +53,12 @@ async function setupDatabase() {
         }
       },
       {
+        name: 'cc_si_rules',
+        options: {
+          keyOptions: { type: 'traditional' }
+        }
+      },
+      {
         name: 'receipts',
         options: {
           keyOptions: { type: 'autoincrement' }

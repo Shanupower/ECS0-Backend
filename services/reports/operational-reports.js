@@ -1,5 +1,5 @@
 import { q } from '../../config/database.js'
-import { effectiveDateExprAql } from '../../utils/date-basis.js'
+import { effectiveDateExprAql, normalizeDateForCompareAql } from '../../utils/date-basis.js'
 import { CC_AQL, INV_AMOUNT_AQL, SI_AQL } from '../../utils/receipt-aggregates.js'
 import {
   BRANCH_CODE_AQL,
@@ -458,12 +458,13 @@ export async function runCashFlowReport(user, query) {
 export async function runPendingReceiptsReport(user, query) {
   const { filterConditions, bindVars } = await buildReceiptScopeFilter(user, query)
   const dateExpr = effectiveDateExprAql(query.date_basis || query.dateBasis)
+  const dateKey = normalizeDateForCompareAql(dateExpr)
   if (query.from) {
-    filterConditions.push(`${dateExpr} >= @from`)
+    filterConditions.push(`${dateKey} >= @from`)
     bindVars.from = query.from
   }
   if (query.to) {
-    filterConditions.push(`${dateExpr} <= @to`)
+    filterConditions.push(`${dateKey} <= @to`)
     bindVars.to = query.to
   }
   filterConditions.push(PENDING_RECEIPT_FILTER_AQL)

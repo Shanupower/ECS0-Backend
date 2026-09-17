@@ -12,6 +12,9 @@ assert.equal(normalizeQueryDate('2024-06-15T12:00:00Z'), '2024-06-15')
 assert.equal(normalizeQueryDate('bad'), '')
 
 assert.match(transactionDateExprAql(), /receipt\.transaction\.date/)
+assert.match(transactionDateExprAql(), /receipt\.transaction_details\.txn_date/)
+assert.match(transactionDateExprAql(), /receipt\.bond_transaction_date/)
+assert.match(transactionDateExprAql(), /receipt\.chequeDate/)
 
 ;(async () => {
   const user = { role: 'admin', sub: '1' }
