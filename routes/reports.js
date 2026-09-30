@@ -29,7 +29,9 @@ import {
   sendPdfReport,
   sendMisSummaryCsvReport,
   sendMisSummaryXlsxReport,
-  sendMisSummaryPdfReport
+  sendMisSummaryPdfReport,
+  sendNfoReportAllXlsxReport,
+  sendNfoReportAllPdfReport
 } from '../services/reports/report-export.js'
 import { runReportFilterOptions } from '../services/reports/filter-options.js'
 import {
@@ -45,6 +47,12 @@ import { runReceiptErrorsReport } from '../services/reports/receipt-errors-repor
 import { runPaymentModeReport } from '../services/reports/payment-mode-report.js'
 import { runUserLoginReport } from '../services/reports/user-login-report.js'
 import { runUserRoleAccessReport } from '../services/reports/user-role-access-report.js'
+import {
+  runNfoReport,
+  runAllNfoViews,
+  nfoReportExportHeaders,
+  nfoReportRowToArray
+} from '../services/reports/nfo-report.js'
 
 const router = express.Router()
 
@@ -83,6 +91,14 @@ const REPORT_REGISTRY = [
     description: 'MF totals grouped by scheme / fund name.',
     path: '/api/reports/mf-fund',
     icon: 'TrendingUp'
+  },
+  {
+    id: 'nfo-report',
+    title: 'NFO Report',
+    description: 'New Fund Offer scheme, fund summaries, client applications, and RM performance.',
+    path: '/api/reports/nfo-report',
+    icon: 'Flame',
+    group: 'Operational Reports'
   },
   {
     id: 'sip-report',
@@ -228,9 +244,10 @@ const fdMaturityRow = (r) => [r.receipt_date ?? '', r.maturity_date ?? '', r.pro
 const pendingHeaders = ['Receipt Number', 'Client', 'Product', 'Amount', 'Stage', 'Assigned', 'Created At', 'Days Pending', 'As Of']
 const pendingRow = (r) => [r.receipt_number ?? '', r.client_name ?? '', r.product_type ?? '', r.amount ?? 0, r.current_stage ?? '', r.assigned_to ?? '', r.created_at ?? '', r.days_pending ?? '', r.as_of ?? '']
 
-const receiptErrorsHeaders = ['Date', 'Receipt Number', 'Client ID', 'Client Name', 'PAN', 'Phone', 'Product', 'Amount', 'Reference', 'Branch', 'RM', 'Status', 'Error Types', 'Related Receipts']
+const receiptErrorsHeaders = ['Receipt Date', 'Txn Date', 'Receipt Number', 'Client ID', 'Client Name', 'PAN', 'Phone', 'Product', 'Amount', 'Reference', 'Branch', 'RM', 'Status', 'Error Types', 'Related Receipts']
 const receiptErrorsRow = (r) => [
-  r.date ?? '',
+  r.receipt_date ?? r.date ?? '',
+  r.txn_date ?? r.transaction_date ?? '',
   r.receipt_number ?? '',
   r.client_id ?? '',
   r.client_name ?? '',
@@ -238,7 +255,7 @@ const receiptErrorsRow = (r) => [
   r.client_phone ?? '',
   r.product_category ?? '',
   r.amount ?? 0,
-  r.reference_no ?? '',
+  r.payment_ref ?? r.reference_no ?? r.channel ?? '',
   r.branch_code ?? '',
   r.emp_code ?? '',
   r.status ?? '',
@@ -268,9 +285,20 @@ const paymentModeDetailRow = (r) => [
   r.status ?? ''
 ]
 
-const userLoginHeaders = ['Login At', 'Employee Code', 'Name', 'Role', 'Branch', 'Branch Code', 'Login Type', 'IP Address', 'User Agent']
+function formatExportDateTime(val) {
+  if (val == null || val === '') return ''
+  const num = typeof val === 'number' ? val : (Number(val) && !isNaN(Number(val)) ? Number(val) : null)
+  const d = num != null ? new Date(num) : new Date(String(val).trim())
+  if (Number.isNaN(d.getTime())) return String(val)
+  try {
+    return d.toISOString().replace('T', ' ').substring(0, 19)
+  } catch {
+    return String(val)
+  }
+}
+
+const userLoginHeaders = ['Employee Code', 'Name', 'Role', 'Branch', 'Branch Code', 'Login Type', 'IP Address', 'User Agent']
 const userLoginRow = (r) => [
-  r.login_at ?? '',
   r.emp_code ?? '',
   r.user_name ?? '',
   r.role ?? '',
@@ -290,8 +318,8 @@ const userRoleAccessRow = (r) => [
   r.role ?? '',
   r.branch ?? '',
   r.is_active ? 'Yes' : 'No',
-  r.created_at ?? '',
-  r.last_login_at ?? '',
+  formatExportDateTime(r.created_at),
+  formatExportDateTime(r.last_login_at),
   r.analytics_access ? 'Yes' : 'No',
   r.default_report_scope ?? '',
   r.allowed_report_filters ?? '',
@@ -438,6 +466,36 @@ router.get('/mf-fund', async (req, res) => {
     res.json({ rows })
   } catch (e) {
     console.error('[reports] mf-fund', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/nfo-report', async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const query = fmt ? exportQuery(req.reportQuery) : req.reportQuery
+    if (fmt) {
+      const { sections } = await runAllNfoViews(req.user, query)
+      const meta = exportMetaFromQuery('nfo-report', req.reportQuery)
+      if (fmt === 'xlsx') {
+        await sendNfoReportAllXlsxReport(res, 'nfo_report', sections, meta)
+        return
+      }
+      if (fmt === 'pdf') {
+        await sendNfoReportAllPdfReport(res, 'nfo_report', sections, meta)
+        return
+      }
+      const data = await runNfoReport(req.user, query)
+      const viewMode = data.view_mode || 'summary'
+      const headers = nfoReportExportHeaders(viewMode)
+      const rows = (data.rows || []).map((r) => nfoReportRowToArray(r, viewMode))
+      await sendReportRows(res, `nfo_report_${viewMode}`, headers, rows, fmt, req.reportQuery, 'nfo-report')
+      return
+    }
+    const data = await runNfoReport(req.user, query)
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] nfo-report', e)
     res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
   }
 })

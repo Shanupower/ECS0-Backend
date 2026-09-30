@@ -418,6 +418,7 @@ async function setupDatabase() {
               "renewal_bonus_bps": { "type": "number", "minimum": 0, "multipleOf": 1 },
               "tds_applicable": { "type": "boolean" },
               "show_form15g15h_option": { "type": "boolean" },
+              "show_form121_option": { "type": "boolean" },
               "is_active": { "type": "boolean" },
               "rate_slabs": {
                 "type": "array",

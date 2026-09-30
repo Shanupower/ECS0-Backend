@@ -7,6 +7,7 @@ import {
   FD_TENURE_DISPLAY_AQL,
   ISSUER_NAME_AQL,
   MIS_PERIOD_AQL,
+  SCHEME_NAME_AQL,
   SIP_END_DATE_AQL,
   SIP_IS_PERPETUAL_AQL,
   SIP_START_DATE_AQL
@@ -25,7 +26,7 @@ const TXN_TYPE_AQL = `(
 )`
 
 const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name)`
-const SCHEME_AQL = `((receipt.product != null && receipt.product.name != null) ? receipt.product.name : receipt.scheme_name)`
+const SCHEME_AQL = SCHEME_NAME_AQL
 const APP_NO_AQL = `(
   (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.application != null && receipt.product_details.fd.application.number != null)
     ? receipt.product_details.fd.application.number

@@ -24,8 +24,18 @@ export const MF_SCHEME_CATEGORY_AQL = `(
     : (receipt.scheme_category != null && receipt.scheme_category != "" ? receipt.scheme_category : "Unclassified")
 )`
 
-/** Display scheme / product name */
-export const SCHEME_NAME_AQL = `((receipt.product != null && receipt.product.name != null && receipt.product.name != "") ? receipt.product.name : (receipt.scheme_name != null ? receipt.scheme_name : ""))`
+/** Display scheme / product name (prioritizes target scheme for Switch Over & STP) */
+export const SCHEME_NAME_AQL = `(
+  (receipt.transaction != null && receipt.transaction.switch_over != null && receipt.transaction.switch_over.to_scheme_name != null && receipt.transaction.switch_over.to_scheme_name != "")
+    ? receipt.transaction.switch_over.to_scheme_name
+  : (receipt.switch_to_scheme_name != null && receipt.switch_to_scheme_name != "")
+    ? receipt.switch_to_scheme_name
+  : (receipt.transaction != null && receipt.transaction.stp != null && receipt.transaction.stp.to_scheme_name != null && receipt.transaction.stp.to_scheme_name != "")
+    ? receipt.transaction.stp.to_scheme_name
+  : (receipt.stp_target_scheme_name != null && receipt.stp_target_scheme_name != "")
+    ? receipt.stp_target_scheme_name
+  : ((receipt.product != null && receipt.product.name != null && receipt.product.name != "") ? receipt.product.name : (receipt.scheme_name != null ? receipt.scheme_name : ""))
+)`
 
 /** Issuer / AMC / company name for grouping */
 export const ISSUER_NAME_AQL = `(
@@ -153,7 +163,9 @@ export const ENTRY_MODE_AQL = `(
 export const CHANNEL_AQL = `(
   (receipt.payment != null && receipt.payment.channel != null && TO_STRING(receipt.payment.channel) != "")
     ? receipt.payment.channel
-    : ((receipt.channel != null && TO_STRING(receipt.channel) != "") ? receipt.channel : "")
+    : ((receipt.channel != null && TO_STRING(receipt.channel) != "") ? receipt.channel
+    : ((receipt.transaction_channel != null && TO_STRING(receipt.transaction_channel) != "") ? receipt.transaction_channel
+    : ((receipt.othersTransactionType != null && TO_STRING(receipt.othersTransactionType) != "") ? receipt.othersTransactionType : "")))
 )`
 
 /** Instrument type (Cheque, etc.). */

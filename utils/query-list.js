@@ -55,3 +55,7 @@ export function parseSchemeNames(query = {}) {
 export function parseInvestorIds(query = {}) {
   return parseQueryList(query, 'investor_ids', 'investor_id')
 }
+
+export function parseTxnTypes(query = {}) {
+  return parseQueryList(query, 'txn_types', 'txn_type')
+}

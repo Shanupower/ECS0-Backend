@@ -57,6 +57,8 @@ function buildReceiptOptionsFilter(query = {}, { narrowSchemesByIssuer = false, 
  * @param {object} [query]
  */
 export async function runReportFilterOptions(user = null, query = {}) {
+  const isNfo = query.is_nfo === 'true' || query.is_nfo === true || query.report_slug === 'nfo-report'
+
   let scopeConditions = []
   let scopeBindVars = {}
   if (user) {
@@ -69,6 +71,84 @@ export async function runReportFilterOptions(user = null, query = {}) {
   const issuerScope = buildReceiptOptionsFilter(query, { narrowIssuersByScheme: true, ...scopeOpts })
   const schemeScope = buildReceiptOptionsFilter(query, { narrowSchemesByIssuer: true, ...scopeOpts })
   const categoryScope = buildReceiptOptionsFilter(query, scopeOpts)
+
+  const issuerNames = parseIssuerNames(query).map((s) => String(s).trim().toLowerCase())
+
+  if (isNfo) {
+    const nfoFilterAql = `
+      LET nfoSchemeCodes = (
+        FOR s IN mf_schemes
+        FILTER s.is_nfo == true
+        RETURN TO_STRING(s.scheme_code)
+      )
+      FILTER (
+        receipt.scheme_is_nfo == true
+        OR (receipt.product_details != null && receipt.product_details.mf != null && receipt.product_details.mf.scheme != null && receipt.product_details.mf.scheme.is_nfo == true)
+        OR receipt.is_nfo == true
+        OR (receipt.scheme_code != null && TO_STRING(receipt.scheme_code) IN nfoSchemeCodes)
+        OR (receipt.scheme_name != null && LIKE(TO_STRING(receipt.scheme_name), "%[NFO]%"))
+        OR (receipt.scheme_name != null && LIKE(TO_STRING(receipt.scheme_name), "% NFO %"))
+      )
+    `
+
+    const [schemeAmcs, receiptAmcs, mfNfoSchemes, receiptNfoSchemes] = await Promise.all([
+      q(`
+        FOR s IN mf_schemes
+        FILTER s.is_nfo == true && s.amc_name != null && TO_STRING(s.amc_name) != ""
+        COLLECT amc = TRIM(TO_STRING(s.amc_name))
+        RETURN amc
+      `),
+      q(`
+        FOR receipt IN receipts
+        ${issuerScope.filterClause}
+        ${nfoFilterAql}
+        LET issuer = ${ISSUER_NAME_AQL}
+        FILTER issuer != null && TO_STRING(issuer) != ""
+        COLLECT name = TRIM(TO_STRING(issuer))
+        RETURN name
+      `, issuerScope.bindVars),
+      q(`
+        FOR s IN mf_schemes
+        FILTER s.is_nfo == true
+        ${issuerNames.length > 0 ? 'FILTER LOWER(TRIM(TO_STRING(s.amc_name))) IN @issuer_names' : ''}
+        LET name = s.display_name != null && s.display_name != "" ? s.display_name : s.scheme_name
+        FILTER name != null && TO_STRING(name) != ""
+        COLLECT sname = TRIM(TO_STRING(name))
+        RETURN sname
+      `, issuerNames.length > 0 ? { issuer_names: issuerNames } : {}),
+      q(`
+        FOR receipt IN receipts
+        ${schemeScope.filterClause}
+        ${nfoFilterAql}
+        LET scheme = ${SCHEME_NAME_AQL}
+        FILTER scheme != null && TO_STRING(scheme) != ""
+        COLLECT name = TRIM(TO_STRING(scheme))
+        RETURN name
+      `, schemeScope.bindVars)
+    ])
+
+    const seenIssuers = new Set()
+    const issuers = []
+    for (const raw of [...(schemeAmcs || []), ...(receiptAmcs || [])]) {
+      const name = String(raw ?? '').trim()
+      if (!name || seenIssuers.has(name)) continue
+      seenIssuers.add(name)
+      issuers.push(name)
+    }
+    issuers.sort((a, b) => a.localeCompare(b))
+
+    const seenSchemes = new Set()
+    const scheme_names = []
+    for (const raw of [...(mfNfoSchemes || []), ...(receiptNfoSchemes || [])]) {
+      const name = String(raw ?? '').trim()
+      if (!name || seenSchemes.has(name)) continue
+      seenSchemes.add(name)
+      scheme_names.push(name)
+    }
+    scheme_names.sort((a, b) => a.localeCompare(b))
+
+    return { scheme_categories: ['Mutual Fund'], issuer_names: issuers, scheme_names }
+  }
 
   const fromSchemes = await q(`
     FOR scheme IN mf_schemes

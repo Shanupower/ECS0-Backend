@@ -55,7 +55,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     if (!d || typeof d !== 'object') {
       d = {}
     }
-    const today = new Date().toISOString().slice(0,10)
+    const today = new Date().toISOString().slice(0, 10)
 
     // Validate required fields
     const receiptNoValidation = validateRequired(d.receiptNo || d.receipt_no, 'Receipt number')
@@ -72,8 +72,8 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     // Validate investment amount if provided
     if (d.investmentAmount || d.investment_amount || d.amount) {
       const amountValidation = validatePositiveNumber(
-        d.investmentAmount || d.investment_amount || d.amount, 
-        'Investment amount', 
+        d.investmentAmount || d.investment_amount || d.amount,
+        'Investment amount',
         false
       )
       if (!amountValidation.valid) {
@@ -92,7 +92,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
 
     // Validate product category specific fields
     const productCategory = d.product_category || d.productCategory
-    
+
     if (productCategory === 'MF') {
       // Mutual Fund validations
       if (!d.schemeName && !d.scheme_name) {
@@ -164,12 +164,12 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     let ccSiRuleId = null
     let ccSiRuleLabel = null
 
-    // For MISC, use service_price; for others, use investment_amount or fd_deposit_amount
-    const investmentAmount = productCategory === 'MISC' 
+    // For MISC, use service_price; for others, use investment_amount, fd_deposit_amount, or bond_investment_amount
+    const investmentAmount = productCategory === 'MISC'
       ? parseFloat(d.service_price || d.servicePrice || d.investmentAmount || d.investment_amount || d.amount || 0)
-      : parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || 0)
-    
-    const txnTypeRaw = (d.txn_type || d.txnType || d.fd_transaction_type || d.transaction_type || d.transactionType || d.mode || '').toString().trim()
+      : parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || d.bond_investment_amount || d.bondInvestmentAmount || (d.product_details?.bond?.transaction?.amount) || 0)
+
+    const txnTypeRaw = (d.txn_type || d.txnType || d.fd_transaction_type || d.bond_transaction_type || d.transaction_type || d.transactionType || d.mode || '').toString().trim()
     const isSipTxn = txnTypeRaw.toUpperCase() === 'SIP' || !!(d.sip_frequency || d.sip_start_date)
 
     // Check if explicit CC/SI values were provided in the frontend payload
@@ -228,28 +228,15 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
               LIMIT 1
               RETURN { cc: scheme.cc || 0, si: scheme.si || 0 }
             `, { scheme_code: schemeCodeForCcSi })
-            
+
             if (mfSchemes.length > 0) {
               const scheme = mfSchemes[0]
               const ccPercent = parseFloat(scheme.cc || 0)
               const siPercent = parseFloat(scheme.si || 0)
-              collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
-              serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100 // Round to 2 decimal places
-
-              // Switch Over: earn CC on the switch only when target scheme CC% is higher than source scheme CC%
-              const fromCode = d.switch_from_scheme_code
-              if (fromCode && schemeCodeForCcSi && String(fromCode) !== String(schemeCodeForCcSi)) {
-                const srcRows = await q(`
-                  FOR s IN mf_schemes
-                    FILTER s.scheme_code == @code
-                    LIMIT 1
-                    RETURN TO_NUMBER(s.cc || 0)
-                `, { code: fromCode })
-                const srcCcPct = srcRows.length ? parseFloat(srcRows[0]) : 0
-                if (!(ccPercent > srcCcPct)) {
-                  collectionCredit = 0
-                }
-              }
+              // Use target scheme CC% directly for Switch Over & STP
+              collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100
+              serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100
+              ccSiRuleLabel = `Target Scheme: ${schemeCodeForCcSi} (${ccPercent}% CC, ${siPercent}% SI)`
             }
           }
         } else if (productCategory === 'FD' && d.fd_issuer_key && d.fd_scheme_id) {
@@ -261,7 +248,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
             LIMIT 1
             RETURN issuer
           `, { issuer_key: d.fd_issuer_key })
-          
+
           if (fdIssuers.length > 0) {
             const issuer = fdIssuers[0]
             const scheme = issuer.schemes?.find(s => s.scheme_id === d.fd_scheme_id)
@@ -320,7 +307,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
             LIMIT 1
             RETURN issuer
           `, { insurance_issuer_key: d.insurance_issuer_key })
-          
+
           if (insuranceIssuers.length > 0) {
             const issuer = insuranceIssuers[0]
             const product = issuer.products?.find(p => p.product_id === d.insurance_product_id)
@@ -366,23 +353,69 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
             LIMIT 1
             RETURN scheme
           `)
-          
+
           if (miscSchemes.length > 0 && miscSchemes[0].price_ranges && miscSchemes[0].price_ranges.length > 0) {
             const scheme = miscSchemes[0]
             const servicePrice = parseFloat(d.service_price || d.servicePrice || investmentAmount)
-            
+
             // Find matching price range
             const matchingRange = scheme.price_ranges.find(range => {
               const minPrice = parseFloat(range.min_price)
               const maxPrice = parseFloat(range.max_price)
               return servicePrice >= minPrice && servicePrice <= maxPrice
             })
-            
+
             if (matchingRange) {
               const ccPercent = parseFloat(matchingRange.cc || 0)
               const siPercent = parseFloat(matchingRange.si || 0)
               collectionCredit = Math.round(((ccPercent / 100) * servicePrice) * 100) / 100 // Round to 2 decimal places
               serviceIncome = Math.round(((siPercent / 100) * servicePrice) * 100) / 100 // Round to 2 decimal places
+            }
+          }
+        } else if ((productCategory === 'BOND' || productCategory === 'NCD') && (d.bond_issuer_key || d.issuer_key || d.bond_scheme_id || d.scheme_id || d.bond_scheme_name || d.scheme_name || d.schemeName)) {
+          // Fetch Bond/NCD issuer/scheme to get CC and SI percentages
+          const issuerKey = d.bond_issuer_key || d.issuer_key
+          const schemeId = d.bond_scheme_id || d.scheme_id
+          const schemeName = d.bond_scheme_name || d.scheme_name || d.schemeName
+
+          let issuers = []
+          if (issuerKey) {
+            issuers = await q(`
+              FOR issuer IN ncd_bond_issuers
+              FILTER issuer._key == @issuer_key
+              LIMIT 1
+              RETURN issuer
+            `, { issuer_key: issuerKey })
+          } else {
+            issuers = await q(`
+              FOR issuer IN ncd_bond_issuers
+              FILTER (issuer.schemes != null AND (
+                issuer.schemes[*].scheme_id ANY == @scheme_id OR 
+                issuer.schemes[*].scheme_name ANY == @scheme_name
+              ))
+              LIMIT 1
+              RETURN issuer
+            `, { scheme_id: schemeId || '', scheme_name: schemeName || '' })
+          }
+
+          if (issuers.length > 0) {
+            const issuer = issuers[0]
+            const scheme = (issuer.schemes || []).find(s => 
+              (schemeId && String(s.scheme_id) === String(schemeId)) || 
+              (schemeName && (s.scheme_name === schemeName || s.description_short === schemeName))
+            )
+            if (scheme) {
+              const ccPercent = parseFloat(scheme.cc || 0)
+              const siPercent = parseFloat(scheme.si || 0)
+              if (!Number.isNaN(ccPercent) && ccPercent !== 0) {
+                collectionCredit = Math.round(((ccPercent / 100) * investmentAmount) * 100) / 100
+              }
+              if (!Number.isNaN(siPercent) && siPercent !== 0) {
+                serviceIncome = Math.round(((siPercent / 100) * investmentAmount) * 100) / 100
+              }
+              if (ccPercent > 0 || siPercent > 0) {
+                ccSiRuleLabel = `Bond Scheme: ${scheme.scheme_name || scheme.scheme_id} (${ccPercent}% CC, ${siPercent}% SI)`
+              }
             }
           }
         }
@@ -394,14 +427,14 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     // ============================================
     // BUILD STRUCTURED RECEIPT SCHEMA
     // ============================================
-    
+
     // Employee Information
     const employee = {
       code: d.empCode || d.emp_code || null,
       name: d.employeeName || d.employee_name || null,
       branch: d.branch || null
     }
-    
+
     // Investor Information
     const investorAddress = d.investorAddress || d.investor_address || ''
     const addressParts = investorAddress.split('\n').filter(Boolean)
@@ -421,18 +454,18 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       email: d.email || null,
       mobile: d.mobile || null
     }
-    
+
     // Product Information
     const product = {
       category: productCategory || null,
-      name: productCategory === 'MISC' 
+      name: productCategory === 'MISC'
         ? (d.service_name || d.serviceName || null)
         : (d.schemeName || d.scheme_name || d.fd_scheme_name || null),
       option: d.schemeOption || d.scheme_option || null,
       folio_number: d.folio_number || d.folioNumber || null,
       has_existing_folio: d.has_existing_folio !== undefined ? d.has_existing_folio : (d.hasExistingFolio !== undefined ? d.hasExistingFolio : null)
     }
-    
+
     const txnTypeForMode =
       d.txnType || d.txn_type || d.transaction_type || d.transactionType || null
 
@@ -454,12 +487,15 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       return v
     }
 
+    const isStpTxn = (d.txnType || d.txn_type || d.transaction_type || '') === 'STP' || Boolean(d.stp_frequency || d.stp_original_amount || d.stp_amount)
+    const effectiveTxnAmount = (isStpTxn && d.stp_original_amount) ? d.stp_original_amount : (investmentAmount || null)
+
     // Transaction Details (mode is MF-only; FD/INS/BOND do not use mode)
     const transaction = {
       type: d.txnType || d.txn_type || d.fd_transaction_type || d.transaction_type || 'Fresh',
       // `mode` is deprecated. MF behaviour is determined via `txn_type` (+ sip/swp/stp frequency fields).
       mode: null,
-      amount: investmentAmount || null,
+      amount: effectiveTxnAmount,
       units_or_amount: d.unitsOrAmount || d.units_or_amount || null,
       date: date || null,
       from_text: d.from || d.from_text || null,
@@ -467,9 +503,9 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       period_installments: d.period_installments || d.sip_stp_swp_period || null,
       installments_count: d.noOfInstallments || d.installments_count || null
     }
-    
+
     // SIP Details
-    if (transaction.mode === 'SIP' || d.sip_frequency) {
+    if (transaction.type === 'SIP' || transaction.mode === 'SIP' || d.sip_frequency) {
       transaction.sip = {
         frequency: d.sip_frequency || null,
         start_date: d.sip_start_date || null,
@@ -477,18 +513,18 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         is_perpetual: d.sip_is_perpetual !== undefined ? d.sip_is_perpetual : false
       }
     }
-    
+
     // SWP Details
-    if (transaction.mode === 'SWP' || d.swp_frequency) {
+    if (transaction.type === 'SWP' || transaction.mode === 'SWP' || d.swp_frequency) {
       transaction.swp = {
         frequency: d.swp_frequency || null,
         start_date: d.swp_start_date || null,
         amount: d.swp_amount || null
       }
     }
-    
+
     // STP Details
-    if (transaction.mode === 'STP' || d.stp_frequency) {
+    if (transaction.type === 'STP' || transaction.mode === 'STP' || d.stp_frequency || d.stp_original_amount || d.stp_amount) {
       transaction.stp = {
         // Source = selected receipt scheme, Target = selected STP target scheme
         from_scheme_code: d.scheme_code || null,
@@ -501,7 +537,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         original_amount: d.stp_original_amount || null
       }
     }
-    
+
     // Switch Over Details
     if (transaction.type === 'Switch Over' || d.switch_from_scheme_code) {
       transaction.switch_over = {
@@ -513,10 +549,10 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         value: d.switch_value || null
       }
     }
-    
+
     // Product-Specific Details
     const productDetails = {}
-    
+
     // MF Details
     if (productCategory === 'MF') {
       const validMfAmcCategories = ['MF', 'SIF', 'PMS', 'AIF', 'GIFT_CITY_FUNDS']
@@ -540,7 +576,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         }
       }
     }
-    
+
     // FD Details
     if (productCategory === 'FD') {
       const fdTenureUnit = normalizeTenureUnit(d.fd_tenure_unit)
@@ -582,7 +618,8 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         },
         tax: {
           tds_applicable: d.fd_tds_applicable !== undefined ? d.fd_tds_applicable : null,
-          form_15g_15h: d.fd_form_15g_15h !== undefined ? d.fd_form_15g_15h : null
+          form_121: d.fd_form_121 !== undefined ? d.fd_form_121 : (d.fd_form_15g_15h !== undefined ? d.fd_form_15g_15h : null),
+          form_15g_15h: d.fd_form_121 !== undefined ? d.fd_form_121 : (d.fd_form_15g_15h !== undefined ? d.fd_form_15g_15h : null)
         },
         application: {
           number: d.fd_application_number || null,
@@ -594,7 +631,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         }
       }
     }
-    
+
     // Insurance Details
     if (productCategory === 'INS') {
       const policyPeriodRaw = d.insurance_policy_period ?? d.insurancePolicyPeriod ?? null
@@ -637,7 +674,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         coverage_details: d.insurance_coverage_details || null
       }
     }
-    
+
     // Misc Services Details
     if (productCategory === 'MISC') {
       const servicePrice = parseFloat(d.service_price || d.servicePrice || investmentAmount)
@@ -646,7 +683,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         service_price: servicePrice || null
       }
     }
-    
+
     // Bond/NCD Details
     if (productCategory === 'BOND' || productCategory === 'NCD') {
       productDetails.bond = {
@@ -679,11 +716,12 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
           number: d.bond_application_number || null
         },
         tax: {
-          form_15g_15h: d.bond_form_15g_15h || null
+          form_121: d.bond_form_121 || d.bond_form_15g_15h || null,
+          form_15g_15h: d.bond_form_121 || d.bond_form_15g_15h || null
         }
       }
     }
-    
+
     // Payment Information – build from both transaction_details and top-level flat fields so we never lose Online/Offline/Others data
     const td = d.transaction_details && typeof d.transaction_details === 'object' ? d.transaction_details : {}
 
@@ -741,7 +779,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       account_last4: td.account_last4 ?? d.account_last4 ?? null,
       notes: notes
     }
-    
+
     // Calculations
     const calculations = {
       collection_credit: collectionCredit,
@@ -754,7 +792,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       cc: collectionCredit,
       si: serviceIncome
     }
-    
+
     // Legacy nested structures (for backward compatibility)
     const mfDetails = productCategory === 'MF' ? {
       amc_code: d.amc_code || null,
@@ -795,7 +833,8 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       application_number: d.fd_application_number || null,
       deposit_date: d.fd_deposit_date || null,
       tds_applicable: d.fd_tds_applicable || null,
-      form_15g_15h: d.fd_form_15g_15h || null,
+      form_121: d.fd_form_121 || d.fd_form_15g_15h || null,
+      form_15g_15h: d.fd_form_121 || d.fd_form_15g_15h || null,
       transaction_type: d.fd_transaction_type || null,
       renewal_investment_type: d.fd_renewal_investment_type || null,
       renewal_additional_amount: d.fd_renewal_additional_amount || null
@@ -872,7 +911,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
       // Import PDF generation function dynamically
       const pdfModule = await import('./receipt-pdf.js')
       const pdfBuffer = await pdfModule.generateReceiptPDF(receiptDoc)
-      
+
       // Store PDF in database
       await getCollection('receipts').update(receiptId, {
         pdf_data: pdfBuffer.toString('base64'),
@@ -923,7 +962,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
     })
   } catch (e) {
     console.error('Insert failed:', e)
-    
+
     // Clean up uploaded files if database insert fails
     if (req.files) {
       req.files.forEach(file => {
@@ -934,7 +973,7 @@ router.post('/', requireAuth, uploadMultiple, async (req, res) => {
         }
       })
     }
-    
+
     res.status(400).json({ error: 'save_failed', detail: e.code || e.message || String(e) })
   }
 })
@@ -990,7 +1029,8 @@ function withNormalizedDetails(receipt) {
       application_number: normalized.fd_application_number || null,
       deposit_date: normalized.fd_deposit_date || null,
       tds_applicable: normalized.fd_tds_applicable || null,
-      form_15g_15h: normalized.fd_form_15g_15h || null,
+      form_121: normalized.fd_form_121 || normalized.fd_form_15g_15h || null,
+      form_15g_15h: normalized.fd_form_121 || normalized.fd_form_15g_15h || null,
       transaction_type: normalized.fd_transaction_type || normalized.txn_type || null,
       renewal_investment_type: normalized.fd_renewal_investment_type || null,
       renewal_additional_amount: normalized.fd_renewal_additional_amount || null
@@ -1057,7 +1097,7 @@ router.get('/recent', requireAuth, async (req, res) => {
   try {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '10', 10)))
     let filterConditions = ['receipt.is_deleted == false']
-    const bindVars = { }
+    const bindVars = {}
 
     if (req.user.role === 'employee') {
       filterConditions.push('receipt.user_id == @user_id')
@@ -1100,6 +1140,7 @@ router.get('/check-duplicate', requireAuth, async (req, res) => {
       product_category,
       investment_amount,
       date,
+      payment_ref,
       scheme_code,
       scheme_name,
       issuer_company,
@@ -1125,11 +1166,27 @@ router.get('/check-duplicate', requireAuth, async (req, res) => {
 
     const filterConditions = [
       'receipt.is_deleted == false',
+      'receipt.is_verified_non_duplicate != true',
       '((receipt.investor != null && receipt.investor.id == @investor_id) OR receipt.investor_id == @investor_id)',
       '((receipt.product != null && receipt.product.category == @product_category) OR receipt.product_category == @product_category)',
       'receipt.date == @date',
       'ABS((TO_NUMBER(receipt.transaction.amount) != null ? TO_NUMBER(receipt.transaction.amount) : (TO_NUMBER(receipt.investment_amount) != null ? TO_NUMBER(receipt.investment_amount) : (TO_NUMBER(receipt.fd_deposit_amount) || 0))) - @investment_amount) <= 1'
     ]
+
+    if (payment_ref && String(payment_ref).trim() !== '') {
+      bindVars.new_pmt_ref = String(payment_ref).trim().toLowerCase()
+      filterConditions.push(`(
+        LET exist_ref = LOWER(TRIM((
+          (receipt.payment != null && receipt.payment.reference_no != null && receipt.payment.reference_no != "") ? receipt.payment.reference_no
+          : (receipt.reference_no != null && receipt.reference_no != "") ? receipt.reference_no
+          : (receipt.instrument_no != null && receipt.instrument_no != "") ? receipt.instrument_no
+          : (receipt.cheque_number != null && receipt.cheque_number != "") ? receipt.cheque_number
+          : (receipt.chequeNumber != null && receipt.chequeNumber != "") ? receipt.chequeNumber
+          : ""
+        )))
+        (exist_ref == "" OR exist_ref == @new_pmt_ref)
+      )`)
+    }
 
     if (scheme_code) {
       filterConditions.push('receipt.scheme_code == @scheme_code')
@@ -1406,11 +1463,11 @@ router.get('/', requireAuth, async (req, res) => {
         : (orderBy === 'date' ? dateExpr : `receipt.${orderBy}`)
 
     const numLimit = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
-    const numPage  = Math.max(1, parseInt(page, 10) || 1)
+    const numPage = Math.max(1, parseInt(page, 10) || 1)
     const numOffset = (numPage - 1) * numLimit
 
     let filterClause = ''
-    let bindVars = { }
+    let bindVars = {}
     let filterConditions = []
 
     // safe date filter (only if both provided and valid)
@@ -1526,7 +1583,7 @@ router.get('/', requireAuth, async (req, res) => {
       COLLECT WITH COUNT INTO total
       RETURN total
     `
-    
+
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
 
@@ -1540,7 +1597,7 @@ router.get('/', requireAuth, async (req, res) => {
     const sanitized = rows.map((r) => normalizeReceiptCategory(stripSIForNonAdmin(req.user, withNormalizedDetails(r))))
 
     res.json({ page: numPage, size: numLimit, total, items: sanitized })
- 
+
   } catch (err) {
     console.error('Error fetching receipts:', err)
     res.status(500).json({ error: 'server_error', detail: err.message })
@@ -1585,7 +1642,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
     const orderExpr = orderBy === 'amount' ? effectiveAmountExpr : `receipt.${orderBy}`
 
     const numLimit = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
-    const numPage  = Math.max(1, parseInt(page, 10) || 1)
+    const numPage = Math.max(1, parseInt(page, 10) || 1)
     const numOffset = (numPage - 1) * numLimit
 
     let filterClause = ''
@@ -1656,7 +1713,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
       COLLECT WITH COUNT INTO total
       RETURN total
     `
-    
+
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
 
@@ -1680,7 +1737,7 @@ router.get('/emp/:empCode', requireAuth, async (req, res) => {
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const id = req.params.id
-    
+
     // Get receipt with media count
     const receiptRows = await q(`
       FOR receipt IN receipts
@@ -1690,11 +1747,11 @@ router.get('/:id', requireAuth, async (req, res) => {
         media_count: LENGTH(receipt.files || [])
       })
     `, { id })
-    
+
     if (!receiptRows.length) return res.status(404).json({ error: 'not_found' })
-    
+
     const receipt = normalizeReceiptCategory(stripSIForNonAdmin(req.user, withNormalizedDetails(receiptRows[0])))
-    
+
     // Get media files if requested
     const includeMedia = req.query.include_media === 'true'
     if (includeMedia) {
@@ -1712,7 +1769,7 @@ router.get('/:id', requireAuth, async (req, res) => {
             acc[user.id] = user.name
             return acc
           }, {})
-          
+
           receipt.media_files = filesData.map(file => ({
             ...file,
             uploaded_by_name: userMap[file.uploaded_by] || 'Unknown'
@@ -1725,7 +1782,7 @@ router.get('/:id', requireAuth, async (req, res) => {
         receipt.media_files = []
       }
     }
-    
+
     res.json(receipt)
   } catch (error) {
     console.error('Error fetching receipt:', error)
@@ -1743,7 +1800,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
     RETURN { id: receipt._key, user_id: receipt.user_id, emp_code: receipt.emp_code, status: receipt.status, product_category: receipt.product_category, receipt }
   `, { id })
   if (!own.length) return res.status(404).json({ error: 'not_found' })
-  
+
   const currentStatus = own[0].status || 'Pending'
   // Newer receipts store category under nested `product.category` (and may not have legacy `product_category`).
   // For edit-sync logic (FD deposit amount), resolve category from either location.
@@ -1772,21 +1829,21 @@ router.patch('/:id', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'forbidden', detail: 'Only admins, owners, or pending receipts can be edited' })
     }
   }
-  
+
   const allowed = [
-    'date','branch','scheme_name','scheme_option','investment_amount','folio_policy_no','mode',
-    'period_installments','installments_count','txn_type','from_text','to_text','units_or_amount',
-    'fd_type','client_type','deposit_period_ym','roi_percent','interest_payable','interest_frequency',
-    'instrument_type','instrument_no','instrument_date','bank_name','bank_branch','fdr_demat_policy',
-    'renewal_due_date','maturity_amount','renewal_amount','issuer_company','issuer_category','product_category',
-    'collection_credit','cc','service_income','si', // Allow manual updates to CC/SI if needed
-    'switch_from_scheme_code','switch_from_scheme_name','switch_to_scheme_code','switch_to_scheme_name','switch_type','switch_value',
-    'stp_target_scheme_name','stp_target_scheme_code',
-    'transaction_details','entry_mode','transaction_channel','transaction_reference_no','txn_date','account_last4','transaction_notes',
-    'insurance_date_of_issue','insurance_renewal_date','insurance_policy_period',
-    'fd_maturity_date','bond_issue_date','bond_maturity_date','bond_tenure_months',
+    'date', 'branch', 'scheme_name', 'scheme_option', 'investment_amount', 'folio_policy_no', 'mode',
+    'period_installments', 'installments_count', 'txn_type', 'from_text', 'to_text', 'units_or_amount',
+    'fd_type', 'client_type', 'deposit_period_ym', 'roi_percent', 'interest_payable', 'interest_frequency',
+    'instrument_type', 'instrument_no', 'instrument_date', 'bank_name', 'bank_branch', 'fdr_demat_policy',
+    'renewal_due_date', 'maturity_amount', 'renewal_amount', 'issuer_company', 'issuer_category', 'product_category',
+    'collection_credit', 'cc', 'service_income', 'si', // Allow manual updates to CC/SI if needed
+    'switch_from_scheme_code', 'switch_from_scheme_name', 'switch_to_scheme_code', 'switch_to_scheme_name', 'switch_type', 'switch_value',
+    'stp_target_scheme_name', 'stp_target_scheme_code',
+    'transaction_details', 'entry_mode', 'transaction_channel', 'transaction_reference_no', 'txn_date', 'account_last4', 'transaction_notes',
+    'insurance_date_of_issue', 'insurance_renewal_date', 'insurance_policy_period',
+    'fd_maturity_date', 'bond_issue_date', 'bond_maturity_date', 'bond_tenure_months',
     'fd_transaction_type', // Fresh or Renewal for FD receipts
-    'rejection_remark','rejected_at','rejected_by' // Rejection fields for failed transactions
+    'rejection_remark', 'rejected_at', 'rejected_by' // Rejection fields for failed transactions
   ]
   const d = req.body || {}
   const updates = {}
@@ -1802,9 +1859,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
   // Admins can always edit; other users can only edit when status is Pending
   if (currentStatus !== 'Pending' && req.user?.role !== 'admin') {
     const transactionKeys = [
-      'mode','txn_type','from_text','to_text','units_or_amount',
-      'instrument_type','instrument_no','instrument_date','bank_name','bank_branch',
-      'transaction_details','entry_mode','transaction_channel','transaction_reference_no','txn_date','account_last4','transaction_notes'
+      'mode', 'txn_type', 'from_text', 'to_text', 'units_or_amount',
+      'instrument_type', 'instrument_no', 'instrument_date', 'bank_name', 'bank_branch',
+      'transaction_details', 'entry_mode', 'transaction_channel', 'transaction_reference_no', 'txn_date', 'account_last4', 'transaction_notes'
     ]
     const attemptingTxnUpdate = transactionKeys.some(key => Object.prototype.hasOwnProperty.call(updates, key))
     if (attemptingTxnUpdate) {
@@ -1866,6 +1923,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
       // Invalidate cached PDF so next download reflects edited deposit amount.
       updates.pdf_data = null
     }
+    updates.amount = Number.isFinite(numericAmount) ? numericAmount : d.investment_amount
   }
 
   if (hasOwn('txn_type')) {
@@ -1898,6 +1956,49 @@ router.patch('/:id', requireAuth, async (req, res) => {
     updates.product = {
       ...currentProduct,
       name: d.scheme_name ?? null
+    }
+    const currentPd = (updates.product_details && typeof updates.product_details === 'object')
+      ? updates.product_details
+      : ((existingReceipt.product_details && typeof existingReceipt.product_details === 'object') ? existingReceipt.product_details : {})
+    if (currentPd.mf && typeof currentPd.mf === 'object') {
+      const currentMf = currentPd.mf || {}
+      const currentScheme = (currentMf.scheme && typeof currentMf.scheme === 'object') ? currentMf.scheme : {}
+      updates.product_details = {
+        ...currentPd,
+        mf: {
+          ...currentMf,
+          scheme: {
+            ...currentScheme,
+            name: d.scheme_name ?? null
+          }
+        }
+      }
+    }
+  }
+
+  if (hasOwn('folio_policy_no')) {
+    const appVal = d.folio_policy_no || null
+    updates.folio_policy_no = appVal
+    updates.fd_application_number = appVal
+    updates.insurance_policy_number = appVal
+    updates.bond_application_number = appVal
+
+    const currentPd = (updates.product_details && typeof updates.product_details === 'object')
+      ? updates.product_details
+      : ((existingReceipt.product_details && typeof existingReceipt.product_details === 'object') ? existingReceipt.product_details : {})
+    if (currentPd.fd && typeof currentPd.fd === 'object') {
+      const currentFd = currentPd.fd || {}
+      const currentApp = (currentFd.application && typeof currentFd.application === 'object') ? currentFd.application : {}
+      updates.product_details = {
+        ...currentPd,
+        fd: {
+          ...currentFd,
+          application: {
+            ...currentApp,
+            number: appVal
+          }
+        }
+      }
     }
   }
 
@@ -1999,7 +2100,87 @@ router.patch('/:id', requireAuth, async (req, res) => {
     updates.bond_tenure_months = Number.isFinite(tm) ? tm : null
     updates.pdf_data = null
   }
-  
+
+  // Dynamically recalculate Collection Credit (CC) and Service Income (SI) if relevant fields changed
+  const ccSiFieldTouched = ['investment_amount', 'amount', 'product_category', 'scheme_name', 'txn_type', 'date'].some(hasOwn)
+  const explicitCC = d.collection_credit ?? d.cc_amount ?? d.cc
+  const explicitSI = d.service_income ?? d.si_amount ?? d.si
+  const hasExplicitCC = explicitCC !== undefined && explicitCC !== null && explicitCC !== '' && !isNaN(Number(explicitCC))
+  const hasExplicitSI = explicitSI !== undefined && explicitSI !== null && explicitSI !== '' && !isNaN(Number(explicitSI))
+
+  if (hasExplicitCC) {
+    const numCC = Number(explicitCC)
+    updates.collection_credit = numCC
+    updates.cc_amount = numCC
+    updates.total_cc = numCC + (Number(existingReceipt.additional_cc) || 0)
+  }
+  if (hasExplicitSI) {
+    const numSI = Number(explicitSI)
+    updates.service_income = numSI
+    updates.si_amount = numSI
+    updates.total_si = numSI + (Number(existingReceipt.additional_si) || 0)
+  }
+
+  if (ccSiFieldTouched && (!hasExplicitCC || !hasExplicitSI)) {
+    try {
+      const newAmt = Number(updates.investment_amount ?? updates.amount ?? d.investment_amount ?? d.amount ?? 0)
+      const oldAmt = Number(existingReceipt.investment_amount ?? existingReceipt.amount ?? existingReceipt.transaction?.amount ?? 0)
+
+      const mergedForEval = {
+        ...existingReceipt,
+        ...updates,
+        investment_amount: newAmt > 0 ? newAmt : oldAmt,
+        amount: newAmt > 0 ? newAmt : oldAmt,
+        investmentAmount: newAmt > 0 ? newAmt : oldAmt,
+        stp_original_amount: newAmt > 0 ? newAmt : (existingReceipt.stp_original_amount ?? null),
+        stp_amount: newAmt > 0 ? newAmt : (existingReceipt.stp_amount ?? null),
+        switch_value: newAmt > 0 ? newAmt : (existingReceipt.switch_value ?? null),
+        switch_amount: newAmt > 0 ? newAmt : (existingReceipt.switch_amount ?? null),
+        product_category: updates.product_category ?? existingReceipt.product_category ?? '',
+        date: updates.date ?? existingReceipt.date ?? ''
+      }
+      const evaluated = await evaluateReceiptCCSI(mergedForEval)
+
+      let calcCC = evaluated?.cc_amount != null ? Number(evaluated.cc_amount) : 0
+      let calcSI = evaluated?.si_amount != null ? Number(evaluated.si_amount) : 0
+      let ruleId = evaluated?.rule_id || null
+      let ruleLabel = evaluated?.rule_label || null
+
+      // Proportional fallback: if rule engine returned 0 CC/SI but the receipt previously had CC/SI & old amount > 0
+      const evalAmt = newAmt > 0 ? newAmt : oldAmt
+      if (calcCC === 0 && !hasExplicitCC && oldAmt > 0 && (Number(existingReceipt.collection_credit) > 0 || Number(existingReceipt.cc_amount) > 0)) {
+        const oldCC = Number(existingReceipt.collection_credit ?? existingReceipt.cc_amount ?? 0)
+        const oldRatio = oldCC / oldAmt
+        calcCC = Math.round((evalAmt * oldRatio) * 100) / 100
+        ruleLabel = `Proportional (${(oldRatio * 100).toFixed(2)}%)`
+      }
+      if (calcSI === 0 && !hasExplicitSI && oldAmt > 0 && (Number(existingReceipt.service_income) > 0 || Number(existingReceipt.si_amount) > 0)) {
+        const oldSI = Number(existingReceipt.service_income ?? existingReceipt.si_amount ?? 0)
+        const oldRatio = oldSI / oldAmt
+        calcSI = Math.round((evalAmt * oldRatio) * 100) / 100
+      }
+
+      if (!hasExplicitCC) {
+        updates.collection_credit = calcCC
+        updates.cc_amount = calcCC
+        updates.total_cc = calcCC + (Number(existingReceipt.additional_cc) || 0)
+      }
+      if (!hasExplicitSI) {
+        updates.service_income = calcSI
+        updates.si_amount = calcSI
+        updates.total_si = calcSI + (Number(existingReceipt.additional_si) || 0)
+      }
+      if (ruleId) updates.cc_si_rule_id = ruleId
+      if (ruleLabel) updates.cc_si_rule_label = ruleLabel
+    } catch (evalErr) {
+      console.warn('Failed to re-evaluate CC/SI on patch update:', evalErr.message)
+    }
+  }
+
+  // Invalidate cached PDF on any edit so the next view/download generates a fresh PDF with updated fields
+  updates.pdf_data = null
+  updates.pdf_generated_at = null
+
   await q(`
     FOR receipt IN receipts
     FILTER receipt._key == @id
@@ -2320,7 +2501,7 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
       receipt_id: id,
       new_status: status
     })
-    
+
   } catch (error) {
     console.error('Error updating receipt status:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })
@@ -2367,12 +2548,14 @@ const updateReceiptHandler = async (req, res) => {
     const hasExplicitCC = explicitCC !== undefined && explicitCC !== null && explicitCC !== '' && !isNaN(Number(explicitCC))
     const hasExplicitSI = explicitSI !== undefined && explicitSI !== null && explicitSI !== '' && !isNaN(Number(explicitSI))
 
+    const updateInvAmount = parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || d.bond_investment_amount || d.bondInvestmentAmount || d.service_price || d.servicePrice || receipt.investment_amount || receipt.amount || receipt.bond_investment_amount || receipt.product_details?.bond?.transaction?.amount || 0)
+
     const mergedForEval = {
       ...receipt,
       ...d,
       product_category: productCategory,
-      investment_amount: parseFloat(d.investmentAmount || d.investment_amount || d.amount || d.fd_deposit_amount || d.service_price || d.servicePrice || receipt.investment_amount || receipt.amount || 0),
-      txn_type: d.txn_type || d.txnType || d.transaction_type || d.transactionType || receipt.txn_type || receipt.transaction_type || 'LUMPSUM',
+      investment_amount: updateInvAmount,
+      txn_type: d.txn_type || d.txnType || d.bond_transaction_type || d.fd_transaction_type || d.transaction_type || d.transactionType || receipt.txn_type || receipt.transaction_type || 'LUMPSUM',
       date: d.date || receipt.date
     }
 
@@ -2388,6 +2571,35 @@ const updateReceiptHandler = async (req, res) => {
       } catch (evalErr) {
         console.warn('Failed to evaluate CC SI rules on edit:', evalErr.message)
       }
+
+      // Scheme-level fallback for updates if still 0
+      if (updateInvAmount > 0 && collectionCredit === 0 && serviceIncome === 0) {
+        try {
+          if ((productCategory === 'BOND' || productCategory === 'NCD')) {
+            const issuerKey = d.bond_issuer_key || d.issuer_key || receipt.bond_issuer_key || receipt.product_details?.bond?.issuer?.key
+            const schemeId = d.bond_scheme_id || d.scheme_id || receipt.bond_scheme_id || receipt.product_details?.bond?.product?.id
+            const schemeName = d.bond_scheme_name || d.scheme_name || d.schemeName || receipt.bond_scheme_name || receipt.product_details?.bond?.product?.name
+            let issuers = []
+            if (issuerKey) {
+              issuers = await q(`FOR issuer IN ncd_bond_issuers FILTER issuer._key == @issuer_key LIMIT 1 RETURN issuer`, { issuer_key: issuerKey })
+            } else {
+              issuers = await q(`FOR issuer IN ncd_bond_issuers FILTER (issuer.schemes != null AND (issuer.schemes[*].scheme_id ANY == @scheme_id OR issuer.schemes[*].scheme_name ANY == @scheme_name)) LIMIT 1 RETURN issuer`, { scheme_id: schemeId || '', scheme_name: schemeName || '' })
+            }
+            if (issuers.length > 0) {
+              const scheme = (issuers[0].schemes || []).find(s => (schemeId && String(s.scheme_id) === String(schemeId)) || (schemeName && (s.scheme_name === schemeName || s.description_short === schemeName)))
+              if (scheme) {
+                const ccPercent = parseFloat(scheme.cc || 0)
+                const siPercent = parseFloat(scheme.si || 0)
+                if (!Number.isNaN(ccPercent) && ccPercent !== 0) collectionCredit = Math.round(((ccPercent / 100) * updateInvAmount) * 100) / 100
+                if (!Number.isNaN(siPercent) && siPercent !== 0) serviceIncome = Math.round(((siPercent / 100) * updateInvAmount) * 100) / 100
+                if (ccPercent > 0 || siPercent > 0) ccSiRuleLabel = `Bond Scheme: ${scheme.scheme_name || scheme.scheme_id} (${ccPercent}% CC, ${siPercent}% SI)`
+              }
+            }
+          }
+        } catch (schemeErr) {
+          console.warn('Failed to evaluate scheme CC/SI fallback on edit:', schemeErr.message)
+        }
+      }
     }
 
     const updates = {
@@ -2401,7 +2613,9 @@ const updateReceiptHandler = async (req, res) => {
       total_cc: Number(collectionCredit) + (Number(receipt.additional_cc) || 0),
       total_si: Number(serviceIncome) + (Number(receipt.additional_si) || 0),
       cc_si_rule_id: ccSiRuleId,
-      cc_si_rule_label: ccSiRuleLabel
+      cc_si_rule_label: ccSiRuleLabel,
+      pdf_data: null,
+      pdf_generated_at: null
     }
 
     const updateRows = await q(`
@@ -2423,11 +2637,64 @@ const updateReceiptHandler = async (req, res) => {
 
 router.put('/:id', requireAuth, updateReceiptHandler)
 
-// Add or update additional CC/SI bonus on a receipt
+// Admin-only toggle for verifying duplicate transactions as legitimate non-duplicates
+router.patch('/:id/verify-duplicate', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const id = req.params.id
+    const { verified = true } = req.body || {}
+    const isVerified = Boolean(verified)
+
+    const updateDoc = isVerified
+      ? {
+          is_verified_non_duplicate: true,
+          verified_non_duplicate_by: req.user?.name || req.user?.email || 'Admin',
+          verified_non_duplicate_at: new Date().toISOString()
+        }
+      : {
+          is_verified_non_duplicate: false,
+          verified_non_duplicate_by: null,
+          verified_non_duplicate_at: null
+        }
+
+    const rows = await q(`
+      UPDATE { _key: @id }
+      WITH @updateDoc
+      IN receipts
+      RETURN NEW
+    `, { id, updateDoc })
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'not_found', detail: 'Receipt not found' })
+    }
+
+    res.json({
+      success: true,
+      id,
+      is_verified_non_duplicate: rows[0].is_verified_non_duplicate,
+      verified_by: rows[0].verified_non_duplicate_by,
+      verified_at: rows[0].verified_non_duplicate_at
+    })
+  } catch (error) {
+    console.error('Error verifying duplicate receipt:', error)
+    res.status(500).json({ error: 'server_error', detail: error.message })
+  }
+})
+
+// Add, update, or remove additional CC/SI bonus on a receipt
 router.put('/:id/bonus', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const id = req.params.id
     const { additional_cc = 0, additional_si = 0 } = req.body || {}
+
+    const addCC = Math.max(0, Number(additional_cc) || 0)
+    const addSI = Math.max(0, Number(additional_si) || 0)
+
+    if (Number(additional_cc) < 0 || Number(additional_si) < 0) {
+      return res.status(400).json({
+        error: 'invalid_bonus',
+        detail: 'Bonus amounts cannot be negative.'
+      })
+    }
 
     // Load current receipt
     const rows = await q(`
@@ -2445,38 +2712,28 @@ router.put('/:id/bonus', requireAuth, requireRole('admin'), async (req, res) => 
     const existingCC = Number(receipt.additional_cc) || 0
     const existingSI = Number(receipt.additional_si) || 0
 
-    const addCC = Number(additional_cc) || 0
-    const addSI = Number(additional_si) || 0
-
-    if ((existingCC > 0 && addCC < existingCC) || (existingSI > 0 && addSI < existingSI)) {
-      return res.status(409).json({
-        error: 'bonus_immutable',
-        detail: 'Bonus points cannot be removed or reduced once added.'
-      })
+    // Derive base CC/SI amounts safely (excluding any existing additional bonus)
+    let baseCC = 0
+    if (typeof receipt.cc_amount === 'number' && Number.isFinite(receipt.cc_amount)) {
+      baseCC = Number(receipt.cc_amount)
+    } else if (typeof receipt.total_cc === 'number' && Number.isFinite(receipt.total_cc)) {
+      baseCC = Math.max(0, Number(receipt.total_cc) - existingCC)
+    } else if (receipt.collection_credit != null || receipt.cc != null) {
+      baseCC = Number(receipt.collection_credit || receipt.cc || 0)
+    } else if (receipt.calculations && (receipt.calculations.collection_credit != null || receipt.calculations.cc != null)) {
+      baseCC = Number(receipt.calculations.collection_credit || receipt.calculations.cc || 0)
     }
 
-    // Derive base CC/SI amounts (excluding any existing additional bonus)
-    const baseCC =
-      (typeof receipt.total_cc === 'number' && receipt.total_cc !== 0)
-        ? Number(receipt.total_cc)
-        : (typeof receipt.cc_amount === 'number' && receipt.cc_amount !== 0)
-          ? Number(receipt.cc_amount)
-          : (receipt.collection_credit != null || receipt.cc != null)
-            ? Number(receipt.collection_credit || receipt.cc || 0)
-            : (receipt.calculations && (receipt.calculations.collection_credit != null || receipt.calculations.cc != null))
-              ? Number(receipt.calculations.collection_credit || receipt.calculations.cc || 0)
-              : 0
-
-    const baseSI =
-      (typeof receipt.total_si === 'number' && receipt.total_si !== 0)
-        ? Number(receipt.total_si)
-        : (typeof receipt.si_amount === 'number' && receipt.si_amount !== 0)
-          ? Number(receipt.si_amount)
-          : (receipt.service_income != null || receipt.si != null)
-            ? Number(receipt.service_income || receipt.si || 0)
-            : (receipt.calculations && (receipt.calculations.service_income != null || receipt.calculations.si != null))
-              ? Number(receipt.calculations.service_income || receipt.calculations.si || 0)
-              : 0
+    let baseSI = 0
+    if (typeof receipt.si_amount === 'number' && Number.isFinite(receipt.si_amount)) {
+      baseSI = Number(receipt.si_amount)
+    } else if (typeof receipt.total_si === 'number' && Number.isFinite(receipt.total_si)) {
+      baseSI = Math.max(0, Number(receipt.total_si) - existingSI)
+    } else if (receipt.service_income != null || receipt.si != null) {
+      baseSI = Number(receipt.service_income || receipt.si || 0)
+    } else if (receipt.calculations && (receipt.calculations.service_income != null || receipt.calculations.si != null)) {
+      baseSI = Number(receipt.calculations.service_income || receipt.calculations.si || 0)
+    }
 
     const updates = {
       additional_cc: addCC,
@@ -2484,7 +2741,10 @@ router.put('/:id/bonus', requireAuth, requireRole('admin'), async (req, res) => 
       cc_amount: baseCC,
       si_amount: baseSI,
       total_cc: baseCC + addCC,
-      total_si: baseSI + addSI
+      total_si: baseSI + addSI,
+      updated_at: new Date().toISOString(),
+      pdf_data: null,
+      pdf_generated_at: null
     }
 
     await q(`
@@ -2494,7 +2754,14 @@ router.put('/:id/bonus', requireAuth, requireRole('admin'), async (req, res) => 
       RETURN NEW
     `, { id, updates })
 
-    res.status(200).json({ message: 'Bonus updated successfully', receipt_id: id, additional_cc: addCC, additional_si: addSI })
+    res.status(200).json({
+      message: 'Bonus updated successfully',
+      receipt_id: id,
+      additional_cc: addCC,
+      additional_si: addSI,
+      total_cc: baseCC + addCC,
+      total_si: baseSI + addSI
+    })
   } catch (error) {
     console.error('Error updating receipt bonus:', error)
     res.status(500).json({ error: 'server_error', detail: error.message })

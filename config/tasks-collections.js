@@ -38,6 +38,8 @@ const INDEXES = [
   { collection: 'tasks', type: 'persistent', fields: ['customer_id'], sparse: true },
   { collection: 'tasks', type: 'persistent', fields: ['lead_id'], sparse: true },
   { collection: 'tasks', type: 'persistent', fields: ['receipt_id'], sparse: true },
+  { collection: 'tasks', type: 'persistent', fields: ['created_at'] },
+  { collection: 'tasks', type: 'persistent', fields: ['kind', 'status', 'created_at'] },
   { collection: 'tasks', type: 'persistent', fields: ['sla_tier'], sparse: true },
   { collection: 'tasks', type: 'fulltext', fields: ['title'], minLength: 2 },
 

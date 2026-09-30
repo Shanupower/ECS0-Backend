@@ -39,7 +39,7 @@ import {
 export async function runFundWiseMf(user, query) {
   const { filterClause, bindVars } = await buildReceiptReportFilters(user, query, {})
   const exportMode = query.format != null
-  const scheme = `((receipt.product != null && receipt.product.name != null) ? receipt.product.name : receipt.scheme_name)`
+  const scheme = SCHEME_NAME_AQL
   const aql = `
     FOR receipt IN receipts
     ${filterClause}

@@ -58,6 +58,24 @@ function generateDisplayName(baseName, plan, option) {
 }
 
 // Helper function to check ETF + IDCW warning
+
+router.get('/stats', async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0]
+    const result = await q(`
+      RETURN {
+        total: LENGTH(FOR s IN mf_schemes RETURN 1),
+        activeCount: LENGTH(FOR s IN mf_schemes FILTER s.is_active != false RETURN 1),
+        inactiveCount: LENGTH(FOR s IN mf_schemes FILTER s.is_active == false RETURN 1),
+        activeNfoCount: LENGTH(FOR s IN mf_schemes FILTER s.is_nfo == true AND (s.nfo_validity == null OR s.nfo_validity >= @today) RETURN 1),
+        inactiveNonNfoCount: LENGTH(FOR s IN mf_schemes FILTER s.is_active == false AND (s.is_nfo == false OR s.is_nfo == null) RETURN 1)
+      }
+    `, { today })
+    res.json(result[0] || {})
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 function checkETFIDCWWarning(category, subCategory, option) {
   const isETF = /ETF|Index/i.test(category || '') || /ETF|Index/i.test(subCategory || '')
   const isIDCW = option === 'IDCW_PAYOUT' || option === 'IDCW_REINVEST'
@@ -238,13 +256,16 @@ router.get('/amc/:amc_code', async (req, res) => {
     const categories = getAmcCategories(amc)
     const legacyCategory = amc?.amc_category && VALID_AMC_CATEGORIES.includes(amc.amc_category) ? amc.amc_category : 'MF'
 
+    const includeInactive = req.query.include_inactive === 'true' || req.query.include_all === 'true'
+
     let schemes = await q(`
       FOR scheme IN mf_schemes
       FILTER scheme.amc_code == @amc_code
-      FILTER (scheme.is_nfo == false OR scheme.is_nfo == true AND scheme.nfo_validity >= @today)
+      FILTER (scheme.is_nfo == false OR (scheme.is_nfo == true AND scheme.nfo_validity >= @today))
+      FILTER @includeInactive == true OR scheme.is_active != false
       SORT scheme.scheme_name
       RETURN scheme
-    `, { amc_code, today })
+    `, { amc_code, today, includeInactive })
 
     const globalMins = await loadCategoryMinimums()
     schemes = schemes.map(s => {

@@ -510,6 +510,46 @@ export async function sendMisSummaryPdfReport(res, filenameBase, data, meta) {
   doc.end()
 }
 
+export async function sendNfoReportAllXlsxReport(res, filenameBase, sections, meta) {
+  const stamp = new Date().toISOString().split('T')[0]
+  const workbook = new ExcelJS.Workbook()
+
+  for (const section of sections) {
+    const sheetName = (section.sheetName || section.title).replace(/[\\/*?:[\]]/g, ' ').slice(0, 31)
+    const sheet = workbook.addWorksheet(sheetName)
+    const headerRowIndex = appendXlsxHeaderBlock(sheet, { ...meta, reportTitle: `NFO Report – ${section.title}` })
+    styleXlsxHeaderRow(sheet, headerRowIndex, section.headers)
+    for (const row of section.rows) sheet.addRow(row)
+  }
+
+  const buf = await workbook.xlsx.writeBuffer()
+  res.setHeader(
+    'Content-Type',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  )
+  res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}_${stamp}.xlsx"`)
+  res.send(Buffer.from(buf))
+}
+
+export async function sendNfoReportAllPdfReport(res, filenameBase, sections, meta) {
+  const stamp = new Date().toISOString().split('T')[0]
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}_${stamp}.pdf"`)
+
+  const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 28 })
+  doc.pipe(res)
+  drawPdfHeader(doc, meta)
+
+  sections.forEach((section, index) => {
+    if (index > 0) {
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: 28 })
+      drawPdfHeader(doc, { ...meta, reportTitle: `NFO Report – ${section.title}` })
+    }
+    drawPdfTable(doc, section.headers, section.rows, { sectionTitle: section.title })
+  })
+  doc.end()
+}
+
 /**
  * Build CSV string (for tests or inline use).
  * @param {string[]} headers

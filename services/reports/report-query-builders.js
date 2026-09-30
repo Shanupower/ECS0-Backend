@@ -10,7 +10,8 @@ import {
   parseProductCategories,
   parseSchemeCategories,
   parseIssuerNames,
-  parseSchemeNames
+  parseSchemeNames,
+  parseTxnTypes
 } from '../../utils/query-list.js'
 import { buildReceiptScopeFilter, appendReceiptStatusFilter } from './receipt-scope-filter.js'
 
@@ -49,6 +50,20 @@ export function appendReceiptContentFilters(filterConditions, bindVars, query) {
   if (schemeCategories.length > 0) {
     filterConditions.push(`(${MF_SCHEME_CATEGORY_AQL} IN @scheme_categories)`)
     bindVars.scheme_categories = schemeCategories
+  }
+
+  const txnTypes = parseTxnTypes(query)
+  if (txnTypes.length > 0) {
+    // Match against the canonical transaction type AQL (transaction.type > txn_type > transaction_type > mode)
+    filterConditions.push(`(
+      LOWER(TRIM(TO_STRING(
+        (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
+          ? receipt.transaction.type
+          : ((receipt.txn_type != null && receipt.txn_type != "") ? receipt.txn_type
+          : ((receipt.transaction_type != null && receipt.transaction_type != "") ? receipt.transaction_type : receipt.mode))
+      ))) IN @txn_types
+    )`)
+    bindVars.txn_types = txnTypes.map((t) => t.toLowerCase())
   }
 
   const issuerNames = parseIssuerNames(query).map((s) => String(s).trim().toLowerCase())

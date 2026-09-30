@@ -383,8 +383,10 @@ router.get('/transactions', requireAuth, async (req, res) => {
         transaction_type_canonical: (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "") ? receipt.transaction.type : ((receipt.txn_type != null && receipt.txn_type != "") ? receipt.txn_type : ((receipt.transaction_type != null && receipt.transaction_type != "") ? receipt.transaction_type : receipt.mode)),
         // Prefer txn_type for MF mode display; fallback to legacy receipt.mode
         mode: receipt.txn_type || receipt.mode || null,
-        switch_from: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.from_scheme_name : null,
-        switch_to: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.to_scheme_name : null,
+        switch_from: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.from_scheme_name : receipt.switch_from_scheme_name,
+        switch_to: (receipt.transaction != null && receipt.transaction.switch_over != null) ? receipt.transaction.switch_over.to_scheme_name : receipt.switch_to_scheme_name,
+        stp_target_scheme_name: (receipt.transaction != null && receipt.transaction.stp != null && receipt.transaction.stp.to_scheme_name != null) ? receipt.transaction.stp.to_scheme_name : receipt.stp_target_scheme_name,
+        stp_original_amount: (receipt.transaction != null && receipt.transaction.stp != null && receipt.transaction.stp.original_amount != null) ? receipt.transaction.stp.original_amount : receipt.stp_original_amount,
         payment: receipt.payment || null,
         transaction_details: receipt.transaction_details || null
       }
@@ -414,6 +416,29 @@ router.get('/transactions', requireAuth, async (req, res) => {
 
     const resolveExportFolioApp = (r) =>
       r.folio_policy_no || r.insurance_policy_number_raw || r.fd_application_number || r.bond_application_number || ''
+
+    const resolveExportScheme = (r) => {
+      const txnType = String(r.transaction_type_canonical || r.transaction_type || r.txn_type || r.mode || '').trim().toUpperCase()
+      const isSwitch = txnType === 'SWITCH OVER' || txnType === 'SWITCHOVER' || txnType === 'SWITCH_OVER' || Boolean(r.switch_to)
+      if (isSwitch) {
+        return r.switch_to || r.scheme_name || ''
+      }
+      const isStp = txnType === 'STP' || Boolean(r.stp_target_scheme_name)
+      if (isStp) {
+        return r.stp_target_scheme_name || r.scheme_name || ''
+      }
+      return r.scheme_name || ''
+    }
+
+    const resolveExportAmount = (r) => {
+      const txnType = String(r.transaction_type_canonical || r.transaction_type || r.txn_type || r.mode || '').trim().toUpperCase()
+      const isStp = txnType === 'STP' || Boolean(r.stp_target_scheme_name)
+      if (isStp && r.stp_original_amount != null && r.stp_original_amount !== '') {
+        const amt = Number(r.stp_original_amount)
+        if (Number.isFinite(amt) && amt > 0) return amt
+      }
+      return r.investment_amount || 0
+    }
 
     const headers = [
       'Receipt Number', 'Receipt Date', 'Branch', 'Employee Code',
@@ -459,9 +484,9 @@ router.get('/transactions', requireAuth, async (req, res) => {
         fixUtf8Mojibake(r.pan || ''),
         fixUtf8Mojibake(r.product_category || ''),
         fixUtf8Mojibake(resolveExportIssuer(r)),
-        fixUtf8Mojibake(r.scheme_name || ''),
+        fixUtf8Mojibake(resolveExportScheme(r)),
         fixUtf8Mojibake(resolveExportFolioApp(r)),
-        r.investment_amount || 0,
+        resolveExportAmount(r),
         r.cc || 0,
         siVal,
         r.status || 'Pending',
@@ -505,10 +530,10 @@ router.get('/transactions', requireAuth, async (req, res) => {
           pan: r.pan || '',
           product_category: r.product_category || '',
           issuer: resolveExportIssuer(r),
-          scheme_name: r.scheme_name || '',
+          scheme_name: resolveExportScheme(r),
           folio_policy_no: r.folio_policy_no || '',
           folio_policy_app_no: resolveExportFolioApp(r),
-          investment_amount: r.investment_amount || 0,
+          investment_amount: resolveExportAmount(r),
           cc: r.cc || 0,
           si: req.user.role === 'admin' ? (r.si || 0) : null,
           status: r.status || 'Pending',

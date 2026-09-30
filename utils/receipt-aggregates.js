@@ -3,9 +3,13 @@
 // how investments, collection credit (CC), and service income (SI) are
 // derived from a receipt document.
 
-// Investment amount per receipt: nested tree first (transaction.amount, product_details.fd), then legacy flat
+// Investment amount per receipt: prioritize STP original amount for STP, then nested tree (transaction.amount, product_details.fd), then legacy flat
 export const INV_AMOUNT_AQL = `(
-  (TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0)
+  (receipt.transaction != null && receipt.transaction.stp != null && receipt.transaction.stp.original_amount != null && (TO_NUMBER(receipt.transaction.stp.original_amount) || 0) > 0)
+    ? (TO_NUMBER(receipt.transaction.stp.original_amount) || 0)
+  : (receipt.stp_original_amount != null && (TO_NUMBER(receipt.stp_original_amount) || 0) > 0)
+    ? (TO_NUMBER(receipt.stp_original_amount) || 0)
+  : (TO_NUMBER(receipt.transaction.amount) || 0) != 0 ? (TO_NUMBER(receipt.transaction.amount) || 0)
   : (receipt.product_details != null && receipt.product_details.fd != null && receipt.product_details.fd.deposit != null && receipt.product_details.fd.deposit.amount != null) ? (TO_NUMBER(receipt.product_details.fd.deposit.amount) || 0)
   : (TO_NUMBER(receipt.investment_amount) || 0) != 0 ? (TO_NUMBER(receipt.investment_amount) || 0)
   : (TO_NUMBER(receipt.fd_deposit_amount) || 0) != 0 ? (TO_NUMBER(receipt.fd_deposit_amount) || 0)

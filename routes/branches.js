@@ -12,14 +12,14 @@ const router = express.Router()
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { includeInactive = '0' } = req.query
-    
+
     let filterClause = ''
     let bindVars = {}
-    
+
     if (includeInactive !== '1') {
       filterClause = 'FILTER branch.is_active == true'
     }
-    
+
     const query = `
       FOR branch IN branches
       ${filterClause}
@@ -46,7 +46,7 @@ router.get('/', requireAuth, async (req, res) => {
         updated_at: branch.updated_at
       }
     `
-    
+
     const branches = await q(query, bindVars)
     res.json(branches)
   } catch (error) {
@@ -59,14 +59,14 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/:branchCode', requireAuth, requireBranchAccess, async (req, res) => {
   try {
     const { branchCode } = req.params
-    
+
     const branches = await q(`
       FOR branch IN branches
       FILTER branch.branch_code == @branchCode
       LIMIT 1
       RETURN branch
     `, { branchCode })
-    
+
     if (!branches.length) return res.status(404).json({ error: 'not_found' })
 
     const doc = { ...branches[0] }
@@ -83,7 +83,7 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
   try {
     const { branchCode } = req.params
     const { from, to, includeDeleted = '0', date_basis } = req.query
-    
+
     // Get branch info
     const branchQuery = await q(`
       FOR branch IN branches
@@ -91,30 +91,30 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
       LIMIT 1
       RETURN branch
     `, { branchCode })
-    
+
     if (!branchQuery.length) return res.status(404).json({ error: 'branch_not_found' })
-    
+
     const branch = branchQuery[0]
     const branchIdentifiers = [branch._key, branch.branch_code, branch.branch_name].filter(Boolean).map(String)
-    
+
     // Build date filter (fallback to created_at date when receipt.date is missing)
     let dateFilter = ''
     let bindVars = {}
     const receiptDateExpr = effectiveDateExprAql(date_basis)
     const receiptDateKey = normalizeDateForCompareAql(receiptDateExpr)
-    
+
     if (from && to) {
       dateFilter = `FILTER ${receiptDateKey} >= @from AND ${receiptDateKey} <= @to`
       bindVars.from = from
       bindVars.to = to
     }
-    
+
     // Build deleted filter
     let deletedFilter = ''
     if (includeDeleted !== '1') {
       deletedFilter = 'FILTER receipt.is_deleted == false'
     }
-    
+
     // Get branch statistics - include pending if requested (same logic as /stats/summary)
     const includePending = req.query.includePending === '1'
     const statusFilter = includePending
@@ -135,9 +135,9 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
         total_si = SUM(${SI_AQL})
       RETURN { total_receipts, total_investments, total_cc, total_si }
     `
-    
+
     const stats = await q(statsQuery, { ...bindVars, branchIdentifiers })
-    
+
     // Get employee count for this branch
     const employeeCount = await q(`
       FOR user IN users
@@ -145,7 +145,7 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
       COLLECT WITH COUNT INTO total
       RETURN total
     `, { branchName: branch.branch_name })
-    
+
     // Get customer count for this branch - use canonical branch key and customer.branches
     const branchKey = branch._key
     const customerCount = await q(`
@@ -154,11 +154,11 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
         COLLECT WITH COUNT INTO total
         RETURN total
     `, { branchKey })
-    
+
     const totalInvestments = stats[0]?.total_investments || 0
     const totalCC = stats[0]?.total_cc || 0
     const totalSI = stats[0]?.total_si || 0
-    
+
     const result = {
       branch: {
         id: branch._key,
@@ -176,13 +176,13 @@ router.get('/:branchCode/stats', requireAuth, requireBranchAccess, async (req, r
         commissions: totalCC // Alias for backward compatibility
       }
     }
-    
+
     // Only include service income for admins
     if (req.user.role === 'admin') {
       result.statistics.service_income = totalSI
       result.statistics.total_si = totalSI
     }
-    
+
     res.json(result)
   } catch (error) {
     console.error('Error fetching branch stats:', error)
@@ -211,7 +211,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       includeDeleted = '0',
       date_basis
     } = req.query
-    
+
     // Get branch info
     const branchQuery = await q(`
       FOR branch IN branches
@@ -219,16 +219,16 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       LIMIT 1
       RETURN branch
     `, { branchCode })
-    
+
     if (!branchQuery.length) return res.status(404).json({ error: 'branch_not_found' })
-    
+
     const branch = branchQuery[0]
     const branchIdentifiers = [branch._key, branch.branch_code, branch.branch_name].filter(Boolean).map(String)
-    
+
     // Sanitize pagination
     const p = Math.max(1, parseInt(page, 10) || 1)
     const s = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
-    
+
     // Sanitize sort
     const [sortCol, sortDirRaw] = String(sort).split(':')
     const sortDir = String(sortDirRaw || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC'
@@ -240,14 +240,14 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       orderBy === 'amount'
         ? effectiveAmountExpr
         : (orderBy === 'date' ? dateExpr : `receipt.${orderBy}`)
-    
+
     const numLimit = Math.min(200, Math.max(1, parseInt(size, 10) || 20))
     const numPage = Math.max(1, parseInt(page, 10) || 1)
     const numOffset = (numPage - 1) * numLimit
 
     let filterClause = 'FILTER receipt.branch IN @branchIdentifiers'
     let bindVars = { branchIdentifiers }
-    
+
     // Date filter (fallback to created_at date when receipt.date is missing)
     const receiptDateExpr = effectiveDateExprAql(date_basis)
     const receiptDateKey = normalizeDateForCompareAql(receiptDateExpr)
@@ -256,7 +256,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       bindVars.from = from
       bindVars.to = to
     }
-    
+
     if (category) {
       filterClause = appendCategoryToFilterString(filterClause, bindVars, category)
     }
@@ -283,7 +283,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       filterClause += ' AND (receipt.emp_code == @emp_code OR (receipt.employee != null && receipt.employee.code == @emp_code))'
       bindVars.emp_code = emp_code
     }
-    
+
     // Deleted filter
     if (includeDeleted !== '1') {
       filterClause += ' AND receipt.is_deleted == false'
@@ -317,7 +317,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
       filterClause += ` AND (${effectiveAmountExpr}) <= @amount_max`
       bindVars.amount_max = maxAmt
     }
-    
+
     const query = `
       FOR receipt IN receipts
       ${filterClause}
@@ -327,29 +327,29 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
         media_count: LENGTH(receipt.files || [])
       })
     `
-    
+
     const countQuery = `
       FOR receipt IN receipts
       ${filterClause}
       COLLECT WITH COUNT INTO total
       RETURN total
     `
-    
+
     // Create separate bindVars for count query (without limit/offset)
     const countBindVars = { ...bindVars }
     const [rows, totalResult] = await Promise.all([
       q(query, bindVars),
       q(countQuery, countBindVars)
     ])
-    
+
     const total = totalResult[0] || 0
-    
-    res.json({ 
+
+    res.json({
       branch: branch.branch_name,
-      page: numPage, 
-      size: numLimit, 
-      total, 
-      items: rows 
+      page: numPage,
+      size: numLimit,
+      total,
+      items: rows
     })
   } catch (error) {
     console.error('Error fetching branch receipts:', error)
@@ -361,7 +361,7 @@ router.get('/:branchCode/receipts', requireAuth, requireBranchAccess, async (req
 router.post('/', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const { branch_code, branch_name, branch_type, address, phone, email, monthly_target } = req.body
-    
+
     // Validate required fields
     const branchCodeValidation = validateBranchCode(branch_code, true)
     if (!branchCodeValidation.valid) {
@@ -564,9 +564,9 @@ router.delete('/:branchCode', requireAuth, requireRole('admin'), async (req, res
     `, { branchCode })
 
     if (branchUsers.length > 0) {
-      return res.status(409).json({ 
-        error: 'branch_has_users', 
-        detail: 'Cannot delete branch with active users. Please reassign users first.' 
+      return res.status(409).json({
+        error: 'branch_has_users',
+        detail: 'Cannot delete branch with active users. Please reassign users first.'
       })
     }
 

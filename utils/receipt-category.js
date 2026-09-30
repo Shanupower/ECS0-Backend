@@ -42,6 +42,20 @@ export function getEffectiveCategory(receipt) {
     return mfSubCat
   }
 
+  // Handle Insurance sub-categories (INS_LIFE, INS_HEALTH, INS_GENERAL)
+  if (upper === 'INS' || upper === 'INSURANCE') {
+    const insType = toTrimmedString(
+      receipt?.insurance_type ?? 
+      receipt?.insurance_category ?? 
+      receipt?.product_details?.insurance?.issuer?.type ??
+      receipt?.product_details?.insurance?.type
+    ).toLowerCase()
+    if (insType.includes('life')) return 'INS_LIFE'
+    if (insType.includes('health') || insType.includes('mediclaim')) return 'INS_HEALTH'
+    if (insType.includes('general') || insType.includes('motor') || insType.includes('travel') || insType.includes('fire')) return 'INS_GENERAL'
+    return 'INS'
+  }
+
   if (upper === 'FD' && isGovtOrPostOfficeIssuer(getIssuerTypeSignal(receipt))) {
     return 'GOVT_FD'
   }
