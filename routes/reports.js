@@ -53,6 +53,12 @@ import {
   nfoReportExportHeaders,
   nfoReportRowToArray
 } from '../services/reports/nfo-report.js'
+import {
+  runBranchCategoryReport,
+  sendBranchCategoryXlsxReport,
+  sendBranchCategoryCsvReport,
+  sendBranchCategoryPdfReport
+} from '../services/reports/branch-category-report.js'
 
 const router = express.Router()
 
@@ -84,6 +90,14 @@ const REPORT_REGISTRY = [
     description: 'All product categories grouped by scheme and type, including FD cumulative type.',
     path: '/api/reports/category-summary',
     icon: 'Boxes'
+  },
+  {
+    id: 'branch-category-summary',
+    title: 'Branch & Category-wise Report',
+    description: 'Branch-wise performance across product categories with applications and total amounts.',
+    path: '/api/reports/branch-category-summary',
+    icon: 'Building2',
+    group: 'Operational Reports'
   },
   {
     id: 'mf-fund',
@@ -451,6 +465,24 @@ router.get('/category-summary', async (req, res) => {
     res.json({ rows })
   } catch (e) {
     console.error('[reports] category-summary', e)
+    res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
+  }
+})
+
+router.get('/branch-category-summary', async (req, res) => {
+  try {
+    const fmt = exportFormat(req.reportQuery)
+    const data = await runBranchCategoryReport(req.user, req.reportQuery)
+    if (fmt) {
+      const meta = exportMetaFromQuery('branch-category-summary', req.reportQuery)
+      if (fmt === 'xlsx') await sendBranchCategoryXlsxReport(res, 'branch_category_wise', data, meta)
+      else if (fmt === 'pdf') await sendBranchCategoryPdfReport(res, 'branch_category_wise', data, meta)
+      else sendBranchCategoryCsvReport(res, 'branch_category_wise', data, meta)
+      return
+    }
+    res.json(data)
+  } catch (e) {
+    console.error('[reports] branch-category-summary', e)
     res.status(500).json({ error: 'server_error', detail: String(e.message || e) })
   }
 })

@@ -40,10 +40,17 @@ const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name !
 const PAN_AQL = `((receipt.investor != null && receipt.investor.pan != null) ? receipt.investor.pan : receipt.pan)`
 const STATUS_AQL = RECEIPT_STATUS_BUCKET_AQL
 const TXN_TYPE_AQL = `(
-  (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
-    ? receipt.transaction.type
-    : ((receipt.txn_type != null && receipt.txn_type != "") ? receipt.txn_type
-    : ((receipt.transaction_type != null && receipt.transaction_type != "") ? receipt.transaction_type : receipt.mode))
+  (receipt.transaction != null && receipt.transaction.switch_over != null)
+    ? "Switch Over"
+    : ((receipt.switch_to_scheme_name != null && receipt.switch_to_scheme_name != "")
+      ? "Switch Over"
+      : ((receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
+        ? ((LOWER(TRIM(TO_STRING(receipt.transaction.type))) IN ["switch", "switch over", "switchover", "switch_over", "switch-over"]) ? "Switch Over" : receipt.transaction.type)
+        : ((receipt.txn_type != null && receipt.txn_type != "")
+          ? ((LOWER(TRIM(TO_STRING(receipt.txn_type))) IN ["switch", "switch over", "switchover", "switch_over", "switch-over"]) ? "Switch Over" : receipt.txn_type)
+          : ((receipt.transaction_type != null && receipt.transaction_type != "")
+            ? ((LOWER(TRIM(TO_STRING(receipt.transaction_type))) IN ["switch", "switch over", "switchover", "switch_over", "switch-over"]) ? "Switch Over" : receipt.transaction_type)
+            : ((receipt.mode != null && LOWER(TRIM(TO_STRING(receipt.mode))) IN ["switch", "switch over", "switchover", "switch_over", "switch-over"]) ? "Switch Over" : receipt.mode)))))
 )`
 const BRANCH_CODE_AQL = `(
   LET raw_branch = receipt.branch

@@ -309,11 +309,22 @@ function drawPdfTable(doc, headers, rows, { sectionTitle = '' } = {}) {
     doc.y = y
   }
 
+  const formatPdfCell = (header, val) => {
+    if (val == null || val === '') return ''
+    if (pdfNumericHeader(header)) {
+      const num = Number(val)
+      if (Number.isFinite(num)) {
+        return Math.round(num).toLocaleString('en-IN', { maximumFractionDigits: 0 })
+      }
+    }
+    return String(val)
+  }
+
   const drawDataRow = (row) => {
     const fontSize = 7
     doc.font('Helvetica').fontSize(fontSize)
     const colHeights = headers.map((header, index) => {
-      const txt = row[index] == null ? '' : String(row[index])
+      const txt = formatPdfCell(header, row[index])
       return doc.heightOfString(txt, {
         width: colWidths[index] - cellPaddingX * 2,
         align: pdfNumericHeader(header) ? 'right' : 'left'
@@ -327,7 +338,7 @@ function drawPdfTable(doc, headers, rows, { sectionTitle = '' } = {}) {
       const width = colWidths[index]
       doc.rect(x, y, width, rowHeight).stroke(borderColor)
       doc.fillColor('#000000')
-      const txt = row[index] == null ? '' : String(row[index])
+      const txt = formatPdfCell(header, row[index])
       doc.text(txt, x + cellPaddingX, y + cellPaddingY, {
         width: width - cellPaddingX * 2,
         align: pdfNumericHeader(header) ? 'right' : 'left'

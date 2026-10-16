@@ -54,16 +54,47 @@ export function appendReceiptContentFilters(filterConditions, bindVars, query) {
 
   const txnTypes = parseTxnTypes(query)
   if (txnTypes.length > 0) {
-    // Match against the canonical transaction type AQL (transaction.type > txn_type > transaction_type > mode)
-    filterConditions.push(`(
-      LOWER(TRIM(TO_STRING(
-        (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
-          ? receipt.transaction.type
-          : ((receipt.txn_type != null && receipt.txn_type != "") ? receipt.txn_type
-          : ((receipt.transaction_type != null && receipt.transaction_type != "") ? receipt.transaction_type : receipt.mode))
-      ))) IN @txn_types
-    )`)
-    bindVars.txn_types = txnTypes.map((t) => t.toLowerCase())
+    const hasSwitch = txnTypes.some((t) => {
+      const s = String(t).trim().toLowerCase()
+      return s === 'switch' || s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over'
+    })
+
+    const expandedTypes = new Set()
+    for (const t of txnTypes) {
+      const s = String(t).trim().toLowerCase()
+      if (s === 'switch' || s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over') {
+        expandedTypes.add('switch over')
+        expandedTypes.add('switch')
+        expandedTypes.add('switchover')
+        expandedTypes.add('switch_over')
+        expandedTypes.add('switch-over')
+      } else {
+        expandedTypes.add(s)
+      }
+    }
+
+    bindVars.txn_types = Array.from(expandedTypes)
+
+    const canonicalTxnExpr = `LOWER(TRIM(TO_STRING(
+      (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
+        ? receipt.transaction.type
+        : ((receipt.txn_type != null && receipt.txn_type != "") ? receipt.txn_type
+        : ((receipt.transaction_type != null && receipt.transaction_type != "") ? receipt.transaction_type : receipt.mode))
+    )))`
+
+    if (hasSwitch) {
+      filterConditions.push(`(
+        ${canonicalTxnExpr} IN @txn_types
+        OR (receipt.transaction != null && receipt.transaction.switch_over != null)
+        OR (receipt.switch_to_scheme_name != null && receipt.switch_to_scheme_name != "")
+        OR (receipt.transaction != null && receipt.transaction.type IN ["Switch Over", "Switch", "SwitchOver", "SWITCH_OVER", "switch_over", "switch"])
+        OR (receipt.txn_type IN ["Switch Over", "Switch", "SwitchOver", "SWITCH_OVER", "switch_over", "switch"])
+        OR (receipt.transaction_type IN ["Switch Over", "Switch", "SwitchOver", "SWITCH_OVER", "switch_over", "switch"])
+        OR (receipt.mode IN ["Switch Over", "Switch", "SwitchOver", "SWITCH_OVER", "switch_over", "switch"])
+      )`)
+    } else {
+      filterConditions.push(`(${canonicalTxnExpr} IN @txn_types)`)
+    }
   }
 
   const issuerNames = parseIssuerNames(query).map((s) => String(s).trim().toLowerCase())

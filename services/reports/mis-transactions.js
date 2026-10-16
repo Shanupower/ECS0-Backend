@@ -19,10 +19,17 @@ import { computeMisMonthsFromRow } from './report-date-helpers.js'
 import { maskServiceIncomeTotals, sumNumericFields } from './report-totals.js'
 
 const TXN_TYPE_AQL = `(
-  (receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
-    ? receipt.transaction.type
-    : ((receipt.txn_type != null && receipt.txn_type != "") ? receipt.txn_type
-    : ((receipt.transaction_type != null && receipt.transaction_type != "") ? receipt.transaction_type : receipt.mode))
+  (receipt.transaction != null && receipt.transaction.switch_over != null)
+    ? "Switch Over"
+    : ((receipt.switch_to_scheme_name != null && receipt.switch_to_scheme_name != "")
+      ? "Switch Over"
+      : ((receipt.transaction != null && receipt.transaction.type != null && receipt.transaction.type != "")
+        ? ((LOWER(TRIM(TO_STRING(receipt.transaction.type))) IN ["switch", "switch over", "switchover", "switch_over", "switch-over"]) ? "Switch Over" : receipt.transaction.type)
+        : ((receipt.txn_type != null && receipt.txn_type != "")
+          ? ((LOWER(TRIM(TO_STRING(receipt.txn_type))) IN ["switch", "switch over", "switchover", "switch_over", "switch-over"]) ? "Switch Over" : receipt.txn_type)
+          : ((receipt.transaction_type != null && receipt.transaction_type != "")
+            ? ((LOWER(TRIM(TO_STRING(receipt.transaction_type))) IN ["switch", "switch over", "switchover", "switch_over", "switch-over"]) ? "Switch Over" : receipt.transaction_type)
+            : ((receipt.mode != null && LOWER(TRIM(TO_STRING(receipt.mode))) IN ["switch", "switch over", "switchover", "switch_over", "switch-over"]) ? "Switch Over" : receipt.mode)))))
 )`
 
 const INVESTOR_NAME_AQL = `((receipt.investor != null && receipt.investor.name != null) ? receipt.investor.name : receipt.investor_name)`
@@ -165,8 +172,18 @@ export async function runMisTransactions(user, query) {
     collection_credit: 0,
     incentive_paid: 0
   })
+function normalizeTxnType(v) {
+  if (!v) return ''
+  const s = String(v).trim().toLowerCase()
+  if (s === 'switch' || s === 'switch over' || s === 'switchover' || s === 'switch_over' || s === 'switch-over') {
+    return 'Switch Over'
+  }
+  return v
+}
+
   const masked = rows.map((r) => ({
     ...r,
+    transaction_type: normalizeTxnType(r.transaction_type),
     months: computeMisMonthsFromRow(r),
     incentive_paid: canViewServiceIncome(user) ? r.incentive_paid : null
   }))
